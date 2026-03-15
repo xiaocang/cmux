@@ -5688,11 +5688,15 @@ struct ContentView: View {
 
     private func workspaceDisplayName(_ workspace: Workspace) -> String {
         let custom = workspace.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let baseTitle: String
         if !custom.isEmpty {
-            return custom
+            baseTitle = custom
+        } else {
+            let title = workspace.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            baseTitle = title.isEmpty ? String(localized: "workspace.displayName.fallback", defaultValue: "Workspace") : title
         }
-        let title = workspace.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return title.isEmpty ? String(localized: "workspace.displayName.fallback", defaultValue: "Workspace") : title
+        let tag = workspace.tag?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return tag.isEmpty ? baseTitle : "[\(tag)] \(baseTitle)"
     }
 
     private func panelDisplayName(workspace: Workspace, panelId: UUID, fallback: String) -> String {
@@ -7788,6 +7792,21 @@ struct VerticalTabsSidebar: View {
                         // Space for traffic lights / fullscreen controls
                         Spacer()
                             .frame(height: trafficLightPadding)
+
+                        // Leader key mode indicator
+                        if AppDelegate.shared?.isLeaderModeActive == true {
+                            HStack {
+                                Spacer()
+                                Text(String(localized: "leader.mode.indicator", defaultValue: "LEADER"))
+                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.accentColor.opacity(0.2))
+                                    .cornerRadius(3)
+                                Spacer()
+                            }
+                            .padding(.bottom, 4)
+                        }
 
                         LazyVStack(spacing: tabRowSpacing) {
                             ForEach(Array(tabManager.tabs.enumerated()), id: \.element.id) { index, tab in
@@ -10303,7 +10322,7 @@ private struct TabItemView: View, Equatable {
                         .foregroundColor(activeSecondaryColor(0.8))
                 }
 
-                Text(tab.title)
+                Text(tab.displayTitle)
                     .font(.system(size: 12.5, weight: titleFontWeight))
                     .foregroundColor(activePrimaryTextColor)
                     .lineLimit(1)

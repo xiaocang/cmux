@@ -1903,6 +1903,8 @@ class TerminalController {
             return v2Result(id: id, self.v2WorkspaceReorder(params: params))
         case "workspace.rename":
             return v2Result(id: id, self.v2WorkspaceRename(params: params))
+        case "workspace.set_tag":
+            return v2Result(id: id, self.v2WorkspaceSetTag(params: params))
         case "workspace.action":
             return v2Result(id: id, self.v2WorkspaceAction(params: params))
         case "workspace.next":
@@ -2277,6 +2279,7 @@ class TerminalController {
             "workspace.move_to_window",
             "workspace.reorder",
             "workspace.rename",
+            "workspace.set_tag",
             "workspace.action",
             "workspace.next",
             "workspace.previous",
@@ -3054,7 +3057,8 @@ class TerminalController {
                     "selected": ws.id == tabManager.selectedTabId,
                     "pinned": ws.isPinned,
                     "current_directory": v2OrNull(ws.currentDirectory),
-                    "custom_color": v2OrNull(ws.customColor)
+                    "custom_color": v2OrNull(ws.customColor),
+                    "tag": v2OrNull(ws.tag)
                 ]
             }
         }
@@ -3309,6 +3313,43 @@ class TerminalController {
             "title": title
         ])
     }
+
+    private func v2WorkspaceSetTag(params: [String: Any]) -> V2CallResult {
+        guard let tabManager = v2ResolveTabManager(params: params) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
+        }
+        guard let workspaceId = v2UUID(params, "workspace_id") else {
+            return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
+        }
+
+        let tagRaw = v2String(params, "tag")
+        let tag = tagRaw?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let effectiveTag = (tag?.isEmpty ?? true) ? nil : tag
+
+        var success = false
+        v2MainSync {
+            guard let ws = tabManager.tabs.first(where: { $0.id == workspaceId }) else { return }
+            ws.setTag(effectiveTag)
+            success = true
+        }
+
+        guard success else {
+            return .err(code: "not_found", message: "Workspace not found", data: [
+                "workspace_id": workspaceId.uuidString,
+                "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId)
+            ])
+        }
+
+        let windowId = v2ResolveWindowId(tabManager: tabManager)
+        return .ok([
+            "workspace_id": workspaceId.uuidString,
+            "workspace_ref": v2Ref(kind: .workspace, uuid: workspaceId),
+            "window_id": v2OrNull(windowId?.uuidString),
+            "window_ref": v2Ref(kind: .window, uuid: windowId),
+            "tag": v2OrNull(effectiveTag)
+        ])
+    }
+
     private func v2WorkspaceNext(params: [String: Any]) -> V2CallResult {
         guard let tabManager = v2ResolveTabManager(params: params) else {
             return .err(code: "unavailable", message: "TabManager not available", data: nil)

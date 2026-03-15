@@ -153,6 +153,7 @@ extension Workspace {
         return SessionWorkspaceSnapshot(
             processTitle: processTitle,
             customTitle: customTitle,
+            tag: tag,
             customColor: customColor,
             isPinned: isPinned,
             currentDirectory: currentDirectory,
@@ -192,6 +193,7 @@ extension Workspace {
 
         applyProcessTitle(snapshot.processTitle)
         setCustomTitle(snapshot.customTitle)
+        setTag(snapshot.tag)
         setCustomColor(snapshot.customColor)
         isPinned = snapshot.isPinned
 
@@ -912,6 +914,7 @@ final class Workspace: Identifiable, ObservableObject {
     let id: UUID
     @Published var title: String
     @Published var customTitle: String?
+    @Published var tag: String?
     @Published var isPinned: Bool = false
     @Published var customColor: String?  // hex string, e.g. "#C0392B"
     @Published var currentDirectory: String
@@ -1661,6 +1664,18 @@ final class Workspace: Identifiable, ObservableObject {
             customTitle = trimmed
             self.title = trimmed
         }
+    }
+
+    func setTag(_ newTag: String?) {
+        let trimmed = newTag?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        tag = trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Title with tag prefix for sidebar display. Dynamic title still updates; tag is fixed.
+    var displayTitle: String {
+        let t = tag?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if t.isEmpty { return title }
+        return "[\(t)] \(title)"
     }
 
     // MARK: - Directory Updates

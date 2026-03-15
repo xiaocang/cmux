@@ -1965,6 +1965,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private let windowDecorationsController = WindowDecorationsController()
     private var menuBarExtraController: MenuBarExtraController?
     private static let serviceErrorNoPath = NSString(string: String(localized: "error.clipboardFolderPath", defaultValue: "Could not load any folder path from the clipboard."))
+
+    // MARK: - Leader Key State
+
+    private enum LeaderKeyState {
+        case inactive
+        case waitingForSecondKey(timestamp: TimeInterval)
+    }
+
+    private var leaderKeyState: LeaderKeyState = .inactive
+    private var leaderKeyTimer: DispatchSourceTimer?
+    /// Published so ContentView can show a visual indicator when leader mode is active.
+    @objc dynamic var isLeaderModeActive: Bool = false
+
     private static let didInstallWindowKeyEquivalentSwizzle: Void = {
         let targetClass: AnyClass = NSWindow.self
         let originalSelector = #selector(NSWindow.performKeyEquivalent(with:))
@@ -7870,6 +7883,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 #endif
 
+        // MARK: Leader Key handling
+        let leaderShortcut = KeyboardShortcutSettings.shortcut(for: .leaderKey)
+        switch leaderKeyState {
+        case .inactive:
+            if matchShortcut(event: event, shortcut: leaderShortcut) {
+                leaderKeyState = .waitingForSecondKey(timestamp: ProcessInfo.processInfo.systemUptime)
+                isLeaderModeActive = true
+                startLeaderKeyTimer()
+                return true
+            }
+        case .waitingForSecondKey:
+            cancelLeaderMode()
+            // Double-press leader key: send the raw key through to terminal
+            if matchShortcut(event: event, shortcut: leaderShortcut) {
+                return false
+            }
+            // ESC cancels leader mode
+            if event.keyCode == 53 {
+                return true
+            }
+            // Try to dispatch the second key
+            if executeLeaderAction(event: event) {
+                return true
+            }
+            // Unrecognized second key: beep and consume
+            NSSound.beep()
+            return true
+        }
+
         // Don't steal shortcuts from close-confirmation alerts. Keep standard alert key
         // equivalents working and avoid surprising actions while the confirmation is up.
         let closeConfirmationTitles = [
@@ -9392,6 +9434,129 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             }
         }
         return false
+    }
+
+    // MARK: - Leader Key Helpers
+
+    private func startLeaderKeyTimer() {
+        cancelLeaderKeyTimer()
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 0.5)
+        timer.setEventHandler { [weak self] in
+            self?.cancelLeaderMode()
+        }
+        timer.resume()
+        leaderKeyTimer = timer
+    }
+
+    private func cancelLeaderKeyTimer() {
+        leaderKeyTimer?.cancel()
+        leaderKeyTimer = nil
+    }
+
+    private func cancelLeaderMode() {
+        leaderKeyState = .inactive
+        isLeaderModeActive = false
+        cancelLeaderKeyTimer()
+    }
+
+    /// Dispatch the second key after leader key activation.
+    /// Returns true if the key was recognized and handled.
+    private func executeLeaderAction(event: NSEvent) -> Bool {
+        let chars = event.charactersIgnoringModifiers ?? ""
+        let shifted = event.characters ?? ""
+
+        // Match shifted symbols by their produced character, letters by unshifted
+        switch shifted {
+        case "%":
+            // Split right (tmux: horizontal split)
+            _ = performSplitShortcut(direction: .right)
+            return true
+        case "\"":
+            // Split down (tmux: vertical split)
+            _ = performSplitShortcut(direction: .down)
+            return true
+        default:
+            break
+        }
+
+        switch chars.lowercased() {
+        case "o":
+            // Next surface
+            selectNextSurface()
+            return true
+        case "x":
+            // Close focused pane
+            closeFocusedPane()
+            return true
+        case "c":
+            // New workspace
+            if let tabManager { _ = tabManager.addWorkspace() }
+            return true
+        case "n":
+            // Next workspace
+            tabManager?.selectNextTab()
+            return true
+        case "p":
+            // Previous workspace
+            tabManager?.selectPreviousTab()
+            return true
+        case ",":
+            // Set workspace tag
+            beginSetWorkspaceTagFlow()
+            return true
+        case "z":
+            // Toggle split zoom
+            performToggleSplitZoom()
+            return true
+        case "[":
+            // Toggle terminal copy mode
+            performToggleTerminalCopyMode()
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func selectNextSurface() {
+        guard let tabManager, let ws = tabManager.selectedWorkspace else { return }
+        ws.bonsplitController.focusNextPane()
+    }
+
+    private func closeFocusedPane() {
+        guard let tabManager, let ws = tabManager.selectedWorkspace else { return }
+        guard let paneId = ws.bonsplitController.focusedPaneId else { return }
+        ws.bonsplitController.closePane(paneId)
+    }
+
+    private func performToggleSplitZoom() {
+        guard let tabManager, let ws = tabManager.selectedWorkspace else { return }
+        ws.bonsplitController.toggleZoom()
+    }
+
+    private func performToggleTerminalCopyMode() {
+        // Post notification to toggle copy mode on the focused terminal
+        NotificationCenter.default.post(name: .cmuxToggleTerminalCopyMode, object: nil)
+    }
+
+    private func beginSetWorkspaceTagFlow() {
+        guard let tabManager, let workspace = tabManager.selectedWorkspace else {
+            NSSound.beep()
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = String(localized: "alert.setWorkspaceTag.title", defaultValue: "Set Workspace Tag")
+        alert.informativeText = String(localized: "alert.setWorkspaceTag.message", defaultValue: "Enter a short tag prefix for this workspace.")
+        let input = NSTextField(string: workspace.tag ?? "")
+        input.placeholderString = String(localized: "alert.setWorkspaceTag.placeholder", defaultValue: "Tag (e.g., api, web)")
+        input.frame = NSRect(x: 0, y: 0, width: 240, height: 22)
+        alert.accessoryView = input
+        alert.addButton(withTitle: String(localized: "common.ok", defaultValue: "OK"))
+        alert.addButton(withTitle: String(localized: "common.cancel", defaultValue: "Cancel"))
+        alert.window.initialFirstResponder = input
+        if alert.runModal() == .alertFirstButtonReturn {
+            workspace.setTag(input.stringValue)
+        }
     }
 
     /// Match a shortcut against an event, handling normal keys.
