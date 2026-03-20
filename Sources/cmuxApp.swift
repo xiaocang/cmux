@@ -4131,9 +4131,13 @@ struct SettingsView: View {
     @AppStorage("sidebarTintOpacity") private var sidebarTintOpacity = SidebarTintDefaults.opacity
     @AppStorage("sidebarMatchTerminalBackground") private var sidebarMatchTerminalBackground = false
 
+    @AppStorage(LeaderKeySettings.enabledKey) private var leaderKeyEnabled = LeaderKeySettings.enabledDefault
+    @AppStorage(LeaderKeySettings.timeoutKey) private var leaderKeyTimeout = LeaderKeySettings.timeoutDefault
+    @AppStorage(LeaderKeySettings.workspaceTagsEnabledKey) private var workspaceTagsEnabled = LeaderKeySettings.workspaceTagsEnabledDefault
     @ObservedObject private var notificationStore = TerminalNotificationStore.shared
     @StateObject private var keyboardShortcutSettingsObserver = KeyboardShortcutSettingsObserver.shared
     @State private var shortcutResetToken = UUID()
+    @State private var leaderKeyResetToken = UUID()
     @State private var topBlurOpacity: Double = 0
     @State private var topBlurBaselineOffset: CGFloat?
     @State private var settingsTitleLeadingInset: CGFloat = 92
@@ -5831,6 +5835,64 @@ struct SettingsView: View {
 
                     GlobalHotkeySection()
 
+                    SettingsSectionHeader(title: String(localized: "settings.section.leaderKey", defaultValue: "Leader Key"))
+                        .accessibilityIdentifier("SettingsLeaderKeySection")
+                    SettingsCard {
+                        SettingsCardRow(
+                            String(localized: "settings.leaderKey.enabled", defaultValue: "Enable Leader Key"),
+                            subtitle: leaderKeyEnabled
+                                ? String(localized: "settings.leaderKey.enabled.subtitleOn", defaultValue: "Press the leader key prefix, then a sub-key to trigger an action.")
+                                : String(localized: "settings.leaderKey.enabled.subtitleOff", defaultValue: "Leader key is disabled. The prefix key will pass through to the terminal.")
+                        ) {
+                            Toggle("", isOn: $leaderKeyEnabled)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        if leaderKeyEnabled {
+                            SettingsCardDivider()
+
+                            SettingsCardRow(
+                                String(localized: "settings.leaderKey.timeout", defaultValue: "Timeout"),
+                                subtitle: String(localized: "settings.leaderKey.timeout.subtitle", defaultValue: "Seconds to wait for the sub-key before cancelling leader mode.")
+                            ) {
+                                HStack(spacing: 8) {
+                                    Slider(value: $leaderKeyTimeout, in: 0.2...3.0, step: 0.1)
+                                        .frame(width: 120)
+                                    Text(String(format: "%.1fs", leaderKeyTimeout))
+                                        .font(.system(.body, design: .monospaced))
+                                        .frame(width: 40, alignment: .trailing)
+                                }
+                            }
+
+                            SettingsCardDivider()
+
+                            let actions = LeaderKeySettings.configurableActions
+                            ForEach(Array(actions.enumerated()), id: \.element.id) { index, action in
+                                LeaderBindingRow(action: action)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 9)
+                                if index < actions.count - 1 {
+                                    SettingsCardDivider()
+                                }
+                            }
+                        }
+                    }
+                    .id(leaderKeyResetToken)
+
+                    SettingsCard {
+                        SettingsCardRow(
+                            String(localized: "settings.app.workspaceTags", defaultValue: "Workspace Tags"),
+                            subtitle: workspaceTagsEnabled
+                                ? String(localized: "settings.app.workspaceTags.subtitleOn", defaultValue: "Workspace tags are shown as [tag] prefix in the sidebar.")
+                                : String(localized: "settings.app.workspaceTags.subtitleOff", defaultValue: "Workspace tag display and assignment are disabled.")
+                        ) {
+                            Toggle("", isOn: $workspaceTagsEnabled)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+                    }
+
                     SettingsSectionHeader(title: String(localized: "settings.section.keyboardShortcuts", defaultValue: "Keyboard Shortcuts"))
                         .id(SettingsNavigationTarget.keyboardShortcuts)
                         .accessibilityIdentifier("SettingsKeyboardShortcutsSection")
@@ -6178,6 +6240,8 @@ struct SettingsView: View {
         refreshDetectedImportBrowsers()
         SystemWideHotkeySettings.reset()
         KeyboardShortcutSettings.resetAll()
+        LeaderKeySettings.resetAll()
+        leaderKeyResetToken = UUID()
         WorkspaceTabColorSettings.reset()
         reloadWorkspaceTabColorSettings()
         shortcutResetToken = UUID()
@@ -6892,6 +6956,165 @@ private struct GlobalHotkeySection: View {
         if latestShortcut != shortcut {
             shortcut = latestShortcut
         }
+    }
+}
+
+private struct LeaderBindingRow: View {
+    let action: LeaderKeySettings.LeaderAction
+    @State private var currentKey: String
+
+    init(action: LeaderKeySettings.LeaderAction) {
+        self.action = action
+        _currentKey = State(initialValue: LeaderKeySettings.key(for: action))
+    }
+
+    var body: some View {
+        HStack {
+            Text(action.label)
+            Spacer()
+            LeaderKeyRecorderButton(key: $currentKey)
+                .frame(width: 120)
+        }
+        .onChange(of: currentKey) { newValue in
+            LeaderKeySettings.setKey(newValue, for: action)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
+            let latest = LeaderKeySettings.key(for: action)
+            if latest != currentKey {
+                currentKey = latest
+            }
+        }
+    }
+}
+
+private struct LeaderKeyRecorderButton: NSViewRepresentable {
+    @Binding var key: String
+
+    func makeNSView(context: Context) -> LeaderKeyRecorderNSButton {
+        let button = LeaderKeyRecorderNSButton()
+        button.currentKey = key
+        button.onKeyRecorded = { newKey in
+            key = newKey
+        }
+        return button
+    }
+
+    func updateNSView(_ nsView: LeaderKeyRecorderNSButton, context: Context) {
+        nsView.currentKey = key
+        nsView.updateTitle()
+    }
+}
+
+private class LeaderKeyRecorderNSButton: NSButton {
+    var currentKey: String = ""
+    var onKeyRecorded: ((String) -> Void)?
+    private var isRecording = false
+    private var eventMonitor: Any?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setup()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setup()
+    }
+
+    private func setup() {
+        bezelStyle = .rounded
+        setButtonType(.momentaryPushIn)
+        target = self
+        action = #selector(buttonClicked)
+        updateTitle()
+    }
+
+    func updateTitle() {
+        if isRecording {
+            title = String(localized: "leaderKey.recorder.press", defaultValue: "Press key…")
+        } else {
+            title = displayString(for: currentKey)
+        }
+    }
+
+    private func displayString(for key: String) -> String {
+        switch key {
+        case "\"": return "\\\""
+        case ",": return ","
+        case "[": return "["
+        case "%": return "%"
+        default: return key.uppercased()
+        }
+    }
+
+    @objc private func buttonClicked() {
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+
+    private func startRecording() {
+        isRecording = true
+        updateTitle()
+
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self = self else { return event }
+
+            if event.keyCode == 53 { // Escape — cancel
+                self.stopRecording()
+                return nil
+            }
+
+            // For shifted symbols, use the produced character; for letters/digits, use unshifted
+            let shifted = event.characters ?? ""
+            let unshifted = event.charactersIgnoringModifiers ?? ""
+
+            // Prefer the shifted output for symbols, unshifted for alphanumerics
+            let recorded: String
+            if let first = unshifted.first, first.isLetter || first.isNumber {
+                recorded = unshifted.lowercased()
+            } else if !shifted.isEmpty {
+                recorded = shifted
+            } else {
+                recorded = unshifted
+            }
+
+            guard !recorded.isEmpty else {
+                return nil
+            }
+
+            self.currentKey = recorded
+            self.onKeyRecorded?(recorded)
+            self.stopRecording()
+            return nil
+        }
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(windowResigned),
+            name: NSWindow.didResignKeyNotification,
+            object: window
+        )
+    }
+
+    private func stopRecording() {
+        isRecording = false
+        updateTitle()
+        if let monitor = eventMonitor {
+            NSEvent.removeMonitor(monitor)
+            eventMonitor = nil
+        }
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didResignKeyNotification, object: window)
+    }
+
+    @objc private func windowResigned() {
+        stopRecording()
+    }
+
+    deinit {
+        stopRecording()
     }
 }
 
