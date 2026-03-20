@@ -7569,7 +7569,8 @@ final class Workspace: Identifiable, ObservableObject {
 
     func setTag(_ newTag: String?) {
         let trimmed = newTag?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        tag = trimmed.isEmpty ? nil : trimmed
+        let capped = String(trimmed.prefix(20))
+        tag = capped.isEmpty ? nil : capped
     }
 
     /// Title with tag prefix for sidebar display, respecting customTitle when set.

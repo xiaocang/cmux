@@ -29,7 +29,7 @@ enum LeaderKeySettings {
     // MARK: - Workspace Tags Toggle
 
     static let workspaceTagsEnabledKey = "workspaceTagsEnabled"
-    static let workspaceTagsEnabledDefault = true
+    static let workspaceTagsEnabledDefault = false
 
     static var workspaceTagsEnabled: Bool {
         let defaults = UserDefaults.standard

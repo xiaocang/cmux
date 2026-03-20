@@ -10552,7 +10552,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         // MARK: Leader Key handling
         if LeaderKeySettings.isEnabled {
-            synchronizeShortcutRoutingContext(event: event)
+            guard synchronizeShortcutRoutingContext(event: event) else {
+                // No valid routing context — pass keystroke through
+                if leaderKeyState == .waitingForSecondKey { cancelLeaderMode() }
+                return false
+            }
             let leaderShortcut = KeyboardShortcutSettings.shortcut(for: .leaderKey)
             switch leaderKeyState {
             case .inactive:
