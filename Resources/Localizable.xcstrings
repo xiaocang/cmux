@@ -63394,23 +63394,6 @@
         }
       }
     },
-    "leader.action.toggleZoom.label": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Toggle Zoom"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ズーム切替"
-          }
-        }
-      }
-    },
     "leader.action.toggleCopyMode.label": {
       "extractionState": "manual",
       "localizations": {
