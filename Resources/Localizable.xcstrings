@@ -63621,13 +63621,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Workspace tags are shown as [tag] prefix in the sidebar."
+            "value": "Workspace tags are shown as [tag] prefix in the workspace switcher and tab bar."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ワークスペースタグはサイドバーで[タグ]プレフィックスとして表示されます。"
+            "value": "ワークスペースタグはワークスペーススイッチャーとタブバーで[タグ]プレフィックスとして表示されます。"
           }
         }
       }
@@ -83118,6 +83118,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "Закріплені робочі області не можна закрити, поки вони закріплені. Спочатку відкріпіть робочу область."
+          }
+        }
+      }
+    },
+    "workspace.displayTitle.tagged": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[%@] %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "[%@] %@"
+          }
+        }
+      }
+    },
+    "settings.leaderKey.timeout.value": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%.1fs"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%.1f秒"
           }
         }
       }

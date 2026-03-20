@@ -9951,27 +9951,27 @@ struct VerticalTabsSidebar: View {
             selectedRemoteContextMenuTargets.allSatisfy { $0.remoteConnectionState == .disconnected }
 
         VStack(spacing: 0) {
+            // Leader key mode indicator — pinned above the scroll area
+            if tabManager.isLeaderModeActive {
+                HStack {
+                    Spacer()
+                    Text(String(localized: "leader.mode.indicator", defaultValue: "LEADER"))
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.2))
+                        .cornerRadius(3)
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+            }
+
             GeometryReader { proxy in
                 ScrollView {
                     VStack(spacing: 0) {
                         // Space for traffic lights / fullscreen controls
                         Spacer()
                             .frame(height: trafficLightPadding)
-
-                        // Leader key mode indicator
-                        if tabManager.isLeaderModeActive {
-                            HStack {
-                                Spacer()
-                                Text(String(localized: "leader.mode.indicator", defaultValue: "LEADER"))
-                                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 2)
-                                    .background(Color.accentColor.opacity(0.2))
-                                    .cornerRadius(3)
-                                Spacer()
-                            }
-                            .padding(.bottom, 4)
-                        }
 
                         // Workspaces are bounded, so prefer a non-lazy stack here.
                         // LazyVStack + drag-state invalidations can recurse through layout.
@@ -13488,7 +13488,7 @@ private struct TabItemView: View, Equatable {
     }
 
     private var accessibilityTitle: String {
-        String(localized: "accessibility.workspacePosition", defaultValue: "\(tab.title), workspace \(index + 1) of \(accessibilityWorkspaceCount)")
+        String(localized: "accessibility.workspacePosition", defaultValue: "\(tab.displayTitle), workspace \(index + 1) of \(accessibilityWorkspaceCount)")
     }
 
     private func moveBy(_ delta: Int) {

@@ -2268,6 +2268,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private var leaderKeyState: LeaderKeyState = .inactive
     private var leaderKeyWorkItem: DispatchWorkItem?
+    private weak var leaderKeyOwner: TabManager?
     private var leaderKeyDisableObserver: NSObjectProtocol?
 
     private static let didInstallWindowKeyEquivalentSwizzle: Void = {
@@ -10552,7 +10553,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 #endif
 
+        // Don't steal shortcuts from close-confirmation alerts. Keep standard alert key
+        // equivalents working and avoid surprising actions while the confirmation is up.
+        let closeConfirmationTitles = [
+            String(localized: "dialog.closeWorkspace.title", defaultValue: "Close workspace?"),
+            String(localized: "dialog.closeWorkspaces.title", defaultValue: "Close workspaces?"),
+            String(localized: "dialog.closeTab.title", defaultValue: "Close tab?"),
+            String(localized: "dialog.closeOtherTabs.title", defaultValue: "Close other tabs?"),
+            String(localized: "dialog.closeWindow.title", defaultValue: "Close window?"),
+        ]
+        let closeConfirmationPanel = NSApp.windows
+            .compactMap { $0 as? NSPanel }
+            .first { panel in
+                guard panel.isVisible, let root = panel.contentView else { return false }
+                return closeConfirmationTitles.contains { title in
+                    findStaticText(in: root, equals: title)
+                }
+            }
+        if let closeConfirmationPanel {
+            // Cancel leader mode if active — modal UI takes priority
+            if leaderKeyState == .waitingForSecondKey { cancelLeaderMode() }
+            // Special-case: Cmd+D should confirm destructive close on alerts.
+            // XCUITest key events often hit the app-level local monitor first, so forward the key
+            // equivalent to the alert panel explicitly.
+            if matchShortcut(
+                event: event,
+                shortcut: StoredShortcut(key: "d", command: true, shift: false, option: false, control: false)
+            ),
+               let root = closeConfirmationPanel.contentView,
+               let closeButton = findButton(
+                   in: root,
+                   titled: String(localized: "common.close", defaultValue: "Close")
+               ) {
+                closeButton.performClick(nil)
+                return true
+            }
+            return false
+        }
+
+        if NSApp.modalWindow != nil || NSApp.keyWindow?.attachedSheet != nil {
+            // Cancel leader mode if active — modal UI takes priority
+            if leaderKeyState == .waitingForSecondKey { cancelLeaderMode() }
+            return false
+        }
+
         // MARK: Leader Key handling
+        // Placed after modal/alert guards so leader mode cannot arm from Settings,
+        // close-confirmation alerts, or the command palette.
         if LeaderKeySettings.isEnabled {
             if synchronizeShortcutRoutingContext(event: event) {
                 let leaderShortcut = KeyboardShortcutSettings.shortcut(for: .leaderKey)
@@ -10560,6 +10607,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 case .inactive:
                     if matchShortcut(event: event, shortcut: leaderShortcut) {
                         leaderKeyState = .waitingForSecondKey
+                        leaderKeyOwner = tabManager
                         tabManager?.isLeaderModeActive = true
                         startLeaderKeyTimer()
                         return true
@@ -10586,46 +10634,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                 // No valid routing context — cancel leader mode if active
                 if leaderKeyState == .waitingForSecondKey { cancelLeaderMode() }
             }
-        }
-
-        // Don't steal shortcuts from close-confirmation alerts. Keep standard alert key
-        // equivalents working and avoid surprising actions while the confirmation is up.
-        let closeConfirmationTitles = [
-            String(localized: "dialog.closeWorkspace.title", defaultValue: "Close workspace?"),
-            String(localized: "dialog.closeWorkspaces.title", defaultValue: "Close workspaces?"),
-            String(localized: "dialog.closeTab.title", defaultValue: "Close tab?"),
-            String(localized: "dialog.closeOtherTabs.title", defaultValue: "Close other tabs?"),
-            String(localized: "dialog.closeWindow.title", defaultValue: "Close window?"),
-        ]
-        let closeConfirmationPanel = NSApp.windows
-            .compactMap { $0 as? NSPanel }
-            .first { panel in
-                guard panel.isVisible, let root = panel.contentView else { return false }
-                return closeConfirmationTitles.contains { title in
-                    findStaticText(in: root, equals: title)
-                }
-            }
-        if let closeConfirmationPanel {
-            // Special-case: Cmd+D should confirm destructive close on alerts.
-            // XCUITest key events often hit the app-level local monitor first, so forward the key
-            // equivalent to the alert panel explicitly.
-            if matchShortcut(
-                event: event,
-                shortcut: StoredShortcut(key: "d", command: true, shift: false, option: false, control: false)
-            ),
-               let root = closeConfirmationPanel.contentView,
-               let closeButton = findButton(
-                   in: root,
-                   titled: String(localized: "common.close", defaultValue: "Close")
-               ) {
-                closeButton.performClick(nil)
-                return true
-            }
-            return false
-        }
-
-        if NSApp.modalWindow != nil || NSApp.keyWindow?.attachedSheet != nil {
-            return false
         }
 
         let normalizedFlags = flags.subtracting([.numericPad, .function, .capsLock])
@@ -12345,7 +12353,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func cancelLeaderMode() {
         leaderKeyState = .inactive
-        tabManager?.isLeaderModeActive = false
+        // Clear on the originating window's tabManager, not the currently focused one
+        leaderKeyOwner?.isLeaderModeActive = false
+        leaderKeyOwner = nil
         cancelLeaderKeyTimer()
     }
 

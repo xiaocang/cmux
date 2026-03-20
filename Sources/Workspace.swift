@@ -7587,7 +7587,7 @@ final class Workspace: Identifiable, ObservableObject {
             base = t.isEmpty ? String(localized: "workspace.displayName.fallback", defaultValue: "Workspace") : t
         }
         guard LeaderKeySettings.workspaceTagsEnabled, let tag, !tag.isEmpty else { return base }
-        return "[\(tag)] \(base)"
+        return String(format: String(localized: "workspace.displayTitle.tagged", defaultValue: "[%@] %@"), tag, base)
     }
 
     // MARK: - Directory Updates
@@ -10149,9 +10149,20 @@ final class Workspace: Identifiable, ObservableObject {
         }
     }
 
+    /// Pane IDs in visual (layout) order derived from the split tree.
+    /// Falls back to `allPaneIds` if the tree snapshot yields no panes.
+    private func visuallyOrderedPaneIds() -> [PaneID] {
+        let tree = bonsplitController.treeSnapshot()
+        let orderedStrings = SidebarBranchOrdering.orderedPaneIds(tree: tree)
+        let mapped: [PaneID] = orderedStrings.compactMap { idString in
+            bonsplitController.allPaneIds.first { $0.id.uuidString == idString }
+        }
+        return mapped.isEmpty ? bonsplitController.allPaneIds : mapped
+    }
+
     /// Cycle focus to the previous pane.
     func focusPreviousPane() {
-        let paneIds = bonsplitController.allPaneIds
+        let paneIds = visuallyOrderedPaneIds()
 #if DEBUG
         dlog("pane.cyclePrev count=\(paneIds.count) focusedId=\(bonsplitController.focusedPaneId.map { "\($0)" } ?? "nil")")
 #endif
@@ -10164,7 +10175,7 @@ final class Workspace: Identifiable, ObservableObject {
 
     /// Cycle focus to the next pane (tmux prefix+o behavior).
     func focusNextPane() {
-        let paneIds = bonsplitController.allPaneIds
+        let paneIds = visuallyOrderedPaneIds()
 #if DEBUG
         dlog("pane.cycleNext count=\(paneIds.count) focusedId=\(bonsplitController.focusedPaneId.map { "\($0)" } ?? "nil")")
 #endif
@@ -10177,7 +10188,7 @@ final class Workspace: Identifiable, ObservableObject {
 
     /// Focus a pane by its index in the ordered pane list.
     func focusPaneByIndex(_ index: Int) {
-        let paneIds = bonsplitController.allPaneIds
+        let paneIds = visuallyOrderedPaneIds()
 #if DEBUG
         dlog("pane.focusByIndex index=\(index) count=\(paneIds.count) focusedId=\(bonsplitController.focusedPaneId.map { "\($0)" } ?? "nil")")
 #endif
