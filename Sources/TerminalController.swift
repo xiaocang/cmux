@@ -3669,7 +3669,7 @@ class TerminalController {
             return .err(code: "invalid_params", message: "Missing or invalid workspace_id", data: nil)
         }
 
-        guard let tagRaw = v2String(params, "tag") else {
+        guard let tagRaw = v2RawString(params, "tag") else {
             return .err(code: "invalid_params", message: "Missing 'tag' parameter. Pass empty string to clear.", data: nil)
         }
         let tag = tagRaw.trimmingCharacters(in: .whitespacesAndNewlines)

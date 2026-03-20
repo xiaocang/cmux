@@ -8514,7 +8514,9 @@ struct ContentView: View {
         }
         let target = CommandPaletteRenameTarget(
             kind: .workspace(workspaceId: workspace.id),
-            currentName: workspaceDisplayName(workspace)
+            currentName: workspace.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? workspace.customTitle!.trimmingCharacters(in: .whitespacesAndNewlines)
+                : workspace.title
         )
         startRenameFlow(target)
     }

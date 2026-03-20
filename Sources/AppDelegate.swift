@@ -10552,37 +10552,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         // MARK: Leader Key handling
         if LeaderKeySettings.isEnabled {
-            guard synchronizeShortcutRoutingContext(event: event) else {
-                // No valid routing context — pass keystroke through
+            if synchronizeShortcutRoutingContext(event: event) {
+                let leaderShortcut = KeyboardShortcutSettings.shortcut(for: .leaderKey)
+                switch leaderKeyState {
+                case .inactive:
+                    if matchShortcut(event: event, shortcut: leaderShortcut) {
+                        leaderKeyState = .waitingForSecondKey
+                        tabManager?.isLeaderModeActive = true
+                        startLeaderKeyTimer()
+                        return true
+                    }
+                case .waitingForSecondKey:
+                    cancelLeaderMode()
+                    // Double-press leader key: send the raw key through to terminal
+                    if matchShortcut(event: event, shortcut: leaderShortcut) {
+                        return false
+                    }
+                    // ESC cancels leader mode
+                    if event.keyCode == 53 {
+                        return true
+                    }
+                    // Try to dispatch the second key
+                    if executeLeaderAction(event: event) {
+                        return true
+                    }
+                    // Unrecognized second key: beep and consume
+                    NSSound.beep()
+                    return true
+                }
+            } else {
+                // No valid routing context — cancel leader mode if active
                 if leaderKeyState == .waitingForSecondKey { cancelLeaderMode() }
-                return false
-            }
-            let leaderShortcut = KeyboardShortcutSettings.shortcut(for: .leaderKey)
-            switch leaderKeyState {
-            case .inactive:
-                if matchShortcut(event: event, shortcut: leaderShortcut) {
-                    leaderKeyState = .waitingForSecondKey
-                    tabManager?.isLeaderModeActive = true
-                    startLeaderKeyTimer()
-                    return true
-                }
-            case .waitingForSecondKey:
-                cancelLeaderMode()
-                // Double-press leader key: send the raw key through to terminal
-                if matchShortcut(event: event, shortcut: leaderShortcut) {
-                    return false
-                }
-                // ESC cancels leader mode
-                if event.keyCode == 53 {
-                    return true
-                }
-                // Try to dispatch the second key
-                if executeLeaderAction(event: event) {
-                    return true
-                }
-                // Unrecognized second key: beep and consume
-                NSSound.beep()
-                return true
             }
         }
 

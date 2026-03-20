@@ -7568,8 +7568,11 @@ final class Workspace: Identifiable, ObservableObject {
     }
 
     func setTag(_ newTag: String?) {
-        let trimmed = newTag?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        let capped = String(trimmed.prefix(20))
+        let normalized = newTag?
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ") ?? ""
+        let capped = String(normalized.prefix(20))
         tag = capped.isEmpty ? nil : capped
     }
 
