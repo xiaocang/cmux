@@ -10152,12 +10152,12 @@ final class Workspace: Identifiable, ObservableObject {
     /// Pane IDs in visual (layout) order derived from the split tree.
     /// Falls back to `allPaneIds` if the tree snapshot yields no panes.
     private func visuallyOrderedPaneIds() -> [PaneID] {
+        let allPaneIds = bonsplitController.allPaneIds
         let tree = bonsplitController.treeSnapshot()
         let orderedStrings = SidebarBranchOrdering.orderedPaneIds(tree: tree)
-        let mapped: [PaneID] = orderedStrings.compactMap { idString in
-            bonsplitController.allPaneIds.first { $0.id.uuidString == idString }
-        }
-        return mapped.isEmpty ? bonsplitController.allPaneIds : mapped
+        let byId = Dictionary(uniqueKeysWithValues: allPaneIds.map { ($0.id.uuidString, $0) })
+        let mapped = orderedStrings.compactMap { byId[$0] }
+        return mapped.count == allPaneIds.count ? mapped : allPaneIds
     }
 
     /// Cycle focus to the previous pane.

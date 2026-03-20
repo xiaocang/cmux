@@ -1323,7 +1323,8 @@ final class WorkspaceTagDisplayTitleTests: XCTestCase {
             XCTAssertEqual(workspace.displayTitle, "Project")
 
             UserDefaults.standard.set(true, forKey: LeaderKeySettings.workspaceTagsEnabledKey)
-            XCTAssertEqual(workspace.displayTitle, "[api] Project")
+            let expected = String(format: String(localized: "workspace.displayTitle.tagged", defaultValue: "[%@] %@"), "api", "Project")
+            XCTAssertEqual(workspace.displayTitle, expected)
         }
     }
 }

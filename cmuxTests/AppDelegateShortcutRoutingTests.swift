@@ -4641,6 +4641,7 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
         _ body: () -> Void
     ) {
         let defaults = UserDefaults.standard
+        let leaderChordKey = KeyboardShortcutSettings.Action.leaderKey.defaultsKey
         let savedValues: [(String, Any?)] = [
             (LeaderKeySettings.enabledKey, defaults.object(forKey: LeaderKeySettings.enabledKey)),
             (LeaderKeySettings.workspaceTagsEnabledKey, defaults.object(forKey: LeaderKeySettings.workspaceTagsEnabledKey)),
@@ -4648,6 +4649,7 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
                 LeaderKeySettings.LeaderAction.setWorkspaceTag.defaultsKey,
                 defaults.object(forKey: LeaderKeySettings.LeaderAction.setWorkspaceTag.defaultsKey)
             ),
+            (leaderChordKey, defaults.object(forKey: leaderChordKey)),
         ]
 
         defer {
@@ -4663,6 +4665,7 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
         defaults.set(true, forKey: LeaderKeySettings.enabledKey)
         defaults.set(workspaceTagsEnabled, forKey: LeaderKeySettings.workspaceTagsEnabledKey)
         defaults.removeObject(forKey: LeaderKeySettings.LeaderAction.setWorkspaceTag.defaultsKey)
+        defaults.removeObject(forKey: leaderChordKey)
         body()
     }
 

@@ -7077,9 +7077,14 @@ private class LeaderKeyRecorderNSButton: NSButton {
             let shifted = event.characters ?? ""
             let unshifted = event.charactersIgnoringModifiers ?? ""
 
-            // Prefer the shifted output for symbols, unshifted for alphanumerics
+            // Prefer the shifted output for symbols (e.g. Shift+5 → "%"), unshifted for alphanumerics
             let recorded: String
-            if let first = unshifted.first, first.isLetter || first.isNumber {
+            if !shifted.isEmpty,
+               shifted != unshifted,
+               let shiftedFirst = shifted.first,
+               !(shiftedFirst.isLetter || shiftedFirst.isNumber) {
+                recorded = shifted
+            } else if let first = unshifted.first, first.isLetter || first.isNumber {
                 recorded = unshifted.lowercased()
             } else if !shifted.isEmpty {
                 recorded = shifted
