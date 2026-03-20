@@ -9,6 +9,13 @@ import Combine
 // The old Tab class is replaced by Workspace
 typealias Tab = Workspace
 
+// KVO-observable accessor for workspace tags toggle
+extension UserDefaults {
+    @objc dynamic var workspaceTagsEnabled: Bool {
+        bool(forKey: LeaderKeySettings.workspaceTagsEnabledKey)
+    }
+}
+
 enum NewWorkspacePlacement: String, CaseIterable, Identifiable {
     case top
     case afterCurrent
@@ -892,6 +899,7 @@ class TabManager: ObservableObject {
     weak var window: NSWindow?
 
     @Published var tabs: [Workspace] = []
+    @Published var isLeaderModeActive: Bool = false
     @Published private(set) var isWorkspaceCycleHot: Bool = false
     @Published private(set) var pendingBackgroundWorkspaceLoadIds: Set<UUID> = []
     @Published private(set) var debugPinnedWorkspaceLoadIds: Set<UUID> = []
@@ -983,6 +991,7 @@ class TabManager: ObservableObject {
         }
     }
     private var observers: [NSObjectProtocol] = []
+    private var workspaceTagsObservation: NSKeyValueObservation?
     private var suppressFocusFlash = false
     private var lastFocusedPanelByTab: [UUID: UUID] = [:]
     private struct PanelTitleUpdateKey: Hashable {
@@ -1086,6 +1095,19 @@ class TabManager: ObservableObject {
                 dismissPanelNotificationOnFocusIfActive(tabId: tabId, panelId: surfaceId)
             }
         })
+
+        workspaceTagsObservation = UserDefaults.standard.observe(
+            \.workspaceTagsEnabled,
+            options: [.old, .new]
+        ) { [weak self] _, change in
+            guard change.oldValue != change.newValue else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                for workspace in tabs {
+                    workspace.objectWillChange.send()
+                }
+            }
+        }
 
         startAgentPIDSweepTimer()
         startWorkspaceGitMetadataPollTimer()

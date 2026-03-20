@@ -8093,12 +8093,7 @@ struct ContentView: View {
     }
 
     private static func commandPaletteWorkspaceDisplayName(_ workspace: Workspace) -> String {
-        let custom = workspace.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !custom.isEmpty {
-            return custom
-        }
-        let title = workspace.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return title.isEmpty ? String(localized: "workspace.displayName.fallback", defaultValue: "Workspace") : title
+        workspace.displayTitle
     }
 
     private func workspaceDisplayName(_ workspace: Workspace) -> String {
@@ -9146,7 +9141,13 @@ struct ContentView: View {
         }
         let target = CommandPaletteRenameTarget(
             kind: .workspace(workspaceId: workspace.id),
-            currentName: workspaceDisplayName(workspace)
+            currentName: {
+                if let custom = workspace.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !custom.isEmpty {
+                    return custom
+                }
+                return workspace.title
+            }()
         )
         startRenameFlow(target)
     }
@@ -9668,6 +9669,21 @@ struct VerticalTabsSidebar: View {
         )
 
         VStack(spacing: 0) {
+            // Leader key mode indicator — pinned above the scroll area
+            if tabManager.isLeaderModeActive {
+                HStack {
+                    Spacer()
+                    Text(String(localized: "leader.mode.indicator", defaultValue: "LEADER"))
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.2))
+                        .cornerRadius(3)
+                    Spacer()
+                }
+                .padding(.vertical, 4)
+            }
+
             workspaceScrollArea(renderContext: renderContext)
             SidebarFooter(updateViewModel: updateViewModel, fileExplorerState: fileExplorerState, onSendFeedback: onSendFeedback)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -13604,7 +13620,7 @@ private struct TabItemView: View, Equatable {
         }()
 
         return SidebarWorkspaceSnapshotBuilder.Snapshot(
-            title: tab.title,
+            title: tab.displayTitle,
             customDescription: sidebarVisibleCustomDescription,
             isPinned: tab.isPinned,
             customColorHex: tab.customColor,
