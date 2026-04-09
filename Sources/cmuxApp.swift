@@ -4131,9 +4131,6 @@ struct SettingsView: View {
     @AppStorage("sidebarTintOpacity") private var sidebarTintOpacity = SidebarTintDefaults.opacity
     @AppStorage("sidebarMatchTerminalBackground") private var sidebarMatchTerminalBackground = false
 
-    @AppStorage(LeaderKeySettings.enabledKey) private var leaderKeyEnabled = LeaderKeySettings.enabledDefault
-    @AppStorage(LeaderKeySettings.timeoutKey) private var leaderKeyTimeout = LeaderKeySettings.timeoutDefault
-    @AppStorage(LeaderKeySettings.workspaceTagsEnabledKey) private var workspaceTagsEnabled = LeaderKeySettings.workspaceTagsEnabledDefault
     @ObservedObject private var notificationStore = TerminalNotificationStore.shared
     @StateObject private var keyboardShortcutSettingsObserver = KeyboardShortcutSettingsObserver.shared
     @State private var shortcutResetToken = UUID()
@@ -5835,63 +5832,8 @@ struct SettingsView: View {
 
                     GlobalHotkeySection()
 
-                    SettingsSectionHeader(title: String(localized: "settings.section.leaderKey", defaultValue: "Leader Key"))
-                        .accessibilityIdentifier("SettingsLeaderKeySection")
-                    SettingsCard {
-                        SettingsCardRow(
-                            String(localized: "settings.leaderKey.enabled", defaultValue: "Enable Leader Key"),
-                            subtitle: leaderKeyEnabled
-                                ? String(localized: "settings.leaderKey.enabled.subtitleOn", defaultValue: "Press the leader key prefix, then a sub-key to trigger an action.")
-                                : String(localized: "settings.leaderKey.enabled.subtitleOff", defaultValue: "Leader key is disabled. The prefix key will pass through to the terminal.")
-                        ) {
-                            Toggle("", isOn: $leaderKeyEnabled)
-                                .labelsHidden()
-                                .controlSize(.small)
-                        }
-
-                        if leaderKeyEnabled {
-                            SettingsCardDivider()
-
-                            SettingsCardRow(
-                                String(localized: "settings.leaderKey.timeout", defaultValue: "Timeout"),
-                                subtitle: String(localized: "settings.leaderKey.timeout.subtitle", defaultValue: "Seconds to wait for the sub-key before cancelling leader mode.")
-                            ) {
-                                HStack(spacing: 8) {
-                                    Slider(value: $leaderKeyTimeout, in: 0.2...3.0, step: 0.1)
-                                        .frame(width: 120)
-                                    Text(String(format: String(localized: "settings.leaderKey.timeout.value", defaultValue: "%.1fs"), leaderKeyTimeout))
-                                        .font(.system(.body, design: .monospaced))
-                                        .frame(width: 40, alignment: .trailing)
-                                }
-                            }
-
-                            SettingsCardDivider()
-
-                            let actions = LeaderKeySettings.configurableActions
-                            ForEach(Array(actions.enumerated()), id: \.element.id) { index, action in
-                                LeaderBindingRow(action: action)
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 9)
-                                if index < actions.count - 1 {
-                                    SettingsCardDivider()
-                                }
-                            }
-                        }
-                    }
-                    .id(leaderKeyResetToken)
-
-                    SettingsCard {
-                        SettingsCardRow(
-                            String(localized: "settings.app.workspaceTags", defaultValue: "Workspace Tags"),
-                            subtitle: workspaceTagsEnabled
-                                ? String(localized: "settings.app.workspaceTags.subtitleOn", defaultValue: "Workspace tags are shown as [tag] prefix in the workspace switcher and tab bar.")
-                                : String(localized: "settings.app.workspaceTags.subtitleOff", defaultValue: "Workspace tag display and assignment are disabled.")
-                        ) {
-                            Toggle("", isOn: $workspaceTagsEnabled)
-                                .labelsHidden()
-                                .controlSize(.small)
-                        }
-                    }
+                    LeaderKeySettingsSection()
+                        .id(leaderKeyResetToken)
 
                     SettingsSectionHeader(title: String(localized: "settings.section.keyboardShortcuts", defaultValue: "Keyboard Shortcuts"))
                         .id(SettingsNavigationTarget.keyboardShortcuts)
@@ -6955,6 +6897,74 @@ private struct GlobalHotkeySection: View {
         let latestShortcut = KeyboardShortcutSettings.shortcut(for: SystemWideHotkeySettings.action)
         if latestShortcut != shortcut {
             shortcut = latestShortcut
+        }
+    }
+}
+
+private struct LeaderKeySettingsSection: View {
+    @AppStorage(LeaderKeySettings.enabledKey) private var leaderKeyEnabled = LeaderKeySettings.enabledDefault
+    @AppStorage(LeaderKeySettings.timeoutKey) private var leaderKeyTimeout = LeaderKeySettings.timeoutDefault
+    @AppStorage(LeaderKeySettings.workspaceTagsEnabledKey) private var workspaceTagsEnabled = LeaderKeySettings.workspaceTagsEnabledDefault
+
+    var body: some View {
+        SettingsSectionHeader(title: String(localized: "settings.section.leaderKey", defaultValue: "Leader Key"))
+            .accessibilityIdentifier("SettingsLeaderKeySection")
+        SettingsCard {
+            SettingsCardRow(
+                configurationReview: .settingsOnly,
+                String(localized: "settings.leaderKey.enabled", defaultValue: "Enable Leader Key"),
+                subtitle: leaderKeyEnabled
+                    ? String(localized: "settings.leaderKey.enabled.subtitleOn", defaultValue: "Press the leader key prefix, then a sub-key to trigger an action.")
+                    : String(localized: "settings.leaderKey.enabled.subtitleOff", defaultValue: "Leader key is disabled. The prefix key will pass through to the terminal.")
+            ) {
+                Toggle("", isOn: $leaderKeyEnabled)
+                    .labelsHidden()
+                    .controlSize(.small)
+            }
+
+            if leaderKeyEnabled {
+                SettingsCardDivider()
+
+                SettingsCardRow(
+                    configurationReview: .settingsOnly,
+                    String(localized: "settings.leaderKey.timeout", defaultValue: "Timeout"),
+                    subtitle: String(localized: "settings.leaderKey.timeout.subtitle", defaultValue: "Seconds to wait for the sub-key before cancelling leader mode.")
+                ) {
+                    HStack(spacing: 8) {
+                        Slider(value: $leaderKeyTimeout, in: 0.2...3.0, step: 0.1)
+                            .frame(width: 120)
+                        Text(String(format: String(localized: "settings.leaderKey.timeout.value", defaultValue: "%.1fs"), leaderKeyTimeout))
+                            .font(.system(.body, design: .monospaced))
+                            .frame(width: 40, alignment: .trailing)
+                    }
+                }
+
+                SettingsCardDivider()
+
+                let actions = LeaderKeySettings.configurableActions
+                ForEach(Array(actions.enumerated()), id: \.element.id) { index, action in
+                    LeaderBindingRow(action: action)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                    if index < actions.count - 1 {
+                        SettingsCardDivider()
+                    }
+                }
+            }
+        }
+
+        SettingsCard {
+            SettingsCardRow(
+                configurationReview: .settingsOnly,
+                String(localized: "settings.app.workspaceTags", defaultValue: "Workspace Tags"),
+                subtitle: workspaceTagsEnabled
+                    ? String(localized: "settings.app.workspaceTags.subtitleOn", defaultValue: "Workspace tags are shown as [tag] prefix in the workspace switcher and tab bar.")
+                    : String(localized: "settings.app.workspaceTags.subtitleOff", defaultValue: "Workspace tag display and assignment are disabled.")
+            ) {
+                Toggle("", isOn: $workspaceTagsEnabled)
+                    .labelsHidden()
+                    .controlSize(.small)
+            }
         }
     }
 }
