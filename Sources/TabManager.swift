@@ -1639,6 +1639,7 @@ class TabManager: ObservableObject {
             "periodicPoll",
             "selectedPeriodicPoll",
             "timer",
+            "shellPrompt",
         ]
         return periodicPrefixes.contains { prefix in
             reason == prefix || reason.hasPrefix("\(prefix).")
