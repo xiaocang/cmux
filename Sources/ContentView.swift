@@ -10100,11 +10100,13 @@ struct VerticalTabsSidebar: View {
     @StateObject private var dragAutoScrollController = SidebarDragAutoScrollController()
     @StateObject private var dragFailsafeMonitor = SidebarDragFailsafeMonitor()
     @StateObject private var tabItemSettingsStore = SidebarTabItemSettingsStore()
+    @StateObject private var workspaceTabStore = WorkspaceTabStore()
     @ObservedObject private var keyboardShortcutSettingsObserver = KeyboardShortcutSettingsObserver.shared
     @State private var draggedTabId: UUID?
     @State private var dropIndicator: SidebarDropIndicator?
     @State private var frozenTabItemPresentation: SidebarTabItemPresentationSnapshot?
     @State private var terminalScrollBarVisibilityGeneration: UInt64 = 0
+    @AppStorage("workspaceTab.displayMode") private var workspaceTabDisplayMode = WorkspaceSidebarDisplayMode.native.rawValue
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
 
@@ -10117,6 +10119,10 @@ struct VerticalTabsSidebar: View {
         WorkspacePresentationModeSettings.mode(for: workspacePresentationMode) == .minimal
     }
 
+    private var workspaceSidebarDisplayMode: WorkspaceSidebarDisplayMode {
+        WorkspaceSidebarDisplayMode(rawValue: workspaceTabDisplayMode) ?? .native
+    }
+
     private var showsSidebarNotificationMessage: Bool {
         tabItemSettingsStore.snapshot.showsNotificationMessage
     }
@@ -10126,6 +10132,31 @@ struct VerticalTabsSidebar: View {
         return KeyboardShortcutSettings.shortcut(for: .selectWorkspaceByNumber)
     }
 
+    private func openWorkspace(_ tab: Workspace, index: Int) {
+        selectedTabIds = [tab.id]
+        lastSidebarSelectionIndex = index
+        selection = .tabs
+        tabManager.selectTab(tab)
+    }
+
+    private func openSummaryPriorityWorkspace(_ item: WorkspaceSidebarSummaryPriorityItem, tabs: [Workspace]) {
+        let resolved: (id: UUID, index: Int, tab: Workspace)?
+        if let workspaceId = UUID(uuidString: item.workspaceId),
+           let index = tabs.firstIndex(where: { $0.id == workspaceId }) {
+            resolved = (workspaceId, index, tabs[index])
+        } else if tabs.indices.contains(item.nativeOrder) {
+            let tab = tabs[item.nativeOrder]
+            resolved = (tab.id, item.nativeOrder, tab)
+        } else {
+            resolved = nil
+        }
+
+        guard let resolved else {
+            return
+        }
+        openWorkspace(resolved.tab, index: resolved.index)
+    }
+
     var body: some View {
         let _ = terminalScrollBarVisibilityGeneration
         let tabs = tabManager.tabs
@@ -10133,6 +10164,7 @@ struct VerticalTabsSidebar: View {
         let canCloseWorkspace = workspaceCount > 1
         let workspaceNumberShortcut = self.workspaceNumberShortcut
         let tabItemSettings = tabItemSettingsStore.snapshot
+        let liveShowsModifierShortcutHints = modifierKeyMonitor.isModifierPressed
         let tabIndexById = Dictionary(uniqueKeysWithValues: tabs.enumerated().map {
             ($0.element.id, $0.offset)
         })
@@ -10171,9 +10203,45 @@ struct VerticalTabsSidebar: View {
                         Spacer()
                             .frame(height: trafficLightPadding)
 
-                        // Workspaces are bounded, so prefer a non-lazy stack here.
-                        // LazyVStack + drag-state invalidations can recurse through layout.
-                        VStack(spacing: tabRowSpacing) {
+                        WorkspaceSidebarModeHeader(
+                            mode: Binding(
+                                get: { workspaceSidebarDisplayMode },
+                                set: { workspaceTabDisplayMode = $0.rawValue }
+                            ),
+                            onChange: { mode in
+                                workspaceTabStore.setDisplayMode(mode)
+                                if mode == .summaryPriority {
+                                    workspaceTabStore.refreshSummaryPriority()
+                                }
+                            }
+                        )
+
+                        if workspaceSidebarDisplayMode == .summaryPriority {
+                            SummaryPriorityWorkspaceList(
+                                store: workspaceTabStore,
+                                tabs: tabs,
+                                selectedWorkspaceId: tabManager.selectedTabId,
+                                activeTabIndicatorStyle: tabItemSettings.activeTabIndicatorStyle,
+                                selectionColorHex: tabItemSettings.selectionColorHex,
+                                workspaceShortcutModifierSymbol: workspaceNumberShortcut.numberedDigitHintPrefix,
+                                showsModifierShortcutHints: liveShowsModifierShortcutHints,
+                                shortcutHintXOffset: tabItemSettings.sidebarShortcutHintXOffset,
+                                shortcutHintYOffset: tabItemSettings.sidebarShortcutHintYOffset,
+                                alwaysShowShortcutHints: tabItemSettings.alwaysShowShortcutHints,
+                                onOpenWorkspace: { item in
+                                    openSummaryPriorityWorkspace(item, tabs: tabs)
+                                },
+                                onOpenNativeWorkspace: { tab, index in
+                                    openWorkspace(tab, index: index)
+                                }
+                            )
+                            .onAppear {
+                                workspaceTabStore.refreshSummaryPriority()
+                            }
+                        } else {
+                            // Workspaces are bounded, so prefer a non-lazy stack here.
+                            // LazyVStack + drag-state invalidations can recurse through layout.
+                            VStack(spacing: tabRowSpacing) {
                             ForEach(tabs, id: \.id) { tab in
                                 let index = tabIndexById[tab.id] ?? 0
                                 let usesSelectedContextMenuTargets = selectedTabIds.contains(tab.id)
@@ -10203,7 +10271,6 @@ struct VerticalTabsSidebar: View {
                                     let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                                     return trimmed.isEmpty ? nil : trimmed
                                 }()
-                                let liveShowsModifierShortcutHints = modifierKeyMonitor.isModifierPressed
                                 let livePresentation = SidebarTabItemPresentationSnapshot(
                                     tabId: tab.id,
                                     unreadCount: liveUnreadCount,
@@ -10250,6 +10317,7 @@ struct VerticalTabsSidebar: View {
                         }
                         .padding(.vertical, 8)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        }
 
                         SidebarEmptyArea(
                             rowSpacing: tabRowSpacing,
@@ -12388,6 +12456,1279 @@ private struct SidebarFooterIconButtonStyleBody: View {
     }
 }
 
+private enum WorkspaceSidebarDisplayMode: String {
+    case native
+    case summaryPriority = "summary_priority"
+}
+
+private struct WorkspaceSidebarDimensionScore: Codable, Equatable {
+    let rawScore: Double
+    let confidence: Double
+    let reason: String
+}
+
+private struct WorkspaceSidebarDimensionDefinition: Codable, Identifiable, Equatable {
+    let id: String
+    let label: String
+    let enabled: Bool
+    let orientation: String
+    let builtin: Bool
+    let visible: Bool
+
+    // Computed so labels track the active locale rather than freezing at process start.
+    static var builtinDefaults: [WorkspaceSidebarDimensionDefinition] {
+        [
+            WorkspaceSidebarDimensionDefinition(
+                id: "urgency",
+                label: String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency"),
+                enabled: true,
+                orientation: "higher_is_more_priority",
+                builtin: true,
+                visible: true
+            ),
+            WorkspaceSidebarDimensionDefinition(
+                id: "importance",
+                label: String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance"),
+                enabled: true,
+                orientation: "higher_is_more_priority",
+                builtin: true,
+                visible: true
+            )
+        ]
+    }
+}
+
+private struct WorkspaceSidebarSummaryPriorityItem: Codable, Identifiable, Equatable {
+    struct Topic: Codable, Equatable {
+        let text: String
+        let emoji: String?
+        let confidence: Double
+    }
+
+    struct Summary: Codable, Equatable {
+        let short: String
+        let detailed: String
+    }
+
+    struct Scores: Codable, Equatable {
+        let dimensions: [String: WorkspaceSidebarDimensionScore]
+        let rankReason: String
+    }
+
+    struct NextAction: Codable, Equatable {
+        let label: String
+        let detail: String?
+        let risk: String?
+    }
+
+    struct Evidence: Codable, Equatable {
+        let quote: String
+    }
+
+    let workspaceId: String
+    let nativeOrder: Int
+    let title: String
+    let subtitle: String?
+    let generatedAt: String
+    let inputHash: String
+    let topic: Topic
+    let summary: Summary
+    let status: String
+    let scores: Scores
+    let nextAction: NextAction?
+    let pinned: Bool
+    let evidence: [Evidence]?
+
+    var id: String { workspaceId }
+}
+
+private struct WorkspaceSidebarSummaryPrioritySort: Codable, Equatable {
+    let mode: String
+    let dimensionId: String?
+    let direction: String
+
+    static let defaultSort = WorkspaceSidebarSummaryPrioritySort(
+        mode: "dimension",
+        dimensionId: "urgency",
+        direction: "desc"
+    )
+
+    var requestPayload: [String: String] {
+        [
+            "mode": mode,
+            "dimensionId": dimensionId ?? "",
+            "direction": direction
+        ]
+    }
+}
+
+private struct WorkspaceSidebarSummaryPriorityStats: Codable, Equatable {
+    let total: Int
+    let needsAttention: Int
+    let topScore: Double
+    let staleDigestCount: Int
+}
+
+private struct WorkspaceSidebarSummaryPriorityState: Codable, Equatable {
+    let profileId: String
+    let sort: WorkspaceSidebarSummaryPrioritySort
+    let items: [WorkspaceSidebarSummaryPriorityItem]
+    let dimensions: [WorkspaceSidebarDimensionDefinition]
+    let stats: WorkspaceSidebarSummaryPriorityStats
+    let generatedAt: String
+}
+
+@MainActor
+private final class WorkspaceTabStore: ObservableObject {
+    @Published var summaryPriority: WorkspaceSidebarSummaryPriorityState?
+    @Published var selectedSort: WorkspaceSidebarSummaryPrioritySort
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+
+    private static let selectedSortDefaultsKey = "workspaceTab.summaryPriority.selectedSort"
+    private static let socketQueue = DispatchQueue(label: "com.cmux.digest-socket-client", qos: .userInitiated)
+    private static let maxRefreshRetryAttempts = 5
+    private static let jsonEncoder = JSONEncoder()
+    private static let jsonDecoder = JSONDecoder()
+    private var sortRequestGeneration = 0
+
+    init() {
+        selectedSort = Self.loadSelectedSort()
+    }
+
+    private static func loadSelectedSort() -> WorkspaceSidebarSummaryPrioritySort {
+        guard let data = UserDefaults.standard.data(forKey: selectedSortDefaultsKey),
+              let sort = try? jsonDecoder.decode(WorkspaceSidebarSummaryPrioritySort.self, from: data) else {
+            return .defaultSort
+        }
+        return sort
+    }
+
+    private func persistSelectedSort(_ sort: WorkspaceSidebarSummaryPrioritySort) {
+        guard let data = try? Self.jsonEncoder.encode(sort) else { return }
+        UserDefaults.standard.set(data, forKey: Self.selectedSortDefaultsKey)
+    }
+
+    func refreshSummaryPriority(force: Bool = false, sort: WorkspaceSidebarSummaryPrioritySort? = nil) {
+        refreshSummaryPriority(force: force, sort: sort, retryAttempt: 0)
+    }
+
+    private func refreshSummaryPriority(
+        force: Bool,
+        sort: WorkspaceSidebarSummaryPrioritySort?,
+        retryAttempt: Int
+    ) {
+        let effectiveSort = sort ?? selectedSort
+        let requestGeneration = sortRequestGeneration
+        var payload: [String: Any] = ["force": force]
+        payload["sort"] = effectiveSort.requestPayload
+
+#if DEBUG
+        dlog(
+            "summaryPriority.refresh.start gen=\(requestGeneration) force=\(force ? 1 : 0) " +
+            "sort=\(Self.debugSortDescription(effectiveSort)) selected=\(Self.debugSortDescription(selectedSort))"
+        )
+#endif
+
+        isLoading = true
+        errorMessage = nil
+        sendDigestCommand(
+            "refresh_summary_priority",
+            payload: payload,
+            decoding: WorkspaceSidebarSummaryPriorityState.self
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let error):
+#if DEBUG
+                dlog(
+                    "summaryPriority.refresh.failure gen=\(requestGeneration) " +
+                    "attempt=\(retryAttempt) sort=\(Self.debugSortDescription(effectiveSort)) " +
+                    "error=\(Self.displayMessage(for: error))"
+                )
+#endif
+                if retryAttempt < Self.maxRefreshRetryAttempts, Self.isTransientConnectionError(error) {
+                    let delay = min(0.8 * Double(retryAttempt + 1), 3.0)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        self.refreshSummaryPriority(
+                            force: force,
+                            sort: effectiveSort,
+                            retryAttempt: retryAttempt + 1
+                        )
+                    }
+                    return
+                }
+                self.isLoading = false
+                self.errorMessage = Self.displayMessage(for: error)
+            case .success(let decoded):
+                self.isLoading = false
+                guard requestGeneration == self.sortRequestGeneration else {
+#if DEBUG
+                    dlog(
+                        "summaryPriority.refresh.dropGeneration request=\(requestGeneration) " +
+                        "current=\(self.sortRequestGeneration) responseSort=\(Self.debugSortDescription(decoded.sort))"
+                    )
+#endif
+                    return
+                }
+                guard effectiveSort == self.selectedSort else {
+#if DEBUG
+                    dlog(
+                        "summaryPriority.refresh.dropSort expected=\(Self.debugSortDescription(effectiveSort)) " +
+                        "selected=\(Self.debugSortDescription(self.selectedSort)) " +
+                        "response=\(Self.debugSortDescription(decoded.sort))"
+                    )
+#endif
+                    return
+                }
+#if DEBUG
+                dlog(
+                    "summaryPriority.refresh.success gen=\(requestGeneration) " +
+                    "responseSort=\(Self.debugSortDescription(decoded.sort)) " +
+                    "items=\(Self.debugItemOrder(decoded.items))"
+                )
+#endif
+                self.summaryPriority = decoded
+            }
+        }
+    }
+
+    /// Connection-class failures from the digest socket: file not present yet
+    /// (daemon still starting) or peer refused. UI retries once after a short
+    /// back-off; protocol/decode errors surface immediately.
+    private static func isTransientConnectionError(_ error: Error) -> Bool {
+        guard let socketError = error as? CmuxSocketError else { return false }
+        let message = socketError.message
+        return message.contains("Socket not found")
+            || message.contains("Failed to connect")
+            || message.contains("Failed to create socket")
+            || message.contains("Command timed out")
+            || message.contains("Socket read error")
+            || message.contains("Socket closed")
+            || message.contains("connection refused")
+    }
+
+    private static func displayMessage(for error: Error) -> String {
+        if let socketError = error as? CmuxSocketError {
+            return socketError.message
+        }
+        return error.localizedDescription
+    }
+
+    func setSort(_ sort: WorkspaceSidebarSummaryPrioritySort) {
+        selectedSort = sort
+        persistSelectedSort(sort)
+        sortRequestGeneration += 1
+        let requestGeneration = sortRequestGeneration
+
+#if DEBUG
+        dlog("summaryPriority.setSort.start gen=\(requestGeneration) sort=\(Self.debugSortDescription(sort))")
+#endif
+
+        isLoading = true
+        errorMessage = nil
+        sendDigestCommand(
+            "set_summary_priority_sort",
+            payload: sort.requestPayload,
+            decoding: WorkspaceSidebarSummaryPriorityState.self
+        ) { [weak self] result in
+            guard let self else { return }
+            guard requestGeneration == self.sortRequestGeneration else { return }
+            self.isLoading = false
+            switch result {
+            case .failure(let error):
+#if DEBUG
+                dlog(
+                    "summaryPriority.setSort.failure gen=\(requestGeneration) " +
+                    "sort=\(Self.debugSortDescription(sort)) error=\(Self.displayMessage(for: error))"
+                )
+#endif
+                self.errorMessage = Self.displayMessage(for: error)
+            case .success(let decoded):
+                guard sort == self.selectedSort else { return }
+#if DEBUG
+                dlog(
+                    "summaryPriority.setSort.success gen=\(requestGeneration) " +
+                    "responseSort=\(Self.debugSortDescription(decoded.sort)) " +
+                    "items=\(Self.debugItemOrder(decoded.items))"
+                )
+#endif
+                self.summaryPriority = decoded
+            }
+        }
+    }
+
+    func setDisplayMode(_ mode: WorkspaceSidebarDisplayMode) {
+        sendDigestCommand(
+            "set_workspace_tab_mode",
+            payload: ["displayMode": mode.rawValue]
+        ) { _ in }
+    }
+
+    func refreshWorkspace(_ item: WorkspaceSidebarSummaryPriorityItem) {
+        isLoading = true
+        errorMessage = nil
+        sendDigestCommand(
+            "refresh_summary_priority_workspace",
+            payload: ["workspaceId": item.workspaceId]
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let error):
+                self.isLoading = false
+                self.errorMessage = Self.displayMessage(for: error)
+            case .success:
+                self.refreshSummaryPriority()
+            }
+        }
+    }
+
+    func setPinned(_ pinned: Bool, item: WorkspaceSidebarSummaryPriorityItem) {
+        sendDigestCommand(
+            "set_summary_priority_override",
+            payload: ["workspaceId": item.workspaceId, "pinned": pinned]
+        ) { [weak self] _ in
+            self?.refreshSummaryPriority()
+        }
+    }
+
+    private func sendDigestCommand(
+        _ command: String,
+        payload: [String: Any],
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        sendDigestCommandRaw(command, payload: payload) { result in
+            switch result {
+            case .success: completion(.success(()))
+            case .failure(let error): completion(.failure(error))
+            }
+        }
+    }
+
+    private func sendDigestCommand<Response: Decodable>(
+        _ command: String,
+        payload: [String: Any],
+        decoding _: Response.Type,
+        completion: @escaping (Result<Response, Error>) -> Void
+    ) {
+        sendDigestCommandRaw(command, payload: payload) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let body):
+                guard let data = body.data(using: .utf8) else {
+                    completion(.failure(CmuxSocketError(message: "Invalid UTF-8 from digest daemon")))
+                    return
+                }
+                do {
+                    let decoded = try Self.jsonDecoder.decode(Response.self, from: data)
+                    completion(.success(decoded))
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func sendDigestCommandRaw(
+        _ command: String,
+        payload: [String: Any],
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        let socketPath = CmuxDigestDaemonSupervisor.digestSocketPath()
+        Self.socketQueue.async {
+            let result: Result<String, Error>
+            do {
+                let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [])
+                let payloadString = String(data: payloadData, encoding: .utf8) ?? "{}"
+                let line = "\(command) \(payloadString)"
+                let client = CmuxSocketClient(path: socketPath)
+                try client.connect()
+                defer { client.close() }
+                let response = try client.send(command: line)
+                if response.hasPrefix("ERROR:") {
+                    let message = response.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+                    result = .failure(CmuxSocketError(message: message))
+                } else if response.hasPrefix("OK ") {
+                    result = .success(String(response.dropFirst(3)))
+                } else if response == "OK" {
+                    result = .success("")
+                } else {
+                    result = .failure(CmuxSocketError(message: "Unexpected response: \(response)"))
+                }
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
+#if DEBUG
+    private static func debugSortDescription(_ sort: WorkspaceSidebarSummaryPrioritySort) -> String {
+        "\(sort.mode):\(sort.dimensionId ?? "nil"):\(sort.direction)"
+    }
+
+    private static func debugItemOrder(_ items: [WorkspaceSidebarSummaryPriorityItem]) -> String {
+        items.map { item in
+            let urgency = Int(item.scores.dimensions["urgency"]?.rawScore ?? 0)
+            let importance = Int(item.scores.dimensions["importance"]?.rawScore ?? 0)
+            return "\(item.workspaceId.prefix(8))#\(item.nativeOrder):U\(urgency):I\(importance)"
+        }.joined(separator: ",")
+    }
+#endif
+}
+
+private struct WorkspaceSidebarModeHeader: View {
+    @Binding var mode: WorkspaceSidebarDisplayMode
+    let onChange: (WorkspaceSidebarDisplayMode) -> Void
+
+    private var nativeTitle: String {
+        String(localized: "sidebar.workspaceTab.mode.native", defaultValue: "Native")
+    }
+
+    private var summaryTitle: String {
+        String(localized: "sidebar.workspaceTab.mode.summary", defaultValue: "Summary")
+    }
+
+    private var modeIcon: String {
+        mode == .native ? "list.bullet" : "sparkles"
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(String(localized: "sidebar.workspaceTab.title", defaultValue: "Workspaces"))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+            Spacer(minLength: 0)
+
+            Menu {
+                Button {
+                    setMode(.native)
+                } label: {
+                    Label(nativeTitle, systemImage: mode == .native ? "checkmark" : "list.bullet")
+                }
+
+                Button {
+                    setMode(.summaryPriority)
+                } label: {
+                    Label(summaryTitle, systemImage: mode == .summaryPriority ? "checkmark" : "sparkles")
+                }
+            } label: {
+                Image(systemName: modeIcon)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.primary)
+                    .frame(width: 22, height: 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.primary.opacity(0.07))
+                    )
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .safeHelp(mode == .native ? nativeTitle : summaryTitle)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+    }
+
+    private func setMode(_ next: WorkspaceSidebarDisplayMode) {
+        guard next != mode else { return }
+        mode = next
+        onChange(next)
+    }
+}
+
+private struct SummaryPriorityWorkspaceList: View {
+    @ObservedObject var store: WorkspaceTabStore
+    let tabs: [Workspace]
+    let selectedWorkspaceId: UUID?
+    let activeTabIndicatorStyle: SidebarActiveTabIndicatorStyle
+    let selectionColorHex: String?
+    let workspaceShortcutModifierSymbol: String
+    let showsModifierShortcutHints: Bool
+    let shortcutHintXOffset: Double
+    let shortcutHintYOffset: Double
+    let alwaysShowShortcutHints: Bool
+    let onOpenWorkspace: (WorkspaceSidebarSummaryPriorityItem) -> Void
+    let onOpenNativeWorkspace: (Workspace, Int) -> Void
+
+    var body: some View {
+        let activeSort = store.selectedSort
+        let rows = displayRows(
+            items: store.summaryPriority?.items ?? [],
+            tabs: tabs,
+            sort: activeSort,
+            isRefreshing: store.isLoading
+        )
+
+        VStack(alignment: .leading, spacing: 8) {
+            SummaryPriorityToolbar(
+                sort: activeSort,
+                dimensions: store.summaryPriority?.dimensions ?? WorkspaceSidebarDimensionDefinition.builtinDefaults,
+                isLoading: store.isLoading,
+                onSort: { sort in store.setSort(sort) },
+                onRefresh: {
+                    store.refreshSummaryPriority(
+                        force: true,
+                        sort: activeSort
+                    )
+                }
+            )
+
+            if let errorMessage = store.errorMessage, store.summaryPriority == nil, !store.isLoading {
+                Text(errorMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+            } else if !rows.isEmpty {
+                ForEach(rows) { row in
+                    switch row {
+                    case .summary(let item):
+                        SummaryPriorityWorkspaceRow(
+                            item: item,
+                            sort: activeSort,
+                            isActive: isActive(item: item),
+                            activeTabIndicatorStyle: activeTabIndicatorStyle,
+                            selectionColorHex: selectionColorHex,
+                            workspaceShortcutLabel: shortcutLabel(nativeOrder: item.nativeOrder),
+                            showsModifierShortcutHints: showsModifierShortcutHints,
+                            shortcutHintXOffset: shortcutHintXOffset,
+                            shortcutHintYOffset: shortcutHintYOffset,
+                            alwaysShowShortcutHints: alwaysShowShortcutHints,
+                            onOpen: { onOpenWorkspace(item) },
+                            onRefresh: { store.refreshWorkspace(item) },
+                            onTogglePin: { store.setPinned(!item.pinned, item: item) }
+                        )
+                    case .pending(let pending):
+                        SummaryPriorityPendingWorkspaceRow(
+                            pending: pending,
+                            isActive: selectedWorkspaceId == pending.tab.id,
+                            activeTabIndicatorStyle: activeTabIndicatorStyle,
+                            selectionColorHex: selectionColorHex,
+                            workspaceShortcutLabel: shortcutLabel(nativeOrder: pending.nativeOrder),
+                            showsModifierShortcutHints: showsModifierShortcutHints,
+                            shortcutHintXOffset: shortcutHintXOffset,
+                            shortcutHintYOffset: shortcutHintYOffset,
+                            alwaysShowShortcutHints: alwaysShowShortcutHints,
+                            onOpen: { onOpenNativeWorkspace(pending.tab, pending.nativeOrder) }
+                        )
+                    }
+                }
+            } else if store.isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 20)
+            } else {
+                Text(store.errorMessage ?? String(localized: "sidebar.workspaceSummary.empty", defaultValue: "No workspace summaries yet."))
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func displayRows(
+        items: [WorkspaceSidebarSummaryPriorityItem],
+        tabs: [Workspace],
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        isRefreshing: Bool
+    ) -> [SummaryPriorityWorkspaceDisplayRow] {
+        var coveredNativeOrders = Set<Int>()
+        let currentItems = items.filter { item in
+            guard tabs.indices.contains(item.nativeOrder),
+                  coveredNativeOrders.contains(item.nativeOrder) == false else {
+                return false
+            }
+            coveredNativeOrders.insert(item.nativeOrder)
+            return true
+        }
+#if DEBUG
+        if items.isEmpty || currentItems.count != items.count {
+            let tabIds = tabs
+                .map { String($0.id.uuidString.prefix(8)) }
+                .joined(separator: ",")
+            let itemIds = items
+                .map { item in "\(item.workspaceId.prefix(8))#\(item.nativeOrder)" }
+                .joined(separator: ",")
+            dlog(
+                "summaryPriority.rows.filtered input=\(items.count) current=\(currentItems.count) " +
+                "tabs=\(tabIds) items=\(itemIds)"
+            )
+        }
+#endif
+        let sortedSummaryRows = sortedItems(currentItems, by: sort).map {
+            SummaryPriorityWorkspaceDisplayRow.summary($0)
+        }
+        let pendingRows = tabs.enumerated()
+            .filter { index, _ in coveredNativeOrders.contains(index) == false }
+            .map { index, tab in
+                SummaryPriorityWorkspaceDisplayRow.pending(
+                    SummaryPriorityPendingWorkspace(
+                        tab: tab,
+                        title: tab.title.isEmpty
+                            ? String(localized: "sidebar.workspaceSummary.pending.untitled", defaultValue: "Untitled Workspace")
+                            : tab.title,
+                        nativeOrder: index,
+                        isRefreshing: isRefreshing
+                    )
+                )
+            }
+        return sortedSummaryRows + pendingRows
+    }
+
+    private func sortedItems(
+        _ items: [WorkspaceSidebarSummaryPriorityItem],
+        by sort: WorkspaceSidebarSummaryPrioritySort
+    ) -> [WorkspaceSidebarSummaryPriorityItem] {
+        items.sorted { lhs, rhs in
+            if lhs.pinned != rhs.pinned {
+                return lhs.pinned
+            }
+
+            let comparison: ComparisonResult
+            switch sort.mode {
+            case "native_order":
+                comparison = compare(lhs.nativeOrder, rhs.nativeOrder)
+            case "recent":
+                comparison = compare(dateValue(lhs.generatedAt), dateValue(rhs.generatedAt))
+            default:
+                let dimensionId = sort.dimensionId ?? "urgency"
+                comparison = compare(
+                    lhs.scores.dimensions[dimensionId]?.rawScore ?? 0,
+                    rhs.scores.dimensions[dimensionId]?.rawScore ?? 0
+                )
+            }
+
+            if comparison != .orderedSame {
+                return sort.direction == "asc"
+                    ? comparison == .orderedAscending
+                    : comparison == .orderedDescending
+            }
+
+            return lhs.nativeOrder < rhs.nativeOrder
+        }
+    }
+
+    private func compare<T: Comparable>(_ lhs: T, _ rhs: T) -> ComparisonResult {
+        if lhs < rhs { return .orderedAscending }
+        if lhs > rhs { return .orderedDescending }
+        return .orderedSame
+    }
+
+    private static let iso8601Formatter = ISO8601DateFormatter()
+
+    private func dateValue(_ value: String) -> TimeInterval {
+        Self.iso8601Formatter.date(from: value)?.timeIntervalSince1970 ?? 0
+    }
+
+    private func shortcutLabel(nativeOrder: Int) -> String? {
+        guard let digit = WorkspaceShortcutMapper.digitForWorkspace(
+            at: nativeOrder,
+            workspaceCount: tabs.count
+        ) else {
+            return nil
+        }
+        return "\(workspaceShortcutModifierSymbol)\(digit)"
+    }
+
+    private func isActive(item: WorkspaceSidebarSummaryPriorityItem) -> Bool {
+        if let selectedWorkspaceId,
+           UUID(uuidString: item.workspaceId) == selectedWorkspaceId {
+            return true
+        }
+        guard tabs.indices.contains(item.nativeOrder) else { return false }
+        return tabs[item.nativeOrder].id == selectedWorkspaceId
+    }
+}
+
+private enum SummaryPriorityWorkspaceDisplayRow: Identifiable {
+    case summary(WorkspaceSidebarSummaryPriorityItem)
+    case pending(SummaryPriorityPendingWorkspace)
+
+    var id: String {
+        switch self {
+        case .summary(let item):
+            return "summary-\(item.workspaceId)-\(item.nativeOrder)"
+        case .pending(let pending):
+            return "pending-\(pending.id.uuidString)"
+        }
+    }
+}
+
+private struct SummaryPriorityPendingWorkspace: Identifiable {
+    let tab: Workspace
+    let title: String
+    let nativeOrder: Int
+    let isRefreshing: Bool
+
+    var id: UUID { tab.id }
+}
+
+private struct SummaryPriorityToolbar: View {
+    let sort: WorkspaceSidebarSummaryPrioritySort
+    let dimensions: [WorkspaceSidebarDimensionDefinition]
+    let isLoading: Bool
+    let onSort: (WorkspaceSidebarSummaryPrioritySort) -> Void
+    let onRefresh: () -> Void
+
+    private var visibleDimensions: [WorkspaceSidebarDimensionDefinition] {
+        dimensions.filter { $0.enabled && $0.visible }
+    }
+
+    private var activeSortTitle: String {
+        if sort.mode == "native_order" {
+            return String(localized: "sidebar.workspaceSummary.sort.nativeOrder", defaultValue: "Native Order")
+        }
+        if sort.mode == "recent" {
+            return String(localized: "sidebar.workspaceSummary.sort.recent", defaultValue: "Recent")
+        }
+        let dimensionId = sort.dimensionId ?? "urgency"
+        return title(forDimensionId: dimensionId)
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(String(localized: "sidebar.workspaceSummary.sort.label", defaultValue: "Sort"))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            Menu {
+                ForEach(visibleDimensions) { dimension in
+                    sortMenuItem(
+                        title: title(for: dimension),
+                        sort: WorkspaceSidebarSummaryPrioritySort(
+                            mode: "dimension",
+                            dimensionId: dimension.id,
+                            direction: "desc"
+                        )
+                    )
+                }
+
+                Divider()
+
+                sortMenuItem(
+                    title: String(localized: "sidebar.workspaceSummary.sort.nativeOrder", defaultValue: "Native Order"),
+                    sort: WorkspaceSidebarSummaryPrioritySort(mode: "native_order", dimensionId: nil, direction: "asc")
+                )
+                sortMenuItem(
+                    title: String(localized: "sidebar.workspaceSummary.sort.recent", defaultValue: "Recent"),
+                    sort: WorkspaceSidebarSummaryPrioritySort(mode: "recent", dimensionId: nil, direction: "desc")
+                )
+            } label: {
+                HStack(spacing: 4) {
+                    Text(activeSortTitle)
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                }
+                .foregroundColor(.primary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.08))
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 0)
+
+            Button(action: onRefresh) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .buttonStyle(.borderless)
+            .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
+            .disabled(isLoading)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    @ViewBuilder
+    private func sortMenuItem(title: String, sort: WorkspaceSidebarSummaryPrioritySort) -> some View {
+        Button {
+            onSort(sort)
+        } label: {
+            if isSelected(sort) {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
+    }
+
+    private func isSelected(_ candidate: WorkspaceSidebarSummaryPrioritySort) -> Bool {
+        sort.mode == candidate.mode && sort.dimensionId == candidate.dimensionId
+    }
+
+    private func title(for dimension: WorkspaceSidebarDimensionDefinition) -> String {
+        title(forDimensionId: dimension.id, fallback: dimension.label)
+    }
+
+    private func title(forDimensionId dimensionId: String, fallback: String? = nil) -> String {
+        if dimensionId == "urgency" {
+            return String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency")
+        }
+        if dimensionId == "importance" {
+            return String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance")
+        }
+        return fallback ?? dimensionId
+    }
+}
+
+private struct SummaryPriorityWorkspaceRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let item: WorkspaceSidebarSummaryPriorityItem
+    let sort: WorkspaceSidebarSummaryPrioritySort
+    let isActive: Bool
+    let activeTabIndicatorStyle: SidebarActiveTabIndicatorStyle
+    let selectionColorHex: String?
+    let workspaceShortcutLabel: String?
+    let showsModifierShortcutHints: Bool
+    let shortcutHintXOffset: Double
+    let shortcutHintYOffset: Double
+    let alwaysShowShortcutHints: Bool
+    let onOpen: () -> Void
+    let onRefresh: () -> Void
+    let onTogglePin: () -> Void
+
+    private var activeDimensionId: String {
+        sort.mode == "dimension" ? (sort.dimensionId ?? "urgency") : "urgency"
+    }
+
+    private var activeScore: Double {
+        item.scores.dimensions[activeDimensionId]?.rawScore ?? 0
+    }
+
+    private var category: SummaryPriorityWorkspaceCategory {
+        SummaryPriorityWorkspaceCategory(status: item.status)
+    }
+
+    private var showsWorkspaceShortcutHint: Bool {
+        (showsModifierShortcutHints || alwaysShowShortcutHints) && workspaceShortcutLabel != nil
+    }
+
+    private var shortcutHintEmphasis: Double {
+        isActive ? 1.0 : 0.9
+    }
+
+    private var activeAppearance: SummaryPriorityWorkspaceActiveAppearance {
+        SummaryPriorityWorkspaceActiveAppearance(
+            isActive: isActive,
+            activeTabIndicatorStyle: activeTabIndicatorStyle,
+            selectionColorHex: selectionColorHex,
+            colorScheme: colorScheme
+        )
+    }
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(category.color)
+                    .frame(width: 3)
+                    .padding(.vertical, 10)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 5) {
+                        if let emoji = item.topic.emoji, !emoji.isEmpty {
+                            Text(emoji)
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        Text(item.topic.text)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(activeAppearance.primaryTextColor)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        HStack(spacing: 5) {
+                            Text("\(Int(activeScore))")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(activeScoreColor)
+                            if showsWorkspaceShortcutHint, let workspaceShortcutLabel {
+                                ShortcutHintPill(text: workspaceShortcutLabel, fontSize: 10, emphasis: shortcutHintEmphasis)
+                                    .offset(
+                                        x: ShortcutHintDebugSettings.clamped(shortcutHintXOffset),
+                                        y: ShortcutHintDebugSettings.clamped(shortcutHintYOffset)
+                                    )
+                                    .transition(.opacity)
+                            }
+                        }
+                        .animation(.easeOut(duration: 0.12), value: showsModifierShortcutHints || alwaysShowShortcutHints)
+                    }
+
+                    HStack(spacing: 5) {
+                        Text(item.title)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(activeAppearance.secondaryTextColor())
+                            .lineLimit(1)
+                        if item.pinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 8, weight: .semibold))
+                                .foregroundColor(activeAppearance.secondaryTextColor())
+                        }
+                    }
+
+                    HStack(spacing: 7) {
+                        scoreLabel("U", score: item.scores.dimensions["urgency"]?.rawScore)
+                        scoreLabel("I", score: item.scores.dimensions["importance"]?.rawScore)
+                        Text(category.label)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(activeAppearance.badgeForegroundColor(defaultColor: category.color))
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(activeAppearance.badgeBackgroundColor(defaultColor: category.color.opacity(0.12)))
+                            )
+                    }
+
+                    Text(item.summary.short)
+                        .font(.system(size: 10))
+                        .foregroundColor(activeAppearance.secondaryTextColor())
+                        .lineLimit(3)
+
+                    if let nextAction = item.nextAction {
+                        Text("\(String(localized: "sidebar.workspaceSummary.next", defaultValue: "Next:")) \(nextAction.label)")
+                            .font(.system(size: 10))
+                            .foregroundColor(activeAppearance.secondaryTextColor())
+                            .lineLimit(2)
+                    }
+                }
+                .padding(.vertical, 10)
+                .padding(.leading, 9)
+                .padding(.trailing, 9)
+            }
+            .frame(minHeight: 108)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(activeAppearance.backgroundColor(inactiveColor: category.color.opacity(0.055)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(
+                        activeAppearance.borderColor(inactiveColor: category.color.opacity(0.22)),
+                        lineWidth: activeAppearance.borderLineWidth(inactiveWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(action: onRefresh) {
+                Label(String(localized: "sidebar.workspaceSummary.row.refresh", defaultValue: "Refresh Summary"), systemImage: "arrow.clockwise")
+            }
+            Button(action: onTogglePin) {
+                Label(
+                    item.pinned
+                        ? String(localized: "sidebar.workspaceSummary.row.unpin", defaultValue: "Unpin")
+                        : String(localized: "sidebar.workspaceSummary.row.pin", defaultValue: "Pin"),
+                    systemImage: item.pinned ? "pin.slash" : "pin"
+                )
+            }
+        }
+        .safeHelp(fullHelpText)
+    }
+
+    private var activeScoreColor: Color {
+        if isActive {
+            return activeAppearance.primaryTextColor
+        }
+        return activeScore >= 70 ? category.color : .secondary
+    }
+
+    private func scoreLabel(_ label: String, score: Double?) -> some View {
+        Text("\(label) \(Int(score ?? 0))")
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .foregroundColor(activeAppearance.secondaryTextColor())
+            .lineLimit(1)
+    }
+
+    private var fullHelpText: String {
+        var lines: [String] = []
+        lines.append("\(item.topic.text) - \(category.label)")
+        lines.append(item.title)
+        if let subtitle = item.subtitle, !subtitle.isEmpty {
+            lines.append(subtitle)
+        }
+
+        let urgency = item.scores.dimensions["urgency"]
+        let importance = item.scores.dimensions["importance"]
+        lines.append("\(String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency")) \(Int(urgency?.rawScore ?? 0)): \(urgency?.reason ?? "")")
+        lines.append("\(String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance")) \(Int(importance?.rawScore ?? 0)): \(importance?.reason ?? "")")
+
+        lines.append(item.summary.short)
+        let detailed = item.summary.detailed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !detailed.isEmpty, detailed != item.summary.short {
+            lines.append(detailed)
+        }
+        if let nextAction = item.nextAction {
+            lines.append("\(String(localized: "sidebar.workspaceSummary.next", defaultValue: "Next:")) \(nextAction.label)")
+            if let detail = nextAction.detail, !detail.isEmpty {
+                lines.append(detail)
+            }
+        }
+        if !item.scores.rankReason.isEmpty {
+            lines.append(item.scores.rankReason)
+        }
+        lines += (item.evidence ?? []).prefix(3).compactMap { evidence in
+            let quote = evidence.quote.trimmingCharacters(in: .whitespacesAndNewlines)
+            return quote.isEmpty ? nil : quote
+        }
+        return lines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+}
+
+private struct SummaryPriorityPendingWorkspaceRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let pending: SummaryPriorityPendingWorkspace
+    let isActive: Bool
+    let activeTabIndicatorStyle: SidebarActiveTabIndicatorStyle
+    let selectionColorHex: String?
+    let workspaceShortcutLabel: String?
+    let showsModifierShortcutHints: Bool
+    let shortcutHintXOffset: Double
+    let shortcutHintYOffset: Double
+    let alwaysShowShortcutHints: Bool
+    let onOpen: () -> Void
+
+    private var category: SummaryPriorityWorkspaceCategory { .unknown }
+
+    private var showsWorkspaceShortcutHint: Bool {
+        (showsModifierShortcutHints || alwaysShowShortcutHints) && workspaceShortcutLabel != nil
+    }
+
+    private var activeAppearance: SummaryPriorityWorkspaceActiveAppearance {
+        SummaryPriorityWorkspaceActiveAppearance(
+            isActive: isActive,
+            activeTabIndicatorStyle: activeTabIndicatorStyle,
+            selectionColorHex: selectionColorHex,
+            colorScheme: colorScheme
+        )
+    }
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(category.color)
+                    .frame(width: 3)
+                    .padding(.vertical, 10)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 5) {
+                        Text(pending.title)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(activeAppearance.primaryTextColor)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        HStack(spacing: 5) {
+                            Text("--")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(activeAppearance.secondaryTextColor())
+                            if showsWorkspaceShortcutHint, let workspaceShortcutLabel {
+                                ShortcutHintPill(text: workspaceShortcutLabel, fontSize: 10, emphasis: isActive ? 1.0 : 0.9)
+                                    .offset(
+                                        x: ShortcutHintDebugSettings.clamped(shortcutHintXOffset),
+                                        y: ShortcutHintDebugSettings.clamped(shortcutHintYOffset)
+                                    )
+                                    .transition(.opacity)
+                            }
+                        }
+                        .animation(.easeOut(duration: 0.12), value: showsModifierShortcutHints || alwaysShowShortcutHints)
+                    }
+
+                    HStack(spacing: 7) {
+                        Text(pending.isRefreshing
+                            ? String(localized: "sidebar.workspaceSummary.pending.refreshing", defaultValue: "Refreshing")
+                            : String(localized: "sidebar.workspaceSummary.pending.unsorted", defaultValue: "Unsorted"))
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(activeAppearance.badgeForegroundColor(defaultColor: category.color))
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(activeAppearance.badgeBackgroundColor(defaultColor: category.color.opacity(0.12)))
+                            )
+                    }
+
+                    Text(String(localized: "sidebar.workspaceSummary.pending.summary", defaultValue: "Waiting for summary and score. This workspace stays at the bottom until refresh finishes."))
+                        .font(.system(size: 10))
+                        .foregroundColor(activeAppearance.secondaryTextColor())
+                        .lineLimit(3)
+                }
+                .padding(.vertical, 10)
+                .padding(.leading, 9)
+                .padding(.trailing, 9)
+            }
+            .frame(minHeight: 108)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(activeAppearance.backgroundColor(inactiveColor: category.color.opacity(0.045)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(
+                        activeAppearance.borderColor(inactiveColor: category.color.opacity(0.18)),
+                        lineWidth: activeAppearance.borderLineWidth(inactiveWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .safeHelp(helpText)
+    }
+
+    private var helpText: String {
+        [
+            pending.title,
+            pending.isRefreshing
+                ? String(localized: "sidebar.workspaceSummary.pending.refreshing", defaultValue: "Refreshing")
+                : String(localized: "sidebar.workspaceSummary.pending.unsorted", defaultValue: "Unsorted"),
+            String(localized: "sidebar.workspaceSummary.pending.summary", defaultValue: "Waiting for summary and score. This workspace stays at the bottom until refresh finishes.")
+        ].joined(separator: "\n\n")
+    }
+}
+
+private struct SummaryPriorityWorkspaceActiveAppearance {
+    let isActive: Bool
+    let activeTabIndicatorStyle: SidebarActiveTabIndicatorStyle
+    let selectionColorHex: String?
+    let colorScheme: ColorScheme
+
+    private var selectionBackgroundColor: NSColor {
+        if let selectionColorHex, let parsed = NSColor(hex: selectionColorHex) {
+            return parsed
+        }
+        return cmuxAccentNSColor(for: colorScheme)
+    }
+
+    var primaryTextColor: Color {
+        isActive
+            ? Color(nsColor: sidebarSelectedWorkspaceForegroundNSColor(opacity: 1.0))
+            : .primary
+    }
+
+    func secondaryTextColor(_ opacity: Double = 0.75) -> Color {
+        isActive
+            ? Color(nsColor: sidebarSelectedWorkspaceForegroundNSColor(opacity: CGFloat(opacity)))
+            : .secondary
+    }
+
+    func backgroundColor(inactiveColor: Color) -> Color {
+        isActive ? Color(nsColor: selectionBackgroundColor) : inactiveColor
+    }
+
+    func borderColor(inactiveColor: Color) -> Color {
+        guard isActive else { return inactiveColor }
+        switch activeTabIndicatorStyle {
+        case .leftRail:
+            return .clear
+        case .solidFill:
+            return Color.primary.opacity(0.5)
+        }
+    }
+
+    func borderLineWidth(inactiveWidth: CGFloat) -> CGFloat {
+        guard isActive else { return inactiveWidth }
+        switch activeTabIndicatorStyle {
+        case .leftRail:
+            return 0
+        case .solidFill:
+            return 1.5
+        }
+    }
+
+    func badgeForegroundColor(defaultColor: Color) -> Color {
+        isActive ? secondaryTextColor(0.92) : defaultColor
+    }
+
+    func badgeBackgroundColor(defaultColor: Color) -> Color {
+        isActive ? Color.white.opacity(0.16) : defaultColor
+    }
+}
+
+private enum SummaryPriorityWorkspaceCategory {
+    case waiting
+    case blocked
+    case testing
+    case working
+    case done
+    case idle
+    case unknown
+
+    init(status: String) {
+        switch status {
+        case "waiting_for_user":
+            self = .waiting
+        case "blocked":
+            self = .blocked
+        case "running_tests":
+            self = .testing
+        case "working":
+            self = .working
+        case "done":
+            self = .done
+        case "idle":
+            self = .idle
+        default:
+            self = .unknown
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .waiting: return .orange
+        case .blocked: return .red
+        case .testing: return .blue
+        case .working: return .green
+        case .done: return .mint
+        case .idle: return .secondary
+        case .unknown: return .gray
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .waiting:
+            return String(localized: "sidebar.workspaceSummary.status.waiting", defaultValue: "Waiting")
+        case .blocked:
+            return String(localized: "sidebar.workspaceSummary.status.blocked", defaultValue: "Blocked")
+        case .testing:
+            return String(localized: "sidebar.workspaceSummary.status.testing", defaultValue: "Testing")
+        case .working:
+            return String(localized: "sidebar.workspaceSummary.status.working", defaultValue: "Working")
+        case .done:
+            return String(localized: "sidebar.workspaceSummary.status.done", defaultValue: "Done")
+        case .idle:
+            return String(localized: "sidebar.workspaceSummary.status.idle", defaultValue: "Idle")
+        case .unknown:
+            return String(localized: "sidebar.workspaceSummary.status.unknown", defaultValue: "Unknown")
+        }
+    }
+}
+
 #if DEBUG
 private struct SidebarDevFooter: View {
     @ObservedObject var updateViewModel: UpdateViewModel
@@ -12839,6 +14180,20 @@ private struct TabItemView: View, Equatable {
         return String(localized: "sidebar.remote.subtitleFallback", defaultValue: "SSH workspace")
     }
 
+    private var workspaceDigestDisplay: SidebarWorkspaceDigestDisplay? {
+        guard let entry = tab.statusEntries["digest"] else { return nil }
+        let value = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        let summary = tab.metadataBlocks["digest.summary"]?.markdown
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return SidebarWorkspaceDigestDisplay(
+            text: value,
+            summary: summary?.isEmpty == false ? summary : nil,
+            color: entry.color,
+            icon: entry.icon
+        )
+    }
+
     private var copyableSidebarSSHError: String? {
         let fallbackTarget = tab.remoteDisplayTarget ?? String(
             localized: "sidebar.remote.help.targetFallback",
@@ -13047,7 +14402,9 @@ private struct TabItemView: View, Equatable {
 
             if detailVisibility.showsMetadata {
                 let metadataEntries = tab.sidebarStatusEntriesInDisplayOrder()
+                    .filter { $0.key != "digest" }
                 let metadataBlocks = tab.sidebarMetadataBlocksInDisplayOrder()
+                    .filter { $0.key != "digest.summary" }
                 if !metadataEntries.isEmpty {
                     SidebarMetadataRows(
                         entries: metadataEntries,
@@ -14355,6 +15712,90 @@ enum SidebarMarkdownRenderer {
             markdown: markdown,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )
+    }
+}
+
+private struct SidebarWorkspaceDigestDisplay: Equatable {
+    let text: String
+    let summary: String?
+    let color: String?
+    let icon: String?
+}
+
+private struct SidebarWorkspaceDigestLine: View {
+    let digest: SidebarWorkspaceDigestDisplay
+    let isActive: Bool
+    let fallbackColor: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            iconView
+            Text(digest.text)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(foregroundColor)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .safeHelp(helpText)
+    }
+
+    private var foregroundColor: Color {
+        if isActive {
+            return Color(nsColor: sidebarSelectedWorkspaceForegroundNSColor(opacity: 0.88))
+        }
+        if let raw = digest.color, let color = Color(hex: raw) {
+            return color
+        }
+        return fallbackColor
+    }
+
+    private var helpText: String {
+        guard let summary = digest.summary, !summary.isEmpty else {
+            return digest.text
+        }
+        return "\(digest.text)\n\n\(summary)"
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        switch SidebarWorkspaceDigestIcon(rawSpec: digest.icon) {
+        case .emoji(let value):
+            Text(value).font(.system(size: 9))
+        case .text(let value):
+            Text(value).font(.system(size: 8, weight: .semibold))
+        case .symbol(let name):
+            Image(systemName: name).font(.system(size: 8, weight: .medium))
+        case .none:
+            EmptyView()
+        }
+    }
+}
+
+private enum SidebarWorkspaceDigestIcon {
+    case emoji(String)
+    case text(String)
+    case symbol(String)
+    case none
+
+    init(rawSpec: String?) {
+        guard let raw = rawSpec?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            self = .none
+            return
+        }
+        if raw.hasPrefix("emoji:") {
+            let value = String(raw.dropFirst("emoji:".count))
+            self = value.isEmpty ? .none : .emoji(value)
+            return
+        }
+        if raw.hasPrefix("text:") {
+            let value = String(raw.dropFirst("text:".count))
+            self = value.isEmpty ? .none : .text(value)
+            return
+        }
+        let symbolName = raw.hasPrefix("sf:") ? String(raw.dropFirst("sf:".count)) : raw
+        self = symbolName.isEmpty ? .none : .symbol(symbolName)
     }
 }
 

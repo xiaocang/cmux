@@ -2657,6 +2657,33 @@ struct CMUXCLI {
             )
             print(response)
 
+        case "report-meta-block":
+            let response = try forwardSidebarMetadataCommand(
+                "report_meta_block",
+                commandArgs: commandArgs,
+                client: client,
+                windowOverride: windowId
+            )
+            print(response)
+
+        case "clear-meta-block":
+            let response = try forwardSidebarMetadataCommand(
+                "clear_meta_block",
+                commandArgs: commandArgs,
+                client: client,
+                windowOverride: windowId
+            )
+            print(response)
+
+        case "list-meta-blocks":
+            let response = try forwardSidebarMetadataCommand(
+                "list_meta_blocks",
+                commandArgs: commandArgs,
+                client: client,
+                windowOverride: windowId
+            )
+            print(response)
+
         case "set-progress":
             let response = try forwardSidebarMetadataCommand(
                 "set_progress",
@@ -7864,6 +7891,37 @@ struct CMUXCLI {
             Example:
               cmux list-status
               cmux list-status --workspace workspace:2
+            """
+        case "report-meta-block":
+            return """
+            Usage: cmux report-meta-block <key> [flags] [--] <markdown>
+
+            Set a sidebar markdown metadata block for a workspace.
+
+            Flags:
+              --priority <n>         Sort priority, higher appears first
+              --workspace <id|ref>   Target workspace (default: $CMUX_WORKSPACE_ID)
+
+            Example:
+              cmux report-meta-block digest.summary --workspace workspace:2 -- "**Summary**"
+            """
+        case "clear-meta-block":
+            return """
+            Usage: cmux clear-meta-block <key> [flags]
+
+            Remove a sidebar markdown metadata block by key.
+
+            Flags:
+              --workspace <id|ref>   Target workspace (default: $CMUX_WORKSPACE_ID)
+            """
+        case "list-meta-blocks":
+            return """
+            Usage: cmux list-meta-blocks [flags]
+
+            List sidebar markdown metadata blocks for a workspace.
+
+            Flags:
+              --workspace <id|ref>   Target workspace (default: $CMUX_WORKSPACE_ID)
             """
         case "set-progress":
             return """
@@ -14419,6 +14477,9 @@ struct CMUXCLI {
           notify --title <text> [--subtitle <text>] [--body <text>] [--workspace <id|ref>] [--surface <id|ref>]
           list-notifications
           clear-notifications
+          report-meta-block <key> [--workspace <id|ref>] [--priority <n>] -- <markdown>
+          clear-meta-block <key> [--workspace <id|ref>]
+          list-meta-blocks [--workspace <id|ref>]
           claude-hook <session-start|stop|notification> [--workspace <id|ref>] [--surface <id|ref>]
           set-app-focus <active|inactive|clear>
           simulate-app-active

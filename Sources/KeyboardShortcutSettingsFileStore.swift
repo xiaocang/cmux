@@ -80,6 +80,21 @@ final class CmuxSettingsFileStore {
         "automation.sidebarPullRequestShellDebounceSeconds",
         "automation.portBase",
         "automation.portRange",
+        "digest.enabled",
+        "digest.daemonEnabled",
+        "digest.provider",
+        "digest.model",
+        "digest.claudeCodeModel",
+        "digest.currentWorkspaceMinIntervalSec",
+        "digest.backgroundMinIntervalSec",
+        "digest.screenLines",
+        "digest.includeDiffStat",
+        "digest.sendFullDiffToLLM",
+        "digest.writeSidebarMetadata",
+        "workspaceTab.displayMode",
+        "workspaceTab.summaryPriority.sortMode",
+        "workspaceTab.summaryPriority.sortDimensionId",
+        "workspaceTab.summaryPriority.sortDirection",
         "customCommands.trustedDirectories",
         "browser.defaultSearchEngine",
         "browser.showSearchSuggestions",
@@ -371,6 +386,12 @@ final class CmuxSettingsFileStore {
         }
         if let automationSection = root["automation"] as? [String: Any] {
             parseAutomationSection(automationSection, sourcePath: sourcePath, snapshot: &snapshot)
+        }
+        if let digestSection = root["digest"] as? [String: Any] {
+            parseDigestSection(digestSection, sourcePath: sourcePath, snapshot: &snapshot)
+        }
+        if let workspaceTabSection = root["workspaceTab"] as? [String: Any] {
+            parseWorkspaceTabSection(workspaceTabSection, sourcePath: sourcePath, snapshot: &snapshot)
         }
         if let customCommandsSection = root["customCommands"] as? [String: Any] {
             parseCustomCommandsSection(customCommandsSection, sourcePath: sourcePath, snapshot: &snapshot)
@@ -755,6 +776,93 @@ final class CmuxSettingsFileStore {
                 return
             }
             snapshot.managedUserDefaults["cmuxPortRange"] = .int(value)
+        }
+    }
+
+    private func parseDigestSection(
+        _ section: [String: Any],
+        sourcePath: String,
+        snapshot: inout ResolvedSettingsSnapshot
+    ) {
+        if let value = jsonBool(section["enabled"]) {
+            snapshot.managedUserDefaults["digest.enabled"] = .bool(value)
+        }
+        if let value = jsonBool(section["daemonEnabled"]) {
+            snapshot.managedUserDefaults["digest.daemonEnabled"] = .bool(value)
+        }
+        if let raw = jsonString(section["provider"]) {
+            snapshot.managedUserDefaults["digest.provider"] = .string(raw)
+        }
+        if let raw = jsonString(section["model"]) {
+            snapshot.managedUserDefaults["digest.model"] = .string(raw)
+        }
+        if let raw = jsonString(section["claudeCodeModel"]) {
+            snapshot.managedUserDefaults["digest.claudeCodeModel"] = .string(raw)
+        }
+        if let value = jsonInt(section["currentWorkspaceMinIntervalSec"]) {
+            if value >= 10 {
+                snapshot.managedUserDefaults["digest.currentWorkspaceMinIntervalSec"] = .int(value)
+            } else {
+                logInvalid("digest.currentWorkspaceMinIntervalSec", sourcePath: sourcePath)
+            }
+        }
+        if let value = jsonInt(section["backgroundMinIntervalSec"]) {
+            if value >= 30 {
+                snapshot.managedUserDefaults["digest.backgroundMinIntervalSec"] = .int(value)
+            } else {
+                logInvalid("digest.backgroundMinIntervalSec", sourcePath: sourcePath)
+            }
+        }
+        if let value = jsonInt(section["screenLines"]) {
+            if (20...1000).contains(value) {
+                snapshot.managedUserDefaults["digest.screenLines"] = .int(value)
+            } else {
+                logInvalid("digest.screenLines", sourcePath: sourcePath)
+            }
+        }
+        if let value = jsonBool(section["includeDiffStat"]) {
+            snapshot.managedUserDefaults["digest.includeDiffStat"] = .bool(value)
+        }
+        if let value = jsonBool(section["sendFullDiffToLLM"]) {
+            snapshot.managedUserDefaults["digest.sendFullDiffToLLM"] = .bool(value)
+        }
+        if let value = jsonBool(section["writeSidebarMetadata"]) {
+            snapshot.managedUserDefaults["digest.writeSidebarMetadata"] = .bool(value)
+        }
+    }
+
+    private func parseWorkspaceTabSection(
+        _ section: [String: Any],
+        sourcePath: String,
+        snapshot: inout ResolvedSettingsSnapshot
+    ) {
+        if let raw = jsonString(section["defaultDisplayMode"]) {
+            if raw == "native" || raw == "summary_priority" {
+                snapshot.managedUserDefaults["workspaceTab.displayMode"] = .string(raw)
+            } else {
+                logInvalid("workspaceTab.defaultDisplayMode", sourcePath: sourcePath)
+            }
+        }
+        guard let summaryPriority = section["summaryPriority"] as? [String: Any],
+              let sort = summaryPriority["defaultSort"] as? [String: Any] else {
+            return
+        }
+        if let raw = jsonString(sort["mode"]) {
+            if ["dimension", "native_order", "recent"].contains(raw) {
+                snapshot.managedUserDefaults["workspaceTab.summaryPriority.sortMode"] = .string(raw)
+            } else {
+                logInvalid("workspaceTab.summaryPriority.defaultSort.mode", sourcePath: sourcePath)
+            }
+        }
+        if let raw = jsonString(sort["dimensionId"]) {
+            snapshot.managedUserDefaults["workspaceTab.summaryPriority.sortDimensionId"] = .string(raw)
+        }
+        if let raw = jsonString(sort["direction"]) {
+            if raw == "asc" || raw == "desc" {
+                snapshot.managedUserDefaults["workspaceTab.summaryPriority.sortDirection"] = .string(raw)
+            } else {
+                logInvalid("workspaceTab.summaryPriority.defaultSort.direction", sourcePath: sourcePath)
+            }
         }
     }
 
@@ -1450,6 +1558,38 @@ final class CmuxSettingsFileStore {
                     "sidebarPullRequestShellDebounceSeconds": SidebarPullRequestShellDebounceSettings.defaultDelaySeconds,
                     "portBase": 9100,
                     "portRange": 10,
+                ],
+            ],
+            [
+                "digest": [
+                    "enabled": false,
+                    "daemonEnabled": false,
+                    "provider": "heuristic",
+                    "model": "",
+                    "claudeCodeModel": "",
+                    "currentWorkspaceMinIntervalSec": 45,
+                    "backgroundMinIntervalSec": 300,
+                    "screenLines": 160,
+                    "includeDiffStat": true,
+                    "sendFullDiffToLLM": false,
+                    "writeSidebarMetadata": true,
+                ],
+            ],
+            [
+                "workspaceTab": [
+                    "defaultDisplayMode": "native",
+                    "native": [
+                        "showBadges": true,
+                        "preserveCmuxOrder": true,
+                    ],
+                    "summaryPriority": [
+                        "enabled": true,
+                        "defaultSort": [
+                            "mode": "dimension",
+                            "dimensionId": "urgency",
+                            "direction": "desc",
+                        ],
+                    ],
                 ],
             ],
             [

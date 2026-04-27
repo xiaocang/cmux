@@ -150,6 +150,146 @@ enum UITestLaunchManifest {
     }
 }
 
+final class CmuxDigestDaemonSupervisor {
+    static let shared = CmuxDigestDaemonSupervisor()
+
+    private var process: Process?
+#if DEBUG
+    private var logHandle: FileHandle?
+#endif
+
+    static func digestSocketPath() -> String {
+        let env = ProcessInfo.processInfo.environment
+        if let bundleIdentifier = Bundle.main.bundleIdentifier,
+           bundleIdentifier.hasPrefix("com.cmuxterm.app.debug.") {
+            let tag = bundleIdentifier
+                .dropFirst("com.cmuxterm.app.debug.".count)
+                .replacingOccurrences(of: ".", with: "-")
+            return "/tmp/cmux-digest-\(tag).sock"
+        }
+        if let envTag = env["CMUX_TAG"]?.trimmingCharacters(in: .whitespacesAndNewlines), !envTag.isEmpty {
+            let safeTag = envTag.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "-", options: .regularExpression)
+            return "/tmp/cmux-digest-\(safeTag).sock"
+        }
+        return "/tmp/cmux-digest.sock"
+    }
+
+    func update(enabled: Bool) {
+        if enabled {
+            startIfNeeded()
+        } else {
+            stop()
+        }
+    }
+
+    private func startIfNeeded() {
+        guard process?.isRunning != true else { return }
+        guard let resources = Bundle.main.resourceURL else { return }
+        let digestURL = resources.appendingPathComponent("bin/cmux-digest")
+        guard FileManager.default.isExecutableFile(atPath: digestURL.path) else { return }
+
+#if DEBUG
+        Self.terminateStaleDebugDaemons(at: digestURL)
+#endif
+
+        let digestSocket = Self.digestSocketPath()
+        // The daemon binds the socket itself; just clear any stale file from a
+        // previous run so bind() doesn't trip on EADDRINUSE.
+        unlink(digestSocket)
+
+        let process = Process()
+        process.executableURL = digestURL
+        process.arguments = ["daemon"]
+        var environment = ProcessInfo.processInfo.environment
+        environment["CMUX_DIGEST_SOCKET_PATH"] = digestSocket
+        let cmuxURL = resources.appendingPathComponent("bin/cmux")
+        if FileManager.default.isExecutableFile(atPath: cmuxURL.path) {
+            environment["CMUX_DIGEST_CMUX"] = cmuxURL.path
+        }
+        let socketPath = SocketControlSettings.socketPath()
+        environment["CMUX_SOCKET_PATH"] = socketPath
+        environment["CMUX_SOCKET"] = socketPath
+        if let bundleIdentifier = Bundle.main.bundleIdentifier,
+           bundleIdentifier.hasPrefix("com.cmuxterm.app.debug.") {
+            let tag = bundleIdentifier
+                .dropFirst("com.cmuxterm.app.debug.".count)
+                .replacingOccurrences(of: ".", with: "-")
+            environment["CMUX_TAG"] = String(tag)
+        }
+        process.environment = environment
+
+#if DEBUG
+        var daemonLogHandle: FileHandle?
+        let daemonLogURL = Self.daemonLogURL(environment: environment, socketPath: digestSocket)
+        // Truncate on every launch so the per-tag log doesn't grow unbounded across reloads.
+        FileManager.default.createFile(atPath: daemonLogURL.path, contents: nil)
+        if let handle = try? FileHandle(forWritingTo: daemonLogURL) {
+            handle.write(Data("cmux-app: starting cmux-digest socket=\(digestSocket) cmuxSocket=\(socketPath) cli=\(environment["CMUX_DIGEST_CMUX"] ?? "nil")\n".utf8))
+            process.standardOutput = handle
+            process.standardError = handle
+            daemonLogHandle = handle
+            dlog("digest.daemon.start socket=\(digestSocket) cmuxSocket=\(socketPath) log=\(daemonLogURL.path)")
+        }
+#endif
+
+        do {
+            try process.run()
+            self.process = process
+#if DEBUG
+            self.logHandle = daemonLogHandle
+#endif
+        } catch {
+#if DEBUG
+            daemonLogHandle?.closeFile()
+#endif
+            NSLog("Failed to launch cmux-digest daemon: %@", error.localizedDescription)
+        }
+    }
+
+#if DEBUG
+    private static func daemonLogURL(environment: [String: String], socketPath: String) -> URL {
+        let tag = environment["CMUX_TAG"] ?? URL(fileURLWithPath: socketPath)
+            .deletingPathExtension()
+            .lastPathComponent
+        let safeTag = tag.replacingOccurrences(
+            of: "[^A-Za-z0-9_-]",
+            with: "-",
+            options: .regularExpression
+        )
+        return URL(fileURLWithPath: "/tmp/cmux-digest-\(safeTag).log")
+    }
+
+    private static func terminateStaleDebugDaemons(at digestURL: URL) {
+        let cleanup = Process()
+        cleanup.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
+        cleanup.arguments = ["-f", "\(digestURL.path) daemon"]
+        cleanup.standardOutput = FileHandle.nullDevice
+        cleanup.standardError = FileHandle.nullDevice
+        do {
+            try cleanup.run()
+            cleanup.waitUntilExit()
+            if cleanup.terminationStatus == 0 {
+                dlog("digest.daemon.cleanup path=\(digestURL.path)")
+            }
+        } catch {
+            dlog("digest.daemon.cleanup.failed error=\(error.localizedDescription)")
+        }
+    }
+#endif
+
+    private func stop() {
+        guard let process else { return }
+        if process.isRunning {
+            process.terminate()
+        }
+        self.process = nil
+#if DEBUG
+        logHandle?.closeFile()
+        logHandle = nil
+#endif
+    }
+}
+
 @main
 struct cmuxApp: App {
     @StateObject private var tabManager: TabManager
@@ -166,11 +306,17 @@ struct cmuxApp: App {
     @AppStorage(DevBuildBannerDebugSettings.sidebarBannerVisibleKey)
     private var showSidebarDevBuildBanner = DevBuildBannerDebugSettings.defaultShowSidebarBanner
     @AppStorage(SocketControlSettings.appStorageKey) private var socketControlMode = SocketControlSettings.defaultMode.rawValue
+    @AppStorage("digest.daemonEnabled") private var digestDaemonEnabled = false
+    @AppStorage("workspaceTab.displayMode") private var workspaceTabDisplayMode = "native"
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     private var browserToolbarAccessorySpacing: Int {
         BrowserToolbarAccessorySpacingDebugSettings.resolved(browserToolbarAccessorySpacingRaw)
+    }
+
+    private var shouldRunDigestDaemon: Bool {
+        digestDaemonEnabled || workspaceTabDisplayMode == "summary_priority"
     }
 
     init() {
@@ -351,6 +497,7 @@ struct cmuxApp: App {
 #endif
                     // Start the Unix socket controller for programmatic access
                     updateSocketController()
+                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
                     appDelegate.configure(tabManager: tabManager, notificationStore: notificationStore, sidebarState: sidebarState)
                     appDelegate.fileExplorerState = fileExplorerState
                     cmuxConfigStore.wireDirectoryTracking(tabManager: tabManager)
@@ -367,6 +514,12 @@ struct cmuxApp: App {
                 }
                 .onChange(of: socketControlMode) { _ in
                     updateSocketController()
+                }
+                .onChange(of: digestDaemonEnabled) { _ in
+                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
+                }
+                .onChange(of: workspaceTabDisplayMode) { _ in
+                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -4389,6 +4542,227 @@ private func openCmuxSettingsFileInTextEdit() {
     #endif
 }
 
+private struct WorkspaceSummarySettingsDimension: Codable, Identifiable, Equatable {
+    var id: String
+    var label: String
+    var enabled: Bool
+    var orientation: String
+    var builtin: Bool
+    var visible: Bool
+
+    static let builtins = [
+        WorkspaceSummarySettingsDimension(
+            id: "urgency",
+            label: "Urgency",
+            enabled: true,
+            orientation: "higher_is_more_priority",
+            builtin: true,
+            visible: true
+        ),
+        WorkspaceSummarySettingsDimension(
+            id: "importance",
+            label: "Importance",
+            enabled: true,
+            orientation: "higher_is_more_priority",
+            builtin: true,
+            visible: true
+        )
+    ]
+
+    var displayLabel: String {
+        switch id {
+        case "urgency":
+            return String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency")
+        case "importance":
+            return String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance")
+        default:
+            let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? id : trimmed
+        }
+    }
+}
+
+private struct WorkspaceSummarySettingsProfile: Codable, Equatable {
+    var id: String
+    var label: String
+    var dimensions: [WorkspaceSummarySettingsDimension]
+
+    static let defaultProfile = WorkspaceSummarySettingsProfile(
+        id: "default",
+        label: "Default Priority",
+        dimensions: WorkspaceSummarySettingsDimension.builtins
+    )
+}
+
+private enum WorkspaceSummaryProfileStatus: Equatable {
+    case saved
+    case reset
+    case invalidId
+    case duplicateId
+    case saveFailed(String)
+    case loadFailed(String)
+}
+
+@MainActor
+private final class WorkspaceSummaryProfileSettingsStore: ObservableObject {
+    @Published private(set) var profile: WorkspaceSummarySettingsProfile
+    @Published var status: WorkspaceSummaryProfileStatus?
+
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+    init() {
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        profile = Self.loadProfile(decoder: decoder)
+    }
+
+    var profileFileURL: URL {
+        Self.profileURL()
+    }
+
+    func reload() {
+        do {
+            profile = try Self.readProfile(decoder: decoder)
+            status = nil
+        } catch {
+            profile = .defaultProfile
+            status = .loadFailed(error.localizedDescription)
+        }
+    }
+
+    func canAddDimension(id rawId: String) -> Bool {
+        let id = rawId.trimmingCharacters(in: .whitespacesAndNewlines)
+        return Self.isValidDimensionId(id)
+            && profile.dimensions.contains(where: { $0.id == id }) == false
+    }
+
+    func addDimension(id rawId: String, label rawLabel: String) -> Bool {
+        let id = rawId.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.isValidDimensionId(id) else {
+            status = .invalidId
+            return false
+        }
+        guard profile.dimensions.contains(where: { $0.id == id }) == false else {
+            status = .duplicateId
+            return false
+        }
+
+        let label = rawLabel.trimmingCharacters(in: .whitespacesAndNewlines)
+        var next = profile
+        next.dimensions.append(
+            WorkspaceSummarySettingsDimension(
+                id: id,
+                label: label.isEmpty ? id : label,
+                enabled: true,
+                orientation: "higher_is_more_priority",
+                builtin: false,
+                visible: true
+            )
+        )
+        save(next, status: .saved)
+        return true
+    }
+
+    func updateDimension(
+        id: String,
+        label: String? = nil,
+        enabled: Bool? = nil,
+        visible: Bool? = nil
+    ) {
+        guard let index = profile.dimensions.firstIndex(where: { $0.id == id }) else { return }
+        var next = profile
+        if let label {
+            next.dimensions[index].label = label
+        }
+        if let enabled {
+            next.dimensions[index].enabled = enabled
+        }
+        if let visible {
+            next.dimensions[index].visible = visible
+        }
+        guard next != profile else { return }
+        save(next, status: .saved)
+    }
+
+    func removeDimension(id: String) {
+        guard let dimension = profile.dimensions.first(where: { $0.id == id }),
+              dimension.builtin == false else {
+            return
+        }
+        var next = profile
+        next.dimensions.removeAll { $0.id == id }
+        save(next, status: .saved)
+        resetSelectedSortIfNeeded(removedDimensionId: id)
+    }
+
+    func resetToDefaults() {
+        save(.defaultProfile, status: .reset)
+    }
+
+    private func save(_ next: WorkspaceSummarySettingsProfile, status nextStatus: WorkspaceSummaryProfileStatus) {
+        do {
+            let url = Self.profileURL()
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let data = try encoder.encode(next)
+            try data.write(to: url, options: .atomic)
+            profile = next
+            status = nextStatus
+        } catch {
+            status = .saveFailed(error.localizedDescription)
+        }
+    }
+
+    private func resetSelectedSortIfNeeded(removedDimensionId: String) {
+        let key = "workspaceTab.summaryPriority.selectedSort"
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let string = String(data: data, encoding: .utf8),
+              string.contains("\"\(removedDimensionId)\"") else {
+            return
+        }
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    private static func loadProfile(decoder: JSONDecoder) -> WorkspaceSummarySettingsProfile {
+        (try? readProfile(decoder: decoder)) ?? .defaultProfile
+    }
+
+    private static func readProfile(decoder: JSONDecoder) throws -> WorkspaceSummarySettingsProfile {
+        let url = profileURL()
+        let data = try Data(contentsOf: url)
+        let profile = try decoder.decode(WorkspaceSummarySettingsProfile.self, from: data)
+        return ensureBuiltins(profile)
+    }
+
+    private static func ensureBuiltins(_ profile: WorkspaceSummarySettingsProfile) -> WorkspaceSummarySettingsProfile {
+        var next = profile
+        let existingIds = Set(next.dimensions.map(\.id))
+        let missing = WorkspaceSummarySettingsDimension.builtins.filter { existingIds.contains($0.id) == false }
+        next.dimensions = missing + next.dimensions
+        return next
+    }
+
+    private static func profileURL() -> URL {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let digestRoot = ProcessInfo.processInfo.environment["CMUX_DIGEST_HOME"]
+            ?? home.appendingPathComponent("Library/Application Support/cmux/digest").path
+        return URL(fileURLWithPath: digestRoot)
+            .appendingPathComponent("summary_priority/profiles", isDirectory: true)
+            .appendingPathComponent("default.json", isDirectory: false)
+    }
+
+    private static func isValidDimensionId(_ id: String) -> Bool {
+        guard id.isEmpty == false else { return false }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-")
+        guard id.rangeOfCharacter(from: allowed.inverted) == nil else { return false }
+        let first = id.unicodeScalars[id.unicodeScalars.startIndex]
+        let firstAllowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_")
+        return firstAllowed.contains(first)
+    }
+}
+
 struct SettingsView: View {
     private let contentTopInset: CGFloat = 8
     private let pickerColumnWidth: CGFloat = 196
@@ -4478,6 +4852,17 @@ struct SettingsView: View {
     @AppStorage("sidebarShowLog") private var sidebarShowLog = true
     @AppStorage("sidebarShowProgress") private var sidebarShowProgress = true
     @AppStorage("sidebarShowStatusPills") private var sidebarShowMetadata = true
+    @AppStorage("digest.enabled") private var digestEnabled = false
+    @AppStorage("digest.daemonEnabled") private var digestDaemonEnabled = false
+    @AppStorage("digest.provider") private var digestProvider = "heuristic"
+    @AppStorage("digest.model") private var digestModel = ""
+    @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
+    @AppStorage("digest.currentWorkspaceMinIntervalSec") private var digestCurrentWorkspaceMinIntervalSec = 45
+    @AppStorage("digest.backgroundMinIntervalSec") private var digestBackgroundMinIntervalSec = 300
+    @AppStorage("digest.screenLines") private var digestScreenLines = 160
+    @AppStorage("digest.includeDiffStat") private var digestIncludeDiffStat = true
+    @AppStorage("digest.sendFullDiffToLLM") private var digestSendFullDiffToLLM = false
+    @AppStorage("digest.writeSidebarMetadata") private var digestWriteSidebarMetadata = true
     @AppStorage("sidebarTintHex") private var sidebarTintHex = SidebarTintDefaults.hex
     @AppStorage("sidebarTintHexLight") private var sidebarTintHexLight: String?
     @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
@@ -4508,6 +4893,9 @@ struct SettingsView: View {
     @State private var showLanguageRestartAlert = false
     @State private var isResettingSettings = false
     @State private var workspaceTabPaletteEntries = WorkspaceTabColorSettings.palette()
+    @StateObject private var summaryProfileStore = WorkspaceSummaryProfileSettingsStore()
+    @State private var newSummaryDimensionId = ""
+    @State private var newSummaryDimensionLabel = ""
     @State private var trustedDirectoriesDraft: String = CmuxDirectoryTrust.shared.allTrustedPaths.joined(separator: "\n")
 
     private var selectedWorkspacePlacement: NewWorkspacePlacement {
@@ -4987,6 +5375,80 @@ struct SettingsView: View {
         } catch {
             socketPasswordStatusMessage = String(localized: "settings.automation.socketPassword.clearFailed", defaultValue: "Failed to clear password (\(error.localizedDescription)).")
             socketPasswordStatusIsError = true
+        }
+    }
+
+    private func summaryDimensionLabelBinding(for id: String) -> Binding<String> {
+        Binding(
+            get: {
+                summaryProfileStore.profile.dimensions.first(where: { $0.id == id })?.label ?? ""
+            },
+            set: { newValue in
+                summaryProfileStore.updateDimension(id: id, label: newValue)
+            }
+        )
+    }
+
+    private func summaryDimensionEnabledBinding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: {
+                summaryProfileStore.profile.dimensions.first(where: { $0.id == id })?.enabled ?? false
+            },
+            set: { newValue in
+                summaryProfileStore.updateDimension(id: id, enabled: newValue)
+            }
+        )
+    }
+
+    private func summaryDimensionVisibleBinding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: {
+                summaryProfileStore.profile.dimensions.first(where: { $0.id == id })?.visible ?? false
+            },
+            set: { newValue in
+                summaryProfileStore.updateDimension(id: id, visible: newValue)
+            }
+        )
+    }
+
+    private var canAddSummaryDimension: Bool {
+        summaryProfileStore.canAddDimension(id: newSummaryDimensionId)
+    }
+
+    private func addSummaryDimension() {
+        let added = summaryProfileStore.addDimension(
+            id: newSummaryDimensionId,
+            label: newSummaryDimensionLabel
+        )
+        guard added else { return }
+        newSummaryDimensionId = ""
+        newSummaryDimensionLabel = ""
+    }
+
+    private var summaryProfileStatusText: String? {
+        guard let status = summaryProfileStore.status else { return nil }
+        switch status {
+        case .saved:
+            return String(localized: "settings.summaryPriority.status.saved", defaultValue: "Saved. Refresh Summary to use the updated dimensions.")
+        case .reset:
+            return String(localized: "settings.summaryPriority.status.reset", defaultValue: "Restored the built-in dimensions.")
+        case .invalidId:
+            return String(localized: "settings.summaryPriority.status.invalidId", defaultValue: "Dimension ID must start with a letter or underscore and use only letters, numbers, underscores, or hyphens.")
+        case .duplicateId:
+            return String(localized: "settings.summaryPriority.status.duplicateId", defaultValue: "A dimension with this ID already exists.")
+        case .saveFailed(let message):
+            return String(localized: "settings.summaryPriority.status.saveFailed", defaultValue: "Could not save dimensions: ") + message
+        case .loadFailed(let message):
+            return String(localized: "settings.summaryPriority.status.loadFailed", defaultValue: "Could not load dimensions: ") + message
+        }
+    }
+
+    private var summaryProfileStatusIsError: Bool {
+        switch summaryProfileStore.status {
+        case .invalidId, .duplicateId, .saveFailed, .loadFailed:
+            return true
+        case .saved, .reset, .none:
+            return false
         }
     }
 
@@ -5796,6 +6258,198 @@ struct SettingsView: View {
                             }
                             .buttonStyle(.bordered)
                             .controlSize(.small)
+                        }
+                    }
+
+                    SettingsSectionHeader(title: String(localized: "settings.section.digest", defaultValue: "Workspace Digest"))
+                    SettingsCard {
+                        SettingsCardRow(
+                            configurationReview: .json("digest.enabled"),
+                            String(localized: "settings.digest.enabled", defaultValue: "Enable Workspace Digest"),
+                            subtitle: String(localized: "settings.digest.enabled.subtitle", defaultValue: "Allow cmux-digest to summarize workspace state for sidebar and Radar views.")
+                        ) {
+                            Toggle("", isOn: $digestEnabled)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.daemonEnabled"),
+                            String(localized: "settings.digest.daemonEnabled", defaultValue: "Use Digest Daemon"),
+                            subtitle: String(localized: "settings.digest.daemonEnabled.subtitle", defaultValue: "Summary workspace mode reads from the local cmux-digest daemon on localhost.")
+                        ) {
+                            Toggle("", isOn: $digestDaemonEnabled)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.provider"),
+                            String(localized: "settings.digest.provider", defaultValue: "Provider"),
+                            subtitle: String(localized: "settings.digest.provider.subtitle", defaultValue: "heuristic, claude-code (local CLI), or openai. claude-code uses your installed `claude` binary; no API key needed.")
+                        ) {
+                            TextField("", text: $digestProvider)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 140)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.model"),
+                            String(localized: "settings.digest.model", defaultValue: "Model"),
+                            subtitle: String(localized: "settings.digest.model.subtitle", defaultValue: "Optional model name for provider-backed summaries.")
+                        ) {
+                            TextField("", text: $digestModel)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 160)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.claudeCodeModel"),
+                            String(localized: "settings.digest.claudeCodeModel", defaultValue: "Claude Code Model"),
+                            subtitle: String(localized: "settings.digest.claudeCodeModel.subtitle", defaultValue: "Used only when Provider is claude-code. Defaults to haiku for fast, cheap summaries; e.g. haiku, sonnet, opus, or a full ID.")
+                        ) {
+                            TextField("haiku", text: $digestClaudeCodeModel)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 160)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.screenLines"),
+                            String(localized: "settings.digest.screenLines", defaultValue: "Screen Lines"),
+                            subtitle: String(localized: "settings.digest.screenLines.subtitle", defaultValue: "Number of recent terminal lines read per surface.")
+                        ) {
+                            TextField("", value: $digestScreenLines, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 72)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.currentWorkspaceMinIntervalSec"),
+                            String(localized: "settings.digest.currentInterval", defaultValue: "Current Workspace Interval"),
+                            subtitle: String(localized: "settings.digest.currentInterval.subtitle", defaultValue: "Minimum seconds between current workspace refreshes.")
+                        ) {
+                            TextField("", value: $digestCurrentWorkspaceMinIntervalSec, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 72)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.backgroundMinIntervalSec"),
+                            String(localized: "settings.digest.backgroundInterval", defaultValue: "Background Interval"),
+                            subtitle: String(localized: "settings.digest.backgroundInterval.subtitle", defaultValue: "Minimum seconds between background workspace refreshes.")
+                        ) {
+                            TextField("", value: $digestBackgroundMinIntervalSec, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 72)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.includeDiffStat"),
+                            String(localized: "settings.digest.includeDiffStat", defaultValue: "Include Diff Stat"),
+                            subtitle: String(localized: "settings.digest.includeDiffStat.subtitle", defaultValue: "Include git diff statistics as trusted local context.")
+                        ) {
+                            Toggle("", isOn: $digestIncludeDiffStat)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.sendFullDiffToLLM"),
+                            String(localized: "settings.digest.sendFullDiff", defaultValue: "Send Full Diff to LLM"),
+                            subtitle: String(localized: "settings.digest.sendFullDiff.subtitle", defaultValue: "Off by default. Workspace Digest does not need full code diffs for topic summaries.")
+                        ) {
+                            Toggle("", isOn: $digestSendFullDiffToLLM)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.writeSidebarMetadata"),
+                            String(localized: "settings.digest.writeSidebarMetadata", defaultValue: "Write Sidebar Metadata"),
+                            subtitle: String(localized: "settings.digest.writeSidebarMetadata.subtitle", defaultValue: "Let cmux-digest publish topic and summary through sidebar metadata.")
+                        ) {
+                            Toggle("", isOn: $digestWriteSidebarMetadata)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+                    }
+
+                    SettingsSectionHeader(title: String(localized: "settings.section.summaryPriority", defaultValue: "Summary Priority"))
+                    SettingsCard {
+                        SettingsCardNote(
+                            String(
+                                localized: "settings.summaryPriority.dimensions.note",
+                                defaultValue: "Configure independent dimensions shown in Summary mode. Each enabled visible dimension appears in the Summary sort menu."
+                            )
+                        )
+
+                        ForEach(Array(summaryProfileStore.profile.dimensions.enumerated()), id: \.element.id) { index, dimension in
+                            if index > 0 {
+                                SettingsCardDivider()
+                            }
+                            WorkspaceSummaryDimensionSettingsRow(
+                                dimension: dimension,
+                                label: summaryDimensionLabelBinding(for: dimension.id),
+                                isEnabled: summaryDimensionEnabledBinding(for: dimension.id),
+                                isVisible: summaryDimensionVisibleBinding(for: dimension.id),
+                                onRemove: {
+                                    summaryProfileStore.removeDimension(id: dimension.id)
+                                }
+                            )
+                        }
+
+                        SettingsCardDivider()
+
+                        WorkspaceSummaryAddDimensionSettingsRow(
+                            id: $newSummaryDimensionId,
+                            label: $newSummaryDimensionLabel,
+                            canAdd: canAddSummaryDimension,
+                            onAdd: addSummaryDimension
+                        )
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .action,
+                            String(localized: "settings.summaryPriority.resetDimensions", defaultValue: "Reset Dimensions"),
+                            subtitle: String(localized: "settings.summaryPriority.resetDimensions.subtitle", defaultValue: "Restore Urgency and Importance as the built-in Summary sort dimensions.")
+                        ) {
+                            Button(String(localized: "settings.summaryPriority.resetDimensions.button", defaultValue: "Reset")) {
+                                summaryProfileStore.resetToDefaults()
+                                newSummaryDimensionId = ""
+                                newSummaryDimensionLabel = ""
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
+
+                        if let summaryProfileStatusText {
+                            SettingsCardDivider()
+                            SettingsCardNote(summaryProfileStatusText)
+                                .foregroundStyle(summaryProfileStatusIsError ? Color.red : Color.secondary)
                         }
                     }
 
@@ -6651,6 +7305,20 @@ struct SettingsView: View {
         sidebarShowLog = true
         sidebarShowProgress = true
         sidebarShowMetadata = true
+        digestEnabled = false
+        digestDaemonEnabled = false
+        digestProvider = "heuristic"
+        digestModel = ""
+        digestClaudeCodeModel = ""
+        digestCurrentWorkspaceMinIntervalSec = 45
+        digestBackgroundMinIntervalSec = 300
+        digestScreenLines = 160
+        digestIncludeDiffStat = true
+        digestSendFullDiffToLLM = false
+        digestWriteSidebarMetadata = true
+        summaryProfileStore.resetToDefaults()
+        newSummaryDimensionId = ""
+        newSummaryDimensionLabel = ""
         sidebarTintHex = SidebarTintDefaults.hex
         sidebarTintHexLight = nil
         sidebarTintHexDark = nil
@@ -6978,6 +7646,143 @@ private struct SettingsCardNote: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct WorkspaceSummaryDimensionSettingsRow: View {
+    let dimension: WorkspaceSummarySettingsDimension
+    @Binding var label: String
+    @Binding var isEnabled: Bool
+    @Binding var isVisible: Bool
+    let onRemove: () -> Void
+
+    init(
+        dimension: WorkspaceSummarySettingsDimension,
+        label: Binding<String>,
+        isEnabled: Binding<Bool>,
+        isVisible: Binding<Bool>,
+        onRemove: @escaping () -> Void
+    ) {
+        self.dimension = dimension
+        self._label = label
+        self._isEnabled = isEnabled
+        self._isVisible = isVisible
+        self.onRemove = onRemove
+    }
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(dimension.displayLabel)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    if dimension.builtin {
+                        Text(String(localized: "settings.summaryPriority.dimension.builtin", defaultValue: "Built-in"))
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(Color.secondary.opacity(0.12))
+                            )
+                    }
+                }
+
+                Text(dimension.id)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            TextField(
+                String(localized: "settings.summaryPriority.dimension.label.placeholder", defaultValue: "Label"),
+                text: $label
+            )
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 140)
+
+            Toggle(String(localized: "settings.summaryPriority.dimension.enabled", defaultValue: "Enabled"), isOn: $isEnabled)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .fixedSize()
+
+            Toggle(String(localized: "settings.summaryPriority.dimension.visible", defaultValue: "Sort Menu"), isOn: $isVisible)
+                .toggleStyle(.checkbox)
+                .controlSize(.small)
+                .fixedSize()
+
+            Button(action: onRemove) {
+                Image(systemName: "minus.circle")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(dimension.builtin)
+            .opacity(dimension.builtin ? 0.32 : 1)
+            .help(String(localized: "settings.summaryPriority.dimension.remove.help", defaultValue: "Remove dimension"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct WorkspaceSummaryAddDimensionSettingsRow: View {
+    @Binding var id: String
+    @Binding var label: String
+    let canAdd: Bool
+    let onAdd: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(String(localized: "settings.summaryPriority.addDimension", defaultValue: "Add Dimension"))
+                    .font(.system(size: 13, weight: .medium))
+                Text(String(localized: "settings.summaryPriority.addDimension.subtitle", defaultValue: "Use a stable ID such as risk, customerImpact, or reviewDepth."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 6) {
+                TextField(
+                    String(localized: "settings.summaryPriority.dimension.id.placeholder", defaultValue: "id"),
+                    text: $id
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(width: 116)
+                .onSubmit {
+                    if canAdd { onAdd() }
+                }
+
+                TextField(
+                    String(localized: "settings.summaryPriority.dimension.label.placeholder", defaultValue: "Label"),
+                    text: $label
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 140)
+                .onSubmit {
+                    if canAdd { onAdd() }
+                }
+
+                Button(action: onAdd) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(!canAdd)
+                .help(String(localized: "settings.summaryPriority.dimension.add.help", defaultValue: "Add summary dimension"))
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
