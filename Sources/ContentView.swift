@@ -18582,6 +18582,150 @@ struct ExtensionColumnOverlay: View {
     }
 }
 
+private enum ExtensionColumnAssistantText {
+    static func displayText(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let text = cleanSummaryFragment(raw)
+        guard !text.isEmpty,
+              !isLowInformation(text),
+              !isCodeLike(text) else { return nil }
+        return text
+    }
+
+    static func summaryLines(from detailed: String, excluding rawExcluded: [String?]) -> [String] {
+        let excluded = Set(
+            rawExcluded
+                .compactMap { displayText($0).flatMap(normalizedSummaryText) }
+                .filter { !$0.isEmpty }
+        )
+        let fragments = detailed
+            .split(whereSeparator: \.isNewline)
+            .flatMap(summaryDisplayFragments(from:))
+            .compactMap(displayText)
+            .filter { fragment in
+                guard let normalized = normalizedSummaryText(fragment) else { return false }
+                return !excluded.contains(normalized)
+            }
+
+        var seen = Set<String>()
+        var unique: [String] = []
+        for fragment in fragments {
+            guard let normalized = normalizedSummaryText(fragment), seen.insert(normalized).inserted else { continue }
+            unique.append(fragment)
+        }
+        return unique
+    }
+
+    static func fallbackStatus(for rawStatus: String?) -> String {
+        switch rawStatus {
+        case "blocked":
+            return String(localized: "extensionColumn.status.blockedFallback", defaultValue: "Blocked: failing command or tool result needs investigation")
+        case "waiting_for_user", "waitingForUser":
+            return String(localized: "extensionColumn.status.waitingFallback", defaultValue: "Waiting for user input")
+        case "running_tests", "runningTests":
+            return String(localized: "extensionColumn.status.testingFallback", defaultValue: "Verifying changes")
+        case "working":
+            return String(localized: "extensionColumn.status.workingFallback", defaultValue: "Working on implementation")
+        case "done":
+            return String(localized: "extensionColumn.status.doneFallback", defaultValue: "Finished current task")
+        default:
+            return String(localized: "extensionColumn.status.unknownFallback", defaultValue: "Needs inspection")
+        }
+    }
+
+    private static func summaryDisplayFragments(from line: Substring) -> [String] {
+        let raw = cleanSummaryFragment(String(line))
+        guard !raw.isEmpty else { return [] }
+        let lower = raw.lowercased()
+        if lower.hasPrefix("workspace:")
+            || lower.hasPrefix("topic:")
+            || lower.hasPrefix("status:")
+            || lower.hasPrefix("git:") {
+            return []
+        }
+
+        let activityPrefixes = ["progress:", "blockers:", "blocked by", "summary:"]
+        for prefix in activityPrefixes where lower.hasPrefix(prefix) {
+            let value = String(raw.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return value
+                .split(separator: ";")
+                .map { cleanSummaryFragment(String($0)) }
+                .filter { !$0.isEmpty }
+        }
+
+        if lower.hasPrefix("next:") {
+            return []
+        }
+        return [raw]
+    }
+
+    private static func cleanSummaryFragment(_ raw: String) -> String {
+        var text = raw
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = text.first, "-*•·".contains(first) {
+            text.removeFirst()
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let match = text.range(of: #"^\d+[\.)]\s+"#, options: .regularExpression) {
+            text.removeSubrange(match)
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+
+    private static func isLowInformation(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let exact: Set<String> = [
+            "idle",
+            "done",
+            "unknown",
+            "working",
+            "testing",
+            "blocked",
+            "waiting",
+            "needs inspection"
+        ]
+        return exact.contains(lower)
+    }
+
+    private static func isCodeLike(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if trimmed.range(of: #"^\d+\s*[{}\]);,]*$"#, options: .regularExpression) != nil {
+            return true
+        }
+        if trimmed.range(
+            of: #"^\d+\s+(private|public|internal|final|class|struct|enum|func|let|var|return|if|else|guard|case|switch|import|extension)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
+        }
+        if trimmed.contains("{") || trimmed.contains("}") || trimmed.contains(";") {
+            return true
+        }
+        let hasLineNumber = trimmed.range(of: #"\b\d{2,5}\b"#, options: .regularExpression) != nil
+        let hasCodeToken = lower.range(
+            of: #"\b(private|public|internal|final|class|struct|enum|func|let|var|return|import|guard|throws?|extension|jsonencoder|jsondecoder|url|string|bool|int)\b"#,
+            options: .regularExpression
+        ) != nil
+        if hasLineNumber && hasCodeToken {
+            return true
+        }
+        let codeSymbolCount = trimmed.filter { "()[]=<>".contains($0) }.count
+        return codeSymbolCount >= 3 && hasCodeToken
+    }
+
+    private static func normalizedSummaryText(_ raw: String?) -> String? {
+        let value = raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+        return value?.isEmpty == true ? nil : value
+    }
+}
+
 private struct ExtensionRowDual: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("sidebarSelectionColorHex") private var sidebarSelectionColorHex: String?
@@ -18742,23 +18886,26 @@ private struct ExtensionRowDual: View {
     private var currentText: String {
         switch rowState {
         case .loaded:
-            if let presentStatus = row.item?.presentStatus, !presentStatus.isEmpty {
+            if let presentStatus = ExtensionColumnAssistantText.displayText(row.item?.presentStatus) {
                 return presentStatus
             }
-            if let summary = row.item?.summary.short, !summary.isEmpty {
+            if let summary = ExtensionColumnAssistantText.displayText(row.item?.summary.short) {
                 return summary
+            }
+            if let item = row.item {
+                return ExtensionColumnAssistantText.fallbackStatus(for: item.status)
             }
             return row.title
         case .refreshing, .awaiting:
-            return row.contextSummary?.status ?? row.title
+            return ExtensionColumnAssistantText.displayText(row.contextSummary?.status) ?? row.title
         }
     }
 
     private var nextText: String {
-        if let label = row.item?.nextAction?.label, !label.isEmpty {
+        if let label = ExtensionColumnAssistantText.displayText(row.item?.nextAction?.label) {
             return label
         }
-        if let next = row.contextSummary?.next, !next.isEmpty {
+        if let next = ExtensionColumnAssistantText.displayText(row.contextSummary?.next) {
             return next
         }
         return String(localized: "extensionColumn.next.placeholder", defaultValue: "—")
@@ -19086,17 +19233,26 @@ private struct L2TimelinePanel: View {
         }
 
         let nowLabel = relativeTimeLabel(from: item.generatedAt)
-        if let present = item.presentStatus, !present.isEmpty {
+        if let present = ExtensionColumnAssistantText.displayText(item.presentStatus) {
             entries.append(TimelineEntry(kind: .now, text: present, timeLabel: nowLabel))
-        } else if !item.summary.short.isEmpty {
-            entries.append(TimelineEntry(kind: .now, text: item.summary.short, timeLabel: nowLabel))
+        } else if let summary = ExtensionColumnAssistantText.displayText(item.summary.short) {
+            entries.append(TimelineEntry(kind: .now, text: summary, timeLabel: nowLabel))
+        } else {
+            entries.append(
+                TimelineEntry(
+                    kind: .now,
+                    text: ExtensionColumnAssistantText.fallbackStatus(for: item.status),
+                    timeLabel: nowLabel
+                )
+            )
         }
-        if let next = item.nextAction {
+        if let next = item.nextAction,
+           let label = ExtensionColumnAssistantText.displayText(next.label) {
             let combined: String
-            if let detail = next.detail, !detail.isEmpty {
-                combined = "\(next.label) — \(detail)"
+            if let detail = ExtensionColumnAssistantText.displayText(next.detail) {
+                combined = "\(label) — \(detail)"
             } else {
-                combined = next.label
+                combined = label
             }
             entries.append(TimelineEntry(kind: .todo, text: combined, timeLabel: nil))
         }
@@ -19104,7 +19260,7 @@ private struct L2TimelinePanel: View {
     }
 
     private var summarizedActivityLines: [String] {
-        Self.humanSummaryLines(
+        ExtensionColumnAssistantText.summaryLines(
             from: item.summary.detailed,
             excluding: [item.summary.short, item.presentStatus, item.nextAction?.label]
         )
@@ -19143,78 +19299,6 @@ private struct L2TimelinePanel: View {
         if hours < 24 { return "\(hours)h ago" }
         let days = hours / 24
         return "\(days)d ago"
-    }
-
-    private static func humanSummaryLines(from detailed: String, excluding rawExcluded: [String?]) -> [String] {
-        let excluded = Set(
-            rawExcluded
-                .compactMap { normalizedSummaryText($0) }
-                .filter { !$0.isEmpty }
-        )
-        let fragments = detailed
-            .split(whereSeparator: \.isNewline)
-            .flatMap(summaryDisplayFragments(from:))
-            .map(cleanSummaryFragment)
-            .filter { !$0.isEmpty }
-            .filter { fragment in
-                guard let normalized = normalizedSummaryText(fragment) else { return false }
-                return !excluded.contains(normalized)
-            }
-
-        var seen = Set<String>()
-        var unique: [String] = []
-        for fragment in fragments {
-            guard let normalized = normalizedSummaryText(fragment), seen.insert(normalized).inserted else { continue }
-            unique.append(fragment)
-        }
-        return unique
-    }
-
-    private static func summaryDisplayFragments(from line: Substring) -> [String] {
-        let raw = cleanSummaryFragment(String(line))
-        guard !raw.isEmpty else { return [] }
-        let lower = raw.lowercased()
-        if lower.hasPrefix("workspace:")
-            || lower.hasPrefix("topic:")
-            || lower.hasPrefix("status:")
-            || lower.hasPrefix("git:") {
-            return []
-        }
-
-        let activityPrefixes = ["progress:", "blockers:", "summary:"]
-        for prefix in activityPrefixes where lower.hasPrefix(prefix) {
-            let value = String(raw.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            return value
-                .split(separator: ";")
-                .map { cleanSummaryFragment(String($0)) }
-                .filter { !$0.isEmpty }
-        }
-
-        if lower.hasPrefix("next:") {
-            return []
-        }
-        return [raw]
-    }
-
-    private static func cleanSummaryFragment(_ raw: String) -> String {
-        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        while let first = text.first, "-*•·".contains(first) {
-            text.removeFirst()
-            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        if let match = text.range(of: #"^\d+[\.)]\s+"#, options: .regularExpression) {
-            text.removeSubrange(match)
-            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return text
-    }
-
-    private static func normalizedSummaryText(_ raw: String?) -> String? {
-        let value = raw?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .lowercased()
-        return value?.isEmpty == true ? nil : value
     }
 
     private func timelineDot(for kind: TimelineEntryKind) -> some View {
