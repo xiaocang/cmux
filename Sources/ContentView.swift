@@ -19080,10 +19080,11 @@ private struct L2TimelinePanel: View {
 
     private var timelineEntries: [TimelineEntry] {
         var entries: [TimelineEntry] = []
-        let evidence = item.evidence ?? []
-        for snippet in evidence.prefix(3) {
-            entries.append(TimelineEntry(kind: .done, text: snippet.quote, timeLabel: nil))
+
+        for line in summarizedActivityLines.prefix(3) {
+            entries.append(TimelineEntry(kind: .done, text: line, timeLabel: nil))
         }
+
         let nowLabel = relativeTimeLabel(from: item.generatedAt)
         if let present = item.presentStatus, !present.isEmpty {
             entries.append(TimelineEntry(kind: .now, text: present, timeLabel: nowLabel))
@@ -19102,6 +19103,13 @@ private struct L2TimelinePanel: View {
         return entries
     }
 
+    private var summarizedActivityLines: [String] {
+        Self.humanSummaryLines(
+            from: item.summary.detailed,
+            excluding: [item.summary.short, item.presentStatus, item.nextAction?.label]
+        )
+    }
+
     private var timeline: some View {
         VStack(alignment: .leading, spacing: 8) {
             ForEach(Array(timelineEntries.enumerated()), id: \.offset) { _, entry in
@@ -19112,7 +19120,6 @@ private struct L2TimelinePanel: View {
                         Text(entry.text)
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundColor(timelineTextColor(for: entry.kind))
-                            .strikethrough(entry.kind == .done, color: .primary.opacity(0.25))
                             .frame(maxWidth: .infinity, alignment: .leading)
                         if let label = entry.timeLabel {
                             Text(label)
@@ -19138,6 +19145,78 @@ private struct L2TimelinePanel: View {
         return "\(days)d ago"
     }
 
+    private static func humanSummaryLines(from detailed: String, excluding rawExcluded: [String?]) -> [String] {
+        let excluded = Set(
+            rawExcluded
+                .compactMap { normalizedSummaryText($0) }
+                .filter { !$0.isEmpty }
+        )
+        let fragments = detailed
+            .split(whereSeparator: \.isNewline)
+            .flatMap(summaryDisplayFragments(from:))
+            .map(cleanSummaryFragment)
+            .filter { !$0.isEmpty }
+            .filter { fragment in
+                guard let normalized = normalizedSummaryText(fragment) else { return false }
+                return !excluded.contains(normalized)
+            }
+
+        var seen = Set<String>()
+        var unique: [String] = []
+        for fragment in fragments {
+            guard let normalized = normalizedSummaryText(fragment), seen.insert(normalized).inserted else { continue }
+            unique.append(fragment)
+        }
+        return unique
+    }
+
+    private static func summaryDisplayFragments(from line: Substring) -> [String] {
+        let raw = cleanSummaryFragment(String(line))
+        guard !raw.isEmpty else { return [] }
+        let lower = raw.lowercased()
+        if lower.hasPrefix("workspace:")
+            || lower.hasPrefix("topic:")
+            || lower.hasPrefix("status:")
+            || lower.hasPrefix("git:") {
+            return []
+        }
+
+        let activityPrefixes = ["progress:", "blockers:", "summary:"]
+        for prefix in activityPrefixes where lower.hasPrefix(prefix) {
+            let value = String(raw.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return value
+                .split(separator: ";")
+                .map { cleanSummaryFragment(String($0)) }
+                .filter { !$0.isEmpty }
+        }
+
+        if lower.hasPrefix("next:") {
+            return []
+        }
+        return [raw]
+    }
+
+    private static func cleanSummaryFragment(_ raw: String) -> String {
+        var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = text.first, "-*•·".contains(first) {
+            text.removeFirst()
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let match = text.range(of: #"^\d+[\.)]\s+"#, options: .regularExpression) {
+            text.removeSubrange(match)
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+
+    private static func normalizedSummaryText(_ raw: String?) -> String? {
+        let value = raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+        return value?.isEmpty == true ? nil : value
+    }
+
     private func timelineDot(for kind: TimelineEntryKind) -> some View {
         Group {
             switch kind {
@@ -19160,7 +19239,7 @@ private struct L2TimelinePanel: View {
 
     private func timelineTextColor(for kind: TimelineEntryKind) -> Color {
         switch kind {
-        case .done: return .primary.opacity(0.55)
+        case .done: return .primary.opacity(0.68)
         case .now: return .primary.opacity(0.95)
         case .todo: return .primary.opacity(0.6)
         }
