@@ -6800,7 +6800,7 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
                 desiredFocus = false
                 terminalSurface.recordExternalFocusState(false)
 #if DEBUG
-                dlog("focus.firstResponder SUPPRESSED (coordinator) surface=\(terminalSurface.id.uuidString.prefix(5))")
+                cmuxDebugLog("focus.firstResponder SUPPRESSED (coordinator) surface=\(terminalSurface.id.uuidString.prefix(5))")
 #endif
                 return result
             }
@@ -11216,7 +11216,7 @@ final class GhosttySurfaceScrollView: NSView {
 
         guard delegate.allowsTerminalKeyboardFocus(workspaceId: tabId, panelId: surfaceId, in: window) else {
 #if DEBUG
-            dlog("focus.ensure.skip surface=\(surfaceView.terminalSurface?.id.uuidString.prefix(5) ?? "nil") reason=coordinatorRightSidebar")
+            cmuxDebugLog("focus.ensure.skip surface=\(surfaceView.terminalSurface?.id.uuidString.prefix(5) ?? "nil") reason=coordinatorRightSidebar")
 #endif
             return
         }
@@ -11249,7 +11249,7 @@ final class GhosttySurfaceScrollView: NSView {
            firstResponder is NSText || AppDelegate.shared?.isRightSidebarFocusResponder(firstResponder, in: window) == true {
 #if DEBUG
             let reason = firstResponder is NSText ? "textEditorFocused" : "rightSidebarFocused"
-            dlog("focus.ensure.skip surface=\(surfaceView.terminalSurface?.id.uuidString.prefix(5) ?? "nil") reason=\(reason)")
+            cmuxDebugLog("focus.ensure.skip surface=\(surfaceView.terminalSurface?.id.uuidString.prefix(5) ?? "nil") reason=\(reason)")
 #endif
             return
         }
@@ -11287,7 +11287,7 @@ final class GhosttySurfaceScrollView: NSView {
         guard let terminalSurface = surfaceView.terminalSurface else { return }
         terminalSurface.setFocus(false)
 #if DEBUG
-        dlog("focus.surface.yield surface=\(terminalSurface.id.uuidString.prefix(5)) reason=\(reason)")
+        cmuxDebugLog("focus.surface.yield surface=\(terminalSurface.id.uuidString.prefix(5)) reason=\(reason)")
 #endif
         terminalSurface.forceRefresh(reason: "focus.surface.\(reason)")
     }
@@ -11374,7 +11374,7 @@ final class GhosttySurfaceScrollView: NSView {
         ) ?? true
 #if DEBUG
         if !allowed {
-            dlog(
+            cmuxDebugLog(
                 "focus.apply.skip surface=\(terminalSurface.id.uuidString.prefix(5)) " +
                 "reason=\(reason).coordinatorRightSidebar"
             )
@@ -11465,7 +11465,7 @@ final class GhosttySurfaceScrollView: NSView {
         }
         if AppDelegate.shared?.allowsTerminalKeyboardFocus(workspaceId: tabId, panelId: panelId, in: window) == false {
 #if DEBUG
-            dlog("find.applyFirstResponder SKIP surface=\(surfaceShort) reason=coordinatorRightSidebar")
+            cmuxDebugLog("find.applyFirstResponder SKIP surface=\(surfaceShort) reason=coordinatorRightSidebar")
 #endif
             return
         }

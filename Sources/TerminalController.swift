@@ -15385,15 +15385,6 @@ class TerminalController {
         listSidebarMetadata(args, emptyMessage: "No metadata entries")
     }
 
-    private func splitMetadataBlockArgs(_ args: String) -> (optionsPart: String, markdownPart: String?) {
-        guard let separatorRange = args.range(of: " -- ") else {
-            return (args, nil)
-        }
-        let optionsPart = String(args[..<separatorRange.lowerBound])
-        let markdownPart = String(args[separatorRange.upperBound...])
-        return (optionsPart, markdownPart)
-    }
-
     private func sidebarMetadataBlockLine(_ block: SidebarMetadataBlock) -> String {
         var line = "\(block.key)=\(block.markdown.replacingOccurrences(of: "\n", with: "\\n"))"
         if block.priority != 0 { line += " priority=\(block.priority)" }
@@ -15403,20 +15394,15 @@ class TerminalController {
     private func reportMetaBlock(_ args: String) -> String {
         guard tabManager != nil else { return "ERROR: TabManager not available" }
 
-        let parts = splitMetadataBlockArgs(args)
-        let parsed = parseOptionsNoStop(parts.optionsPart)
+        let parsed = parseOptions(args)
         guard let key = parsed.positional.first, !key.isEmpty else {
             return "ERROR: Missing metadata block key — usage: report_meta_block <key> [--priority=N] [--tab=X] -- <markdown>"
         }
 
-        let markdown: String
-        if let raw = parts.markdownPart {
-            markdown = raw
-        } else if parsed.positional.count >= 2 {
-            markdown = parsed.positional.dropFirst().joined(separator: " ")
-        } else {
+        guard parsed.positional.count >= 2 else {
             return "ERROR: Missing metadata markdown — usage: report_meta_block <key> [--priority=N] [--tab=X] -- <markdown>"
         }
+        let markdown = parsed.positional.dropFirst().joined(separator: " ")
 
         let normalizedMarkdown = markdown
             .replacingOccurrences(of: "\\r\\n", with: "\n")

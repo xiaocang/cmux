@@ -298,7 +298,7 @@ final class RightSidebarKeyboardFocusView: NSView {
         guard let window else { return }
         AppDelegate.shared?.keyboardFocusCoordinator(for: window)?.registerRightSidebarHost(self)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "rs.focus.host.attach win=\(window.windowNumber) canAccept=\(cmuxCanAcceptRightSidebarKeyboardFocus ? 1 : 0) " +
             "fr=\(rightSidebarDebugResponder(window.firstResponder))"
         )
@@ -341,13 +341,13 @@ final class RightSidebarKeyboardFocusView: NSView {
     func focusHostFromCoordinator() -> Bool {
         guard let window else {
 #if DEBUG
-            dlog("rs.focus.host.focus result=0 reason=noWindow")
+            cmuxDebugLog("rs.focus.host.focus result=0 reason=noWindow")
 #endif
             return false
         }
         let result = window.makeFirstResponder(self)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "rs.focus.host.focus result=\(result ? 1 : 0) win=\(window.windowNumber) " +
             "fr=\(rightSidebarDebugResponder(window.firstResponder))"
         )

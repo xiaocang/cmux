@@ -5297,7 +5297,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         guard let context else {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "rs.focus.app.abort reason=noContext preferred={\(debugWindowToken(preferredWindow))} " +
                 "\(debugShortcutRouteSnapshot())"
             )
@@ -5308,7 +5308,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 #if DEBUG
         let beforeResponder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
         let beforeState = context.fileExplorerState ?? fileExplorerState
-        dlog(
+        cmuxDebugLog(
             "rs.focus.app.begin preferred={\(debugWindowToken(preferredWindow))} " +
             "context={\(debugContextToken(context))} targetWin={\(debugWindowToken(window))} " +
             "visible=\((beforeState?.isVisible ?? false) ? 1 : 0) mode=\(beforeState?.mode.rawValue ?? "nil") " +
@@ -5330,7 +5330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
 #if DEBUG
         let afterResponder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "rs.focus.app.end requested=1 result=\(result ? 1 : 0) " +
             "mode=\(requestedMode?.rawValue ?? (context.fileExplorerState?.mode.rawValue ?? "nil")) " +
             "targetWin={\(debugWindowToken(window))} fr=\(afterResponder)"
@@ -5345,7 +5345,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         guard let context else {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "file.search.focus.app.abort reason=noContext preferred={\(debugWindowToken(preferredWindow))} " +
                 "\(debugShortcutRouteSnapshot())"
             )
@@ -5355,7 +5355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let window = context.window ?? windowForMainWindowId(context.windowId)
 #if DEBUG
         let beforeResponder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "file.search.focus.app.begin preferred={\(debugWindowToken(preferredWindow))} " +
             "context={\(debugContextToken(context))} targetWin={\(debugWindowToken(window))} " +
             "fr=\(beforeResponder)"
@@ -5373,7 +5373,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let result = context.keyboardFocusCoordinator.focusFileSearch()
 #if DEBUG
         let afterResponder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "file.search.focus.app.end result=\(result ? 1 : 0) " +
             "targetWin={\(debugWindowToken(window))} fr=\(afterResponder)"
         )
@@ -5387,7 +5387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         guard let context else {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "find.shortcut.app.abort reason=noContext preferred={\(debugWindowToken(preferredWindow))} " +
                 "\(debugShortcutRouteSnapshot())"
             )
@@ -5397,7 +5397,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let window = context.window ?? windowForMainWindowId(context.windowId)
 #if DEBUG
         let beforeResponder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "find.shortcut.app.begin preferred={\(debugWindowToken(preferredWindow))} " +
             "context={\(debugContextToken(context))} targetWin={\(debugWindowToken(window))} " +
             "fr=\(beforeResponder)"
@@ -5428,7 +5428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 #if DEBUG
         let afterResponder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "find.shortcut.app.end target=\(target) result=\(result ? 1 : 0) " +
             "targetWin={\(debugWindowToken(window))} fr=\(afterResponder)"
         )
@@ -5442,7 +5442,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         guard let context else {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "rs.focus.toggle.abort reason=noContext preferred={\(debugWindowToken(preferredWindow))} " +
                 "\(debugShortcutRouteSnapshot())"
             )
@@ -5452,7 +5452,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let window = context.window ?? windowForMainWindowId(context.windowId)
 #if DEBUG
         let beforeResponder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "rs.focus.toggle.begin preferred={\(debugWindowToken(preferredWindow))} " +
             "context={\(debugContextToken(context))} targetWin={\(debugWindowToken(window))} " +
             "fr=\(beforeResponder)"
@@ -5470,7 +5470,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let result = context.keyboardFocusCoordinator.toggleRightSidebarOrTerminalFocus()
 #if DEBUG
         let afterResponder = window?.firstResponder.map { String(describing: type(of: $0)) } ?? "nil"
-        dlog(
+        cmuxDebugLog(
             "rs.focus.toggle.end result=\(result ? 1 : 0) " +
             "targetWin={\(debugWindowToken(window))} fr=\(afterResponder)"
         )
@@ -10402,7 +10402,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let beforeResponder = preferredWindow?.firstResponder
                 ?? NSApp.keyWindow?.firstResponder
                 ?? NSApp.mainWindow?.firstResponder
-            dlog(
+            cmuxDebugLog(
                 "rs.focus.toggle.shortcut.begin event=\(NSWindow.keyDescription(event)) " +
                 "preferred={\(debugWindowToken(preferredWindow))} fr=\(beforeResponder.map { String(describing: type(of: $0)) } ?? "nil") " +
                 "\(debugShortcutRouteSnapshot(event: event))"
@@ -10413,12 +10413,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             let afterResponder = preferredWindow?.firstResponder
                 ?? NSApp.keyWindow?.firstResponder
                 ?? NSApp.mainWindow?.firstResponder
-            dlog(
+            cmuxDebugLog(
                 "rs.focus.toggle.shortcut.end result=\(result ? 1 : 0) " +
                 "preferred={\(debugWindowToken(preferredWindow))} fr=\(afterResponder.map { String(describing: type(of: $0)) } ?? "nil") " +
                 "\(debugShortcutRouteSnapshot(event: event))"
             )
 #endif
+            return true
+        }
+
+        if matchConfiguredShortcut(event: event, action: .toggleExtensionColumn) {
+            DispatchQueue.main.async {
+                let key = ExtensionColumnSettings.openKey
+                let current = UserDefaults.standard.bool(forKey: key)
+                UserDefaults.standard.set(!current, forKey: key)
+            }
             return true
         }
 
@@ -13327,14 +13336,14 @@ private extension NSWindow {
            AppDelegate.shared?.allowsTerminalKeyboardFocus(for: responder, in: self) == false {
 #if DEBUG
             if let request = AppDelegate.shared?.terminalKeyboardFocusRequest(for: responder) {
-                dlog(
+                cmuxDebugLog(
                     "focus.guard blockedTerminalFirstResponder responder=\(String(describing: type(of: responder))) " +
                     "window=\(ObjectIdentifier(self)) " +
                     "workspace=\(request.workspaceId.uuidString.prefix(5)) " +
                     "panel=\(request.panelId.uuidString.prefix(5))"
                 )
             } else {
-                dlog(
+                cmuxDebugLog(
                     "focus.guard blockedTerminalFirstResponder responder=\(String(describing: type(of: responder))) " +
                     "window=\(ObjectIdentifier(self))"
                 )
@@ -13586,7 +13595,7 @@ private extension NSWindow {
             // can dispatch the second key.
             if AppDelegate.shared?.tabManager?.isLeaderModeActive == true {
 #if DEBUG
-                dlog("  → leader mode active, skipping ghostty direct routing")
+                cmuxDebugLog("  → leader mode active, skipping ghostty direct routing")
 #endif
                 return false
             }

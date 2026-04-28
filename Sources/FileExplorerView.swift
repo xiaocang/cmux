@@ -1042,7 +1042,7 @@ final class FileExplorerContainerView: NSView {
         guard let window else { return }
         AppDelegate.shared?.keyboardFocusCoordinator(for: window)?.registerFileExplorerHost(self)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "file.focus.host.attach win=\(window.windowNumber) canAccept=\(cmuxCanAcceptRightSidebarKeyboardFocus ? 1 : 0) " +
             "rows=\(outlineView.numberOfRows) hidden=\(isHiddenOrHasHiddenAncestor ? 1 : 0) " +
             "fr=\(fileExplorerDebugResponder(window.firstResponder))"
@@ -1111,7 +1111,7 @@ final class FileExplorerContainerView: NSView {
     func focusSearchField() -> Bool {
         guard let window, cmuxCanAcceptRightSidebarKeyboardFocus else {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "file.focus.search.end result=0 reason=unavailable " +
                 "win=\(window?.windowNumber ?? -1) hidden=\(isHiddenOrHasHiddenAncestor ? 1 : 0)"
             )
@@ -1124,7 +1124,7 @@ final class FileExplorerContainerView: NSView {
         let result = window.makeFirstResponder(searchField)
         searchField.selectText(nil)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "file.focus.search.end result=\(result ? 1 : 0) win=\(window.windowNumber) " +
             "queryLen=\(searchField.stringValue.count) fr=\(fileExplorerDebugResponder(window.firstResponder))"
         )
@@ -1135,7 +1135,7 @@ final class FileExplorerContainerView: NSView {
     @discardableResult
     func focusOutline() -> Bool {
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "file.focus.outline.begin win=\(window?.windowNumber ?? -1) " +
             "canAccept=\(cmuxCanAcceptRightSidebarKeyboardFocus ? 1 : 0) " +
             "hostHidden=\(isHiddenOrHasHiddenAncestor ? 1 : 0) scrollHidden=\(scrollView.isHidden ? 1 : 0) " +
@@ -1146,7 +1146,7 @@ final class FileExplorerContainerView: NSView {
 #endif
         guard let window, cmuxCanAcceptRightSidebarKeyboardFocus else {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "file.focus.outline.end result=0 reason=unavailable " +
                 "win=\(window?.windowNumber ?? -1) hidden=\(isHiddenOrHasHiddenAncestor ? 1 : 0)"
             )
@@ -1165,7 +1165,7 @@ final class FileExplorerContainerView: NSView {
             .ensureSelection(in: outlineView, fallbackToFirstVisible: true, scroll: true)
         let result = window.makeFirstResponder(outlineView)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "file.focus.outline.end result=\(result ? 1 : 0) win=\(window.windowNumber) " +
             "rows=\(outlineView.numberOfRows) selected=\(outlineView.selectedRow) " +
             "fr=\(fileExplorerDebugResponder(window.firstResponder))"

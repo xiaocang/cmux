@@ -416,7 +416,7 @@ private struct FeedListView: View {
         let selectionChanged = focusSnapshot.selectedItemId != id
         let window = activeFeedWindow()
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "feed.focus.select begin id=\(id.uuidString.prefix(5)) " +
             "focusFeed=\(focusFeed ? 1 : 0) selectionChanged=\(selectionChanged ? 1 : 0) " +
             "frBefore=\(feedDebugResponderSummary(window?.firstResponder))"
@@ -435,7 +435,7 @@ private struct FeedListView: View {
         }
 #if DEBUG
         let afterWindow = activeFeedWindow()
-        dlog(
+        cmuxDebugLog(
             "feed.focus.select end id=\(id.uuidString.prefix(5)) " +
             "focusFeed=\(focusFeed ? 1 : 0) selected=\(focusSnapshot.selectedItemId == id ? 1 : 0) " +
             "active=\(focusSnapshot.isKeyboardActive ? 1 : 0) " +
@@ -506,7 +506,7 @@ private struct FeedListView: View {
         scrollRequestSequence &+= 1
         scrollRequest = FeedScrollRequest(id: targetId, sequence: scrollRequestSequence)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "feed.focus.move delta=\(delta) " +
             "target=\(targetId.uuidString.prefix(5)) count=\(ids.count)"
         )
@@ -705,7 +705,7 @@ final class FeedKeyboardFocusView: NSView {
         guard let window else { return }
         AppDelegate.shared?.keyboardFocusCoordinator(for: window)?.registerFeedHost(self)
 #if DEBUG
-        dlog("feed.focus.host attach window=\(ObjectIdentifier(window))")
+        cmuxDebugLog("feed.focus.host attach window=\(ObjectIdentifier(window))")
 #endif
     }
 
@@ -722,7 +722,7 @@ final class FeedKeyboardFocusView: NSView {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.type == .keyDown, event.keyCode == 53 {
 #if DEBUG
-            dlog(
+            cmuxDebugLog(
                 "feed.focus.host escape window=\(window.map { String(describing: ObjectIdentifier($0)) } ?? "nil") " +
                 "fr=\(feedDebugResponderSummary(window?.firstResponder))"
             )
@@ -740,7 +740,7 @@ final class FeedKeyboardFocusView: NSView {
     override func keyDown(with event: NSEvent) {
 #if DEBUG
         let chars = event.charactersIgnoringModifiers ?? ""
-        dlog(
+        cmuxDebugLog(
             "feed.focus.host keyDown key=\(event.keyCode) chars=\(chars) " +
             "fr=\(feedDebugResponderSummary(window?.firstResponder))"
         )
@@ -789,7 +789,7 @@ final class FeedKeyboardFocusView: NSView {
             onFocusChanged?(true)
         }
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "feed.focus.host become result=\(result ? 1 : 0) " +
             "window=\(window.map { String(describing: ObjectIdentifier($0)) } ?? "nil") " +
             "fr=\(feedDebugResponderSummary(window?.firstResponder))"
@@ -804,7 +804,7 @@ final class FeedKeyboardFocusView: NSView {
             onFocusChanged?(false)
         }
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "feed.focus.host resign result=\(result ? 1 : 0) " +
             "window=\(window.map { String(describing: ObjectIdentifier($0)) } ?? "nil") " +
             "fr=\(feedDebugResponderSummary(window?.firstResponder))"
@@ -824,7 +824,7 @@ final class FeedKeyboardFocusView: NSView {
 #endif
         let result = window.makeFirstResponder(self)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "feed.focus.host request result=\(result ? 1 : 0) " +
             "window=\(ObjectIdentifier(window)) before=\(before) " +
             "after=\(feedDebugResponderSummary(window.firstResponder))"
@@ -3062,14 +3062,14 @@ private final class FeedInlineNativeTextView: NSTextView, FeedKeyboardFocusRespo
             return
         }
 #if DEBUG
-        dlog("feed.editor.blurActive fr=\(feedDebugResponderSummary(window.firstResponder))")
+        cmuxDebugLog("feed.editor.blurActive fr=\(feedDebugResponderSummary(window.firstResponder))")
 #endif
         window.makeFirstResponder(nil)
     }
 
     override func mouseDown(with event: NSEvent) {
 #if DEBUG
-        dlog("feed.editor.mouseDown frBefore=\(feedDebugResponderSummary(window?.firstResponder))")
+        cmuxDebugLog("feed.editor.mouseDown frBefore=\(feedDebugResponderSummary(window?.firstResponder))")
 #endif
         onActivate?()
         super.mouseDown(with: event)
@@ -3078,7 +3078,7 @@ private final class FeedInlineNativeTextView: NSTextView, FeedKeyboardFocusRespo
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if event.type == .keyDown, event.keyCode == 53 {
 #if DEBUG
-            dlog("feed.editor.escape fr=\(feedDebugResponderSummary(window?.firstResponder))")
+            cmuxDebugLog("feed.editor.escape fr=\(feedDebugResponderSummary(window?.firstResponder))")
 #endif
             onEscape?()
             return true
@@ -3098,7 +3098,7 @@ private final class FeedInlineNativeTextView: NSTextView, FeedKeyboardFocusRespo
             onActivate?()
         }
 #if DEBUG
-        dlog("feed.editor.become result=\(didBecomeFirstResponder ? 1 : 0) fr=\(feedDebugResponderSummary(window?.firstResponder))")
+        cmuxDebugLog("feed.editor.become result=\(didBecomeFirstResponder ? 1 : 0) fr=\(feedDebugResponderSummary(window?.firstResponder))")
 #endif
         return didBecomeFirstResponder
     }
@@ -3109,7 +3109,7 @@ private final class FeedInlineNativeTextView: NSTextView, FeedKeyboardFocusRespo
             Self.activeEditor = nil
         }
 #if DEBUG
-        dlog("feed.editor.resign result=\(didResignFirstResponder ? 1 : 0) fr=\(feedDebugResponderSummary(window?.firstResponder))")
+        cmuxDebugLog("feed.editor.resign result=\(didResignFirstResponder ? 1 : 0) fr=\(feedDebugResponderSummary(window?.firstResponder))")
 #endif
         return didResignFirstResponder
     }
@@ -3299,7 +3299,7 @@ private struct FeedInlineTextField: NSViewRepresentable {
 
         func activateField() {
 #if DEBUG
-            dlog("feed.editor.activateField")
+            cmuxDebugLog("feed.editor.activateField")
 #endif
             parent.onFocus()
             if !parent.isFocused {
@@ -3316,7 +3316,7 @@ private struct FeedInlineTextField: NSViewRepresentable {
                 return
             }
 #if DEBUG
-            dlog("feed.editor.blurField frBefore=\(feedDebugResponderSummary(window.firstResponder))")
+            cmuxDebugLog("feed.editor.blurField frBefore=\(feedDebugResponderSummary(window.firstResponder))")
 #endif
             Task { @MainActor in
                 if AppDelegate.shared?.focusRightSidebarInActiveMainWindow(

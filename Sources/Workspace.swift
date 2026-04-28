@@ -9923,7 +9923,7 @@ final class Workspace: Identifiable, ObservableObject {
 #if DEBUG
         let splitTimingStart = ProcessInfo.processInfo.systemUptime
         let splitTransport = remoteConfiguration?.transport.rawValue ?? "local"
-        dlog(
+        cmuxDebugLog(
             "split.timing workspace=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
             "transport=\(splitTransport) stage=start elapsedMs=0.00"
         )
@@ -9953,7 +9953,7 @@ final class Workspace: Identifiable, ObservableObject {
             inheritedConfig = template
         }
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.timing workspace=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
             "transport=\(splitTransport) stage=command_resolved elapsedMs=\(debugElapsedMs(since: splitTimingStart)) " +
             "remoteCommand=\(remoteTerminalStartupCommand == nil ? 0 : 1)"
@@ -10000,7 +10000,7 @@ final class Workspace: Identifiable, ObservableObject {
         }
         seedTerminalInheritanceFontPoints(panelId: newPanel.id, configTemplate: inheritedConfig)
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.timing workspace=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
             "transport=\(splitTransport) stage=panel_ready elapsedMs=\(debugElapsedMs(since: splitTimingStart)) " +
             "newPanel=\(newPanel.id.uuidString.prefix(5))"
@@ -10063,7 +10063,7 @@ final class Workspace: Identifiable, ObservableObject {
             )
         }
 #if DEBUG
-        dlog(
+        cmuxDebugLog(
             "split.timing workspace=\(id.uuidString.prefix(5)) panel=\(panelId.uuidString.prefix(5)) " +
             "transport=\(splitTransport) stage=focus_scheduled elapsedMs=\(debugElapsedMs(since: splitTimingStart)) " +
             "newPanel=\(newPanel.id.uuidString.prefix(5)) focus=\(focus ? 1 : 0)"
@@ -11347,7 +11347,7 @@ final class Workspace: Identifiable, ObservableObject {
     func focusPreviousPane() {
         let paneIds = visuallyOrderedPaneIds()
 #if DEBUG
-        dlog("pane.cyclePrev count=\(paneIds.count) focusedId=\(bonsplitController.focusedPaneId.map { "\($0)" } ?? "nil")")
+        cmuxDebugLog("pane.cyclePrev count=\(paneIds.count) focusedId=\(bonsplitController.focusedPaneId.map { "\($0)" } ?? "nil")")
 #endif
         guard paneIds.count > 1 else { return }
         let currentId = bonsplitController.focusedPaneId ?? paneIds[0]
@@ -11360,7 +11360,7 @@ final class Workspace: Identifiable, ObservableObject {
     func focusNextPane() {
         let paneIds = visuallyOrderedPaneIds()
 #if DEBUG
-        dlog("pane.cycleNext count=\(paneIds.count) focusedId=\(bonsplitController.focusedPaneId.map { "\($0)" } ?? "nil")")
+        cmuxDebugLog("pane.cycleNext count=\(paneIds.count) focusedId=\(bonsplitController.focusedPaneId.map { "\($0)" } ?? "nil")")
 #endif
         guard paneIds.count > 1 else { return }
         let currentId = bonsplitController.focusedPaneId ?? paneIds[0]
@@ -11373,7 +11373,7 @@ final class Workspace: Identifiable, ObservableObject {
     func focusPaneByIndex(_ index: Int) {
         let paneIds = visuallyOrderedPaneIds()
 #if DEBUG
-        dlog("pane.focusByIndex index=\(index) count=\(paneIds.count) focusedId=\(bonsplitController.focusedPaneId.map { "\($0)" } ?? "nil")")
+        cmuxDebugLog("pane.focusByIndex index=\(index) count=\(paneIds.count) focusedId=\(bonsplitController.focusedPaneId.map { "\($0)" } ?? "nil")")
 #endif
         guard index >= 0, index < paneIds.count else { return }
         switchFocusToPane(paneIds[index])
@@ -13249,7 +13249,7 @@ extension Workspace: BonsplitDelegate {
             }
 
             #if DEBUG
-            dlog("replacement.banner.fire target=\(pendingReplacementBannerRemoteTarget ?? "nil")")
+            cmuxDebugLog("replacement.banner.fire target=\(pendingReplacementBannerRemoteTarget ?? "nil")")
             #endif
             let replacement = createReplacementTerminalPanel()
             if let replacementTabId = surfaceIdFromPanelId(replacement.id),

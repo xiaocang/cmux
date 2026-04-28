@@ -261,7 +261,18 @@ def test_live_socket_injects_supported_hooks(failures: list[str]) -> None:
 
     settings = parse_settings_arg(real_argv)
     hooks = settings.get("hooks", {})
-    expected_hooks = {"SessionStart", "Stop", "SessionEnd", "Notification", "UserPromptSubmit", "PreToolUse", "PermissionRequest"}
+    expected_hooks = {
+        "SessionStart",
+        "Stop",
+        "SessionEnd",
+        "Notification",
+        "UserPromptSubmit",
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "SubagentStop",
+        "PermissionRequest",
+    }
     expect(set(hooks.keys()) == expected_hooks, f"unexpected hook keys: {hooks.keys()}, expected {expected_hooks}", failures)
     for hook_name, expected_subcommand in {
         "SessionStart": "session-start",
@@ -270,6 +281,9 @@ def test_live_socket_injects_supported_hooks(failures: list[str]) -> None:
         "Notification": "notification",
         "UserPromptSubmit": "prompt-submit",
         "PreToolUse": "pre-tool-use",
+        "PostToolUse": "post-tool-use",
+        "PostToolUseFailure": "post-tool-use-failure",
+        "SubagentStop": "subagent-stop",
     }.items():
         hook_command = hooks.get(hook_name, [{}])[0].get("hooks", [{}])[0].get("command", "")
         expect(
@@ -290,6 +304,13 @@ def test_live_socket_injects_supported_hooks(failures: list[str]) -> None:
         f"PermissionRequest hook should call feed-hook, got {permission_request_hooks}",
         failures,
     )
+    for hook_name in ("PostToolUse", "PostToolUseFailure"):
+        tool_hooks = hooks.get(hook_name, [{}])[0].get("hooks", [{}])
+        expect(
+            any(h.get("async") is True for h in tool_hooks),
+            f"{hook_name} hook should have async:true, got {tool_hooks}",
+            failures,
+        )
     # SessionEnd should have a short timeout (session is exiting)
     session_end_hooks = hooks.get("SessionEnd", [{}])[0].get("hooks", [{}])
     expect(

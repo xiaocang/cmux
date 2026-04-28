@@ -593,8 +593,10 @@ final class FileDropOverlayView: NSView {
 var fileDropOverlayKey: UInt8 = 0
 private var commandPaletteWindowOverlayKey: UInt8 = 0
 private var tmuxWorkspacePaneWindowOverlayKey: UInt8 = 0
+private var extensionColumnWindowOverlayKey: UInt8 = 0
 let commandPaletteOverlayContainerIdentifier = NSUserInterfaceItemIdentifier("cmux.commandPalette.overlay.container")
 let tmuxWorkspacePaneOverlayContainerIdentifier = NSUserInterfaceItemIdentifier("cmux.tmuxWorkspacePane.overlay.container")
+let extensionColumnOverlayContainerIdentifier = NSUserInterfaceItemIdentifier("cmux.extensionColumn.overlay.container")
 
 enum CommandPaletteOverlayPromotionPolicy {
     static func shouldPromote(previouslyVisible: Bool, isVisible: Bool) -> Bool {
@@ -635,6 +637,22 @@ private final class NativeTitlebarBackdropView: NSView {
     }
 }
 
+@MainActor
+private final class ExtensionColumnOverlayContainerView: NSView {
+    var capturesMouseEvents = false
+    var sidebarWidth: CGFloat = 0
+    var overlayHitWidth: CGFloat = 0
+
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard capturesMouseEvents, bounds.contains(point) else { return nil }
+        let hitMinX = max(0, sidebarWidth)
+        let hitMaxX = hitMinX + max(0, overlayHitWidth)
+        guard point.x >= hitMinX, point.x <= hitMaxX else { return nil }
+        return super.hitTest(point)
+    }
+}
 #if DEBUG
 private func debugCommandPaletteWindowSummary(_ window: NSWindow?) -> String {
     guard let window else { return "nil" }
@@ -1272,6 +1290,98 @@ private func tmuxWorkspacePaneWindowOverlayController(for window: NSWindow) -> W
     return controller
 }
 
+@MainActor
+private final class WindowExtensionColumnOverlayController: NSObject {
+    private weak var window: NSWindow?
+    private let containerView = ExtensionColumnOverlayContainerView(frame: .zero)
+    private let hostingView = NSHostingView(rootView: AnyView(EmptyView()))
+    private var installConstraints: [NSLayoutConstraint] = []
+    private weak var installedThemeFrame: NSView?
+
+    init(window: NSWindow) {
+        self.window = window
+        super.init()
+        containerView.translatesAutoresizingMaskIntoConstraints = false
+        containerView.wantsLayer = true
+        containerView.layer?.backgroundColor = NSColor.clear.cgColor
+        containerView.isHidden = true
+        containerView.alphaValue = 0
+        containerView.capturesMouseEvents = false
+        containerView.identifier = extensionColumnOverlayContainerIdentifier
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
+        hostingView.wantsLayer = true
+        hostingView.layer?.backgroundColor = NSColor.clear.cgColor
+        containerView.addSubview(hostingView)
+        NSLayoutConstraint.activate([
+            hostingView.topAnchor.constraint(equalTo: containerView.topAnchor),
+            hostingView.bottomAnchor.constraint(equalTo: containerView.bottomAnchor),
+            hostingView.leadingAnchor.constraint(equalTo: containerView.leadingAnchor),
+            hostingView.trailingAnchor.constraint(equalTo: containerView.trailingAnchor),
+        ])
+        _ = ensureInstalled()
+    }
+
+    @discardableResult
+    private func ensureInstalled() -> Bool {
+        guard let window,
+              let contentView = window.contentView,
+              let themeFrame = contentView.superview else { return false }
+
+        if containerView.superview !== themeFrame {
+            NSLayoutConstraint.deactivate(installConstraints)
+            installConstraints.removeAll()
+            containerView.removeFromSuperview()
+            themeFrame.addSubview(containerView, positioned: .above, relativeTo: nil)
+            installConstraints = [
+                containerView.topAnchor.constraint(equalTo: themeFrame.topAnchor),
+                containerView.bottomAnchor.constraint(equalTo: themeFrame.bottomAnchor),
+                containerView.leadingAnchor.constraint(equalTo: themeFrame.leadingAnchor),
+                containerView.trailingAnchor.constraint(equalTo: themeFrame.trailingAnchor),
+            ]
+            NSLayoutConstraint.activate(installConstraints)
+            installedThemeFrame = themeFrame
+        }
+
+        return true
+    }
+
+    private func promoteOverlayAboveSiblingsIfNeeded() {
+        guard let themeFrame = installedThemeFrame,
+              containerView.superview === themeFrame else { return }
+        themeFrame.addSubview(containerView, positioned: .above, relativeTo: nil)
+    }
+
+    func update(rootView: AnyView, isVisible: Bool, sidebarWidth: CGFloat, hitWidth: CGFloat) {
+        guard ensureInstalled() else { return }
+
+        containerView.sidebarWidth = sidebarWidth
+        containerView.overlayHitWidth = hitWidth
+
+        if isVisible {
+            hostingView.rootView = rootView
+            containerView.capturesMouseEvents = true
+            containerView.isHidden = false
+            containerView.alphaValue = 1
+            promoteOverlayAboveSiblingsIfNeeded()
+        } else {
+            hostingView.rootView = AnyView(EmptyView())
+            containerView.capturesMouseEvents = false
+            containerView.alphaValue = 0
+            containerView.isHidden = true
+        }
+    }
+}
+
+@MainActor
+private func extensionColumnWindowOverlayController(for window: NSWindow) -> WindowExtensionColumnOverlayController {
+    if let existing = objc_getAssociatedObject(window, &extensionColumnWindowOverlayKey) as? WindowExtensionColumnOverlayController {
+        return existing
+    }
+    let controller = WindowExtensionColumnOverlayController(window: window)
+    objc_setAssociatedObject(window, &extensionColumnWindowOverlayKey, controller, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    return controller
+}
+
 private func commandPaletteOwningWebView(for responder: NSResponder?) -> WKWebView? {
     guard let responder else { return nil }
 
@@ -1552,6 +1662,10 @@ struct ContentView: View {
     @StateObject private var fileExplorerStore = FileExplorerStore()
     @StateObject private var sessionIndexStore = SessionIndexStore()
     @StateObject private var selectedWorkspaceDirectoryObserver = SelectedWorkspaceDirectoryObserver()
+    @StateObject private var workspaceTabStore = WorkspaceTabStore()
+    @StateObject private var workspaceSidebarLayoutMetricsStore = WorkspaceSidebarLayoutMetricsStore()
+    @AppStorage(ExtensionColumnSettings.openKey)
+    private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
     @State private var fileExplorerWidth: CGFloat = 220
     @State private var fileExplorerDragStartWidth: CGFloat?
     @State private var previousSelectedWorkspaceId: UUID?
@@ -2452,10 +2566,12 @@ struct ContentView: View {
             fileExplorerState: fileExplorerState,
             onSendFeedback: presentFeedbackComposer,
             titlebarHeight: titlebarPadding,
+            workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore,
             selection: $sidebarSelectionState.selection,
             selectedTabIds: $selectedTabIds,
             lastSidebarSelectionIndex: $lastSidebarSelectionIndex
         )
+        .environmentObject(workspaceTabStore)
         .frame(width: sidebarWidth)
         .frame(maxHeight: .infinity, alignment: .topLeading)
     }
@@ -3487,6 +3603,23 @@ struct ContentView: View {
             MainActor.assumeIsolated {
                 let tmuxOverlayController = tmuxWorkspacePaneWindowOverlayController(for: window)
                 tmuxOverlayController.update(state: tmuxWorkspacePaneWindowOverlayState(for: window))
+                let extensionOverlayController = extensionColumnWindowOverlayController(for: window)
+                let isExtensionColumnVisible = sidebarState.isVisible && extensionColumnOpen
+                extensionOverlayController.update(
+                    rootView: AnyView(
+                        ExtensionColumnWindowOverlayRoot(
+                            workspaceTabStore: workspaceTabStore,
+                            workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore,
+                            tabManager: tabManager,
+                            isOpen: extensionColumnOpen,
+                            sidebarWidth: sidebarWidth,
+                            onClose: { extensionColumnOpen = false }
+                        )
+                    ),
+                    isVisible: isExtensionColumnVisible,
+                    sidebarWidth: sidebarWidth,
+                    hitWidth: ExtensionColumnSettings.overlayHitWidth
+                )
                 let overlayController = commandPaletteWindowOverlayController(for: window)
                 overlayController.update(rootView: AnyView(commandPaletteOverlay), isVisible: isCommandPalettePresented)
             }
@@ -9535,11 +9668,247 @@ private struct SidebarTabItemPresentationSnapshot: Equatable {
     let showsModifierShortcutHints: Bool
 }
 
+@MainActor
+final class WorkspaceSidebarLayoutMetricsStore: ObservableObject {
+    @Published private(set) var rowFrames: [UUID: CGRect] = [:]
+    @Published private(set) var hoveredWorkspaceId: UUID?
+    private var pendingHoverClearWorkItem: DispatchWorkItem?
+
+    func rowFrame(for workspaceId: UUID) -> CGRect? {
+        rowFrames[workspaceId]
+    }
+
+    func setRowFrame(_ frame: CGRect?, for workspaceId: UUID) {
+        guard let frame else {
+            guard rowFrames[workspaceId] != nil else { return }
+            var next = rowFrames
+            next.removeValue(forKey: workspaceId)
+            rowFrames = next
+            return
+        }
+        guard frame.minX.isFinite,
+              frame.minY.isFinite,
+              frame.width.isFinite,
+              frame.height.isFinite,
+              frame.width > 0,
+              frame.height > 0 else { return }
+
+        let normalized = Self.normalized(frame)
+        guard rowFrames[workspaceId] != normalized else { return }
+        var next = rowFrames
+        next[workspaceId] = normalized
+        rowFrames = next
+    }
+
+    func prune(to workspaceIds: Set<UUID>) {
+        let filtered = rowFrames.filter { workspaceIds.contains($0.key) }
+        if hoveredWorkspaceId.map({ !workspaceIds.contains($0) }) == true {
+            clearHoveredWorkspaceId()
+        }
+        guard filtered.count != rowFrames.count else { return }
+        rowFrames = filtered
+    }
+
+    func clear() {
+        clearHoveredWorkspaceId()
+        guard !rowFrames.isEmpty else { return }
+        rowFrames = [:]
+    }
+
+    func setHoveredWorkspaceId(_ workspaceId: UUID) {
+        pendingHoverClearWorkItem?.cancel()
+        pendingHoverClearWorkItem = nil
+        guard hoveredWorkspaceId != workspaceId else { return }
+        hoveredWorkspaceId = workspaceId
+    }
+
+    func clearHoveredWorkspaceId(ifCurrent workspaceId: UUID? = nil, delay: TimeInterval = 0) {
+        pendingHoverClearWorkItem?.cancel()
+        pendingHoverClearWorkItem = nil
+
+        guard delay > 0 else {
+            clearHoveredWorkspaceIdNow(ifCurrent: workspaceId)
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.pendingHoverClearWorkItem = nil
+                self.clearHoveredWorkspaceIdNow(ifCurrent: workspaceId)
+            }
+        }
+        pendingHoverClearWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+    }
+
+    private func clearHoveredWorkspaceIdNow(ifCurrent workspaceId: UUID?) {
+        if let workspaceId, hoveredWorkspaceId != workspaceId {
+            return
+        }
+        hoveredWorkspaceId = nil
+    }
+
+    private static func normalized(_ frame: CGRect) -> CGRect {
+        CGRect(
+            x: normalized(frame.minX),
+            y: normalized(frame.minY),
+            width: normalized(frame.width),
+            height: normalized(frame.height)
+        )
+    }
+
+    private static func normalized(_ value: CGFloat) -> CGFloat {
+        (value * 2).rounded(.toNearestOrAwayFromZero) / 2
+    }
+}
+
+private struct WorkspaceSidebarRowFrameReporter: NSViewRepresentable {
+    let workspaceId: UUID
+    let onFrameChange: (UUID, CGRect?) -> Void
+
+    func makeNSView(context: Context) -> WorkspaceSidebarRowFrameReporterView {
+        let view = WorkspaceSidebarRowFrameReporterView(frame: .zero)
+        view.configure(workspaceId: workspaceId, onFrameChange: onFrameChange)
+        return view
+    }
+
+    func updateNSView(_ nsView: WorkspaceSidebarRowFrameReporterView, context: Context) {
+        nsView.configure(workspaceId: workspaceId, onFrameChange: onFrameChange)
+    }
+
+    static func dismantleNSView(_ nsView: WorkspaceSidebarRowFrameReporterView, coordinator: ()) {
+        nsView.clearReportedFrame()
+    }
+}
+
+@MainActor
+private final class WorkspaceSidebarRowFrameReporterView: NSView {
+    private var workspaceId: UUID?
+    private var onFrameChange: ((UUID, CGRect?) -> Void)?
+    private var lastReportedFrame: CGRect?
+    private var isReportScheduled = false
+    private weak var observedClipView: NSClipView?
+    private var clipBoundsObserver: NSObjectProtocol?
+
+    override var isOpaque: Bool { false }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    func configure(workspaceId: UUID, onFrameChange: @escaping (UUID, CGRect?) -> Void) {
+        if self.workspaceId != workspaceId {
+            clearReportedFrame()
+        }
+        self.workspaceId = workspaceId
+        self.onFrameChange = onFrameChange
+        updateClipObserver()
+        scheduleFrameReport()
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        updateClipObserver()
+        scheduleFrameReport()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        updateClipObserver()
+        scheduleFrameReport()
+    }
+
+    override func layout() {
+        super.layout()
+        updateClipObserver()
+        scheduleFrameReport()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        scheduleFrameReport()
+    }
+
+    override func setFrameOrigin(_ newOrigin: NSPoint) {
+        super.setFrameOrigin(newOrigin)
+        scheduleFrameReport()
+    }
+
+    func clearReportedFrame() {
+        if let workspaceId {
+            onFrameChange?(workspaceId, nil)
+        }
+        lastReportedFrame = nil
+    }
+
+    deinit {
+        if let clipBoundsObserver {
+            NotificationCenter.default.removeObserver(clipBoundsObserver)
+        }
+    }
+
+    private func updateClipObserver() {
+        let nextClipView = enclosingScrollView?.contentView
+        guard observedClipView !== nextClipView else { return }
+
+        if let clipBoundsObserver {
+            NotificationCenter.default.removeObserver(clipBoundsObserver)
+            self.clipBoundsObserver = nil
+        }
+
+        observedClipView = nextClipView
+        guard let nextClipView else { return }
+        nextClipView.postsBoundsChangedNotifications = true
+        clipBoundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: nextClipView,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.scheduleFrameReport()
+            }
+        }
+    }
+
+    private func scheduleFrameReport() {
+        guard !isReportScheduled else { return }
+        isReportScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.isReportScheduled = false
+            self.reportCurrentFrame()
+        }
+    }
+
+    private func reportCurrentFrame() {
+        guard let workspaceId,
+              let window,
+              let contentView = window.contentView,
+              let themeFrame = contentView.superview,
+              themeFrame.bounds.height > 0 else {
+            return
+        }
+
+        let rectInThemeFrame = convert(bounds, to: themeFrame)
+        let topLeftFrame = CGRect(
+            x: rectInThemeFrame.minX,
+            y: themeFrame.bounds.height - rectInThemeFrame.maxY,
+            width: rectInThemeFrame.width,
+            height: rectInThemeFrame.height
+        )
+        guard topLeftFrame != lastReportedFrame else { return }
+        lastReportedFrame = topLeftFrame
+        onFrameChange?(workspaceId, topLeftFrame)
+    }
+}
+
 struct VerticalTabsSidebar: View {
     @ObservedObject var updateViewModel: UpdateViewModel
     @ObservedObject var fileExplorerState: FileExplorerState
     let onSendFeedback: () -> Void
     let titlebarHeight: CGFloat
+    let workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
     @EnvironmentObject var tabManager: TabManager
     @EnvironmentObject var notificationStore: TerminalNotificationStore
     @Binding var selection: SidebarSelection
@@ -9549,6 +9918,7 @@ struct VerticalTabsSidebar: View {
     @StateObject private var dragAutoScrollController = SidebarDragAutoScrollController()
     @StateObject private var dragFailsafeMonitor = SidebarDragFailsafeMonitor()
     @StateObject private var tabItemSettingsStore = SidebarTabItemSettingsStore()
+    @EnvironmentObject var workspaceTabStore: WorkspaceTabStore
     @ObservedObject private var keyboardShortcutSettingsObserver = KeyboardShortcutSettingsObserver.shared
     @State private var draggedTabId: UUID?
     @State private var dropIndicator: SidebarDropIndicator?
@@ -9556,6 +9926,7 @@ struct VerticalTabsSidebar: View {
     @State private var terminalScrollBarVisibilityGeneration: UInt64 = 0
     @State private var laidOutWorkspaceRowIds: Set<UUID> = []
     @State private var pendingSelectedWorkspaceScrollId: UUID?
+    @AppStorage("workspaceTab.displayMode") private var workspaceTabDisplayMode = WorkspaceSidebarDisplayMode.native.rawValue
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
     @AppStorage("sidebarMatchTerminalBackground")
@@ -9570,6 +9941,10 @@ struct VerticalTabsSidebar: View {
 
     private var isMinimalMode: Bool {
         WorkspacePresentationModeSettings.mode(for: workspacePresentationMode) == .minimal
+    }
+
+    private var workspaceSidebarDisplayMode: WorkspaceSidebarDisplayMode {
+        WorkspaceSidebarDisplayMode(rawValue: workspaceTabDisplayMode) ?? .native
     }
 
     private var showsSidebarNotificationMessage: Bool {
@@ -9615,6 +9990,33 @@ struct VerticalTabsSidebar: View {
         return !oldWorkspaceIds.contains(selectedWorkspaceId) && newWorkspaceIds.contains(selectedWorkspaceId)
     }
 
+    private func openWorkspace(_ tab: Workspace, index: Int) {
+        selectedTabIds = [tab.id]
+        lastSidebarSelectionIndex = index
+        selection = .tabs
+        tabManager.selectTab(tab)
+    }
+
+    private func openSummaryPriorityWorkspace(_ item: WorkspaceSidebarSummaryPriorityItem, tabs: [Workspace]) {
+        let resolved: (id: UUID, index: Int, tab: Workspace)?
+        if let workspaceId = UUID(uuidString: item.workspaceId),
+           let index = tabs.firstIndex(where: { $0.id == workspaceId }) {
+            resolved = (workspaceId, index, tabs[index])
+        } else if UUID(uuidString: item.workspaceId) != nil {
+            resolved = nil
+        } else if tabs.indices.contains(item.nativeOrder) {
+            let tab = tabs[item.nativeOrder]
+            resolved = (tab.id, item.nativeOrder, tab)
+        } else {
+            resolved = nil
+        }
+
+        guard let resolved else {
+            return
+        }
+        openWorkspace(resolved.tab, index: resolved.index)
+    }
+
     private struct WorkspaceListRenderContext {
         let tabs: [Workspace]
         let workspaceCount: Int
@@ -9640,6 +10042,7 @@ struct VerticalTabsSidebar: View {
         let canCloseWorkspace = workspaceCount > 1
         let workspaceNumberShortcut = self.workspaceNumberShortcut
         let tabItemSettings = tabItemSettingsStore.snapshot
+        let liveShowsModifierShortcutHints = modifierKeyMonitor.isModifierPressed
         let tabIndexById = Dictionary(uniqueKeysWithValues: tabs.enumerated().map {
             ($0.element.id, $0.offset)
         })
@@ -9690,6 +10093,7 @@ struct VerticalTabsSidebar: View {
         }
         .accessibilityIdentifier("Sidebar")
         .ignoresSafeArea()
+        .background(SidebarBackdrop().ignoresSafeArea())
         .overlay(alignment: .trailing) {
             SidebarTrailingBorder()
         }
@@ -9700,6 +10104,7 @@ struct VerticalTabsSidebar: View {
             .frame(width: 0, height: 0)
         )
         .onAppear {
+            workspaceSidebarLayoutMetricsStore.prune(to: Set(tabs.map(\.id)))
             modifierKeyMonitor.start()
             draggedTabId = nil
             dropIndicator = nil
@@ -9709,6 +10114,7 @@ struct VerticalTabsSidebar: View {
             )
         }
         .onDisappear {
+            workspaceSidebarLayoutMetricsStore.clear()
             modifierKeyMonitor.stop()
             dragAutoScrollController.stop()
             dragFailsafeMonitor.stop()
@@ -9738,6 +10144,7 @@ struct VerticalTabsSidebar: View {
             dropIndicator = nil
         }
         .onChange(of: tabs.map(\.id)) { tabIds in
+            workspaceSidebarLayoutMetricsStore.prune(to: Set(tabIds))
             guard let frozenTabItemPresentation,
                   !tabIds.contains(frozenTabItemPresentation.tabId) else { return }
             self.frozenTabItemPresentation = nil
@@ -9832,6 +10239,8 @@ struct VerticalTabsSidebar: View {
         minHeight: CGFloat
     ) -> some View {
         VStack(spacing: 0) {
+            WorkspaceSidebarModeHeader()
+
             workspaceRows(renderContext: renderContext)
 
             SidebarEmptyArea(
@@ -9933,7 +10342,20 @@ struct VerticalTabsSidebar: View {
             allContextMenuWorkspacesHideTerminalScrollBar: allContextMenuWorkspacesHideTerminalScrollBar,
             settings: renderContext.tabItemSettings,
             livePresentation: livePresentation,
-            frozenPresentation: $frozenTabItemPresentation
+            frozenPresentation: $frozenTabItemPresentation,
+            reportLayoutFrame: { workspaceId, frame in
+                workspaceSidebarLayoutMetricsStore.setRowFrame(frame, for: workspaceId)
+            },
+            reportHoverState: { workspaceId, isHovering in
+                if isHovering {
+                    workspaceSidebarLayoutMetricsStore.setHoveredWorkspaceId(workspaceId)
+                } else {
+                    workspaceSidebarLayoutMetricsStore.clearHoveredWorkspaceId(
+                        ifCurrent: workspaceId,
+                        delay: ExtensionColumnSettings.hoverDismissDelay
+                    )
+                }
+            }
         )
         .equatable()
         .id(tab.id)
@@ -12073,6 +12495,1624 @@ private struct SidebarFooterIconButtonStyleBody: View {
     }
 }
 
+enum WorkspaceSidebarDisplayMode: String {
+    case native
+    case summaryPriority = "summary_priority"
+}
+
+struct WorkspaceSidebarDimensionScore: Codable, Equatable {
+    let rawScore: Double
+    let confidence: Double
+    let reason: String
+}
+
+struct WorkspaceSidebarDimensionDefinition: Codable, Identifiable, Equatable {
+    let id: String
+    let label: String
+    let enabled: Bool
+    let orientation: String
+    let builtin: Bool
+    let visible: Bool
+
+    // Computed so labels track the active locale rather than freezing at process start.
+    static var builtinDefaults: [WorkspaceSidebarDimensionDefinition] {
+        [
+            WorkspaceSidebarDimensionDefinition(
+                id: "urgency",
+                label: String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency"),
+                enabled: true,
+                orientation: "higher_is_more_priority",
+                builtin: true,
+                visible: true
+            ),
+            WorkspaceSidebarDimensionDefinition(
+                id: "importance",
+                label: String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance"),
+                enabled: true,
+                orientation: "higher_is_more_priority",
+                builtin: true,
+                visible: true
+            ),
+            WorkspaceSidebarDimensionDefinition(
+                id: "progress",
+                label: String(localized: "sidebar.workspaceSummary.sort.progress", defaultValue: "Progress"),
+                enabled: true,
+                orientation: "higher_is_more_priority",
+                builtin: true,
+                visible: true
+            )
+        ]
+    }
+}
+
+struct WorkspaceSidebarSummaryPriorityItem: Codable, Identifiable, Equatable {
+    struct Topic: Codable, Equatable {
+        let text: String
+        let emoji: String?
+        let confidence: Double
+    }
+
+    struct Summary: Codable, Equatable {
+        let short: String
+        let detailed: String
+    }
+
+    struct Scores: Codable, Equatable {
+        let dimensions: [String: WorkspaceSidebarDimensionScore]
+        let rankReason: String
+    }
+
+    struct NextAction: Codable, Equatable {
+        let label: String
+        let detail: String?
+        let risk: String?
+    }
+
+    struct Evidence: Codable, Equatable {
+        let quote: String
+    }
+
+    let workspaceId: String
+    let nativeOrder: Int
+    let title: String
+    let subtitle: String?
+    let generatedAt: String
+    let inputHash: String
+    let topic: Topic
+    let summary: Summary
+    let status: String
+    let presentStatus: String?
+    let scores: Scores
+    let nextAction: NextAction?
+    let pinned: Bool
+    let evidence: [Evidence]?
+
+    var id: String { workspaceId }
+}
+
+struct WorkspaceSidebarSummaryPrioritySort: Codable, Equatable {
+    let mode: String
+    let dimensionId: String?
+    let direction: String
+
+    static let defaultSort = WorkspaceSidebarSummaryPrioritySort(
+        mode: "dimension",
+        dimensionId: "urgency",
+        direction: "desc"
+    )
+
+    var requestPayload: [String: String] {
+        [
+            "mode": mode,
+            "dimensionId": dimensionId ?? "",
+            "direction": direction
+        ]
+    }
+}
+
+struct WorkspaceSidebarSummaryPriorityStats: Codable, Equatable {
+    let total: Int
+    let needsAttention: Int
+    let topScore: Double
+    let staleDigestCount: Int
+}
+
+struct WorkspaceSidebarSummaryPriorityState: Codable, Equatable {
+    let profileId: String
+    let sort: WorkspaceSidebarSummaryPrioritySort
+    let items: [WorkspaceSidebarSummaryPriorityItem]
+    let dimensions: [WorkspaceSidebarDimensionDefinition]
+    let stats: WorkspaceSidebarSummaryPriorityStats
+    let generatedAt: String
+}
+
+struct WorkspaceTabContextSummary: Equatable {
+    let workspaceId: UUID
+    let title: String
+    let status: String
+    let next: String
+    let detail: String?
+}
+
+@MainActor
+final class WorkspaceTabStore: ObservableObject {
+    @Published var summaryPriority: WorkspaceSidebarSummaryPriorityState?
+    @Published var selectedSort: WorkspaceSidebarSummaryPrioritySort
+    @Published var isLoading = false
+    @Published var errorMessage: String?
+    @Published private(set) var tabContextSummaries: [UUID: WorkspaceTabContextSummary] = [:]
+    @Published private(set) var refreshingWorkspaceIds: Set<String> = []
+
+    private static let selectedSortDefaultsKey = "workspaceTab.summaryPriority.selectedSort"
+    private static let socketQueue = DispatchQueue(label: "com.cmux.digest-socket-client", qos: .userInitiated)
+    private static let maxRefreshRetryAttempts = 5
+    private static let jsonEncoder = JSONEncoder()
+    private static let jsonDecoder = JSONDecoder()
+    private static let iso8601Formatter = ISO8601DateFormatter()
+    private var sortRequestGeneration = 0
+    private var didLoadForExtension = false
+    private var trackedExtensionWorkspaceIds: Set<UUID> = []
+    private var workspaceRefreshesInFlight: Set<String> = []
+
+    init() {
+        selectedSort = Self.loadSelectedSort()
+    }
+
+    private static func loadSelectedSort() -> WorkspaceSidebarSummaryPrioritySort {
+        guard let data = UserDefaults.standard.data(forKey: selectedSortDefaultsKey),
+              let sort = try? jsonDecoder.decode(WorkspaceSidebarSummaryPrioritySort.self, from: data) else {
+            return .defaultSort
+        }
+        return sort
+    }
+
+    private func persistSelectedSort(_ sort: WorkspaceSidebarSummaryPrioritySort) {
+        guard let data = try? Self.jsonEncoder.encode(sort) else { return }
+        UserDefaults.standard.set(data, forKey: Self.selectedSortDefaultsKey)
+    }
+
+    func contextSummary(for workspaceId: UUID) -> WorkspaceTabContextSummary? {
+        tabContextSummaries[workspaceId]
+    }
+
+    func isRefreshingWorkspace(_ workspaceId: UUID) -> Bool {
+        refreshingWorkspaceIds.contains(workspaceId.uuidString)
+    }
+
+    func extensionDidOpen(tabs: [Workspace]) {
+        syncTabContextSummaries(tabs: tabs)
+        let currentIds = Set(tabs.map(\.id))
+
+        guard didLoadForExtension else {
+            didLoadForExtension = true
+            trackedExtensionWorkspaceIds = currentIds
+            refreshSummaryPriority(force: false)
+            return
+        }
+
+        refreshNewExtensionWorkspaces(tabs: tabs, currentIds: currentIds)
+    }
+
+    func extensionTabsDidChange(tabs: [Workspace]) {
+        syncTabContextSummaries(tabs: tabs)
+        let currentIds = Set(tabs.map(\.id))
+        guard didLoadForExtension else {
+            trackedExtensionWorkspaceIds = currentIds
+            return
+        }
+        refreshNewExtensionWorkspaces(tabs: tabs, currentIds: currentIds)
+    }
+
+    private func refreshNewExtensionWorkspaces(tabs: [Workspace], currentIds: Set<UUID>) {
+        let addedIds = currentIds.subtracting(trackedExtensionWorkspaceIds)
+        trackedExtensionWorkspaceIds = currentIds
+        guard !addedIds.isEmpty else { return }
+
+        for tab in tabs where addedIds.contains(tab.id) {
+#if DEBUG
+            cmuxDebugLog("summaryPriority.extension.incremental workspace=\(tab.id.uuidString.prefix(8)) title=\"\(tab.title)\"")
+#endif
+            refreshWorkspace(workspaceId: tab.id.uuidString)
+        }
+    }
+
+    private func syncTabContextSummaries(tabs: [Workspace]) {
+        var next: [UUID: WorkspaceTabContextSummary] = [:]
+        for (index, tab) in tabs.enumerated() {
+            next[tab.id] = Self.contextSummary(for: tab, index: index)
+        }
+
+        for item in summaryPriority?.items ?? [] {
+            guard let workspaceId = UUID(uuidString: item.workspaceId) else { continue }
+            next[workspaceId] = Self.contextSummary(from: item, fallback: next[workspaceId])
+        }
+
+        guard tabContextSummaries != next else { return }
+        tabContextSummaries = next
+    }
+
+    private static func contextSummary(for workspace: Workspace, index: Int) -> WorkspaceTabContextSummary {
+        let title = normalized(workspace.title)
+            ?? "\(String(localized: "extensionColumn.context.workspace", defaultValue: "Workspace")) \(index + 1)"
+        let directory = normalizedDirectory(workspace.currentDirectory)
+        let branch = normalized(workspace.gitBranch?.branch).map { workspace.gitBranch?.isDirty == true ? "\($0) *" : $0 }
+        let progress = normalized(workspace.progress?.label)
+        let description = normalized(workspace.customDescription)
+        let tag = normalized(workspace.tag)
+        let branchPrefix = String(localized: "extensionColumn.context.branch", defaultValue: "Branch:")
+        let directoryPrefix = String(localized: "extensionColumn.context.directory", defaultValue: "In")
+
+        let status = description
+            ?? progress
+            ?? branch.map { "\(branchPrefix) \($0)" }
+            ?? directory.map { "\(directoryPrefix) \($0)" }
+            ?? title
+
+        let detailParts = [tag, branch, directory].compactMap { $0 }
+        let detail = detailParts.isEmpty ? nil : detailParts.joined(separator: " • ")
+        let next = progress
+            ?? detail
+            ?? String(localized: "extensionColumn.context.refreshHint", defaultValue: "Refresh to summarize this workspace")
+
+        return WorkspaceTabContextSummary(
+            workspaceId: workspace.id,
+            title: title,
+            status: status,
+            next: next,
+            detail: detail
+        )
+    }
+
+    private static func contextSummary(
+        from item: WorkspaceSidebarSummaryPriorityItem,
+        fallback: WorkspaceTabContextSummary?
+    ) -> WorkspaceTabContextSummary {
+        let workspaceId = UUID(uuidString: item.workspaceId) ?? fallback?.workspaceId ?? UUID()
+        let title = normalized(item.title) ?? fallback?.title ?? item.workspaceId
+        let status = normalized(item.presentStatus)
+            ?? normalized(item.summary.short)
+            ?? fallback?.status
+            ?? title
+        let next = normalized(item.nextAction?.label)
+            ?? normalized(item.topic.text)
+            ?? fallback?.next
+            ?? String(localized: "extensionColumn.next.placeholder", defaultValue: "—")
+        let detail = normalized(item.subtitle) ?? fallback?.detail
+
+        return WorkspaceTabContextSummary(
+            workspaceId: workspaceId,
+            title: title,
+            status: status,
+            next: next,
+            detail: detail
+        )
+    }
+
+    private static func normalized(_ value: String?) -> String? {
+        let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func mergeContextSummaries(items: [WorkspaceSidebarSummaryPriorityItem]) {
+        var next = tabContextSummaries
+        for item in items {
+            guard let workspaceId = UUID(uuidString: item.workspaceId) else { continue }
+            if !trackedExtensionWorkspaceIds.isEmpty, !trackedExtensionWorkspaceIds.contains(workspaceId) {
+                continue
+            }
+            next[workspaceId] = Self.contextSummary(from: item, fallback: next[workspaceId])
+        }
+        guard next != tabContextSummaries else { return }
+        tabContextSummaries = next
+    }
+
+    private static func normalizedDirectory(_ value: String?) -> String? {
+        guard let normalized = normalized(value) else { return nil }
+        let url = URL(fileURLWithPath: normalized)
+        let lastPathComponent = url.lastPathComponent
+        return lastPathComponent.isEmpty ? normalized : lastPathComponent
+    }
+
+    func refreshSummaryPriority(force: Bool = false, sort: WorkspaceSidebarSummaryPrioritySort? = nil) {
+        refreshSummaryPriority(force: force, sort: sort, retryAttempt: 0)
+    }
+
+    private func refreshSummaryPriority(
+        force: Bool,
+        sort: WorkspaceSidebarSummaryPrioritySort?,
+        retryAttempt: Int
+    ) {
+        let effectiveSort = sort ?? selectedSort
+        let requestGeneration = sortRequestGeneration
+        var payload: [String: Any] = ["force": force]
+        payload["sort"] = effectiveSort.requestPayload
+
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.refresh.start gen=\(requestGeneration) force=\(force ? 1 : 0) " +
+            "sort=\(Self.debugSortDescription(effectiveSort)) selected=\(Self.debugSortDescription(selectedSort))"
+        )
+#endif
+
+        isLoading = true
+        errorMessage = nil
+        sendDigestCommand(
+            "refresh_summary_priority",
+            payload: payload,
+            decoding: WorkspaceSidebarSummaryPriorityState.self
+        ) { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .failure(let error):
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.refresh.failure gen=\(requestGeneration) " +
+                    "attempt=\(retryAttempt) sort=\(Self.debugSortDescription(effectiveSort)) " +
+                    "error=\(Self.displayMessage(for: error))"
+                )
+#endif
+                if retryAttempt < Self.maxRefreshRetryAttempts, Self.isTransientConnectionError(error) {
+                    let delay = min(0.8 * Double(retryAttempt + 1), 3.0)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        self.refreshSummaryPriority(
+                            force: force,
+                            sort: effectiveSort,
+                            retryAttempt: retryAttempt + 1
+                        )
+                    }
+                    return
+                }
+                self.isLoading = false
+                self.errorMessage = Self.displayMessage(for: error)
+            case .success(let decoded):
+                self.isLoading = false
+                guard requestGeneration == self.sortRequestGeneration else {
+#if DEBUG
+                    cmuxDebugLog(
+                        "summaryPriority.refresh.dropGeneration request=\(requestGeneration) " +
+                        "current=\(self.sortRequestGeneration) responseSort=\(Self.debugSortDescription(decoded.sort))"
+                    )
+#endif
+                    return
+                }
+                guard effectiveSort == self.selectedSort else {
+#if DEBUG
+                    cmuxDebugLog(
+                        "summaryPriority.refresh.dropSort expected=\(Self.debugSortDescription(effectiveSort)) " +
+                        "selected=\(Self.debugSortDescription(self.selectedSort)) " +
+                        "response=\(Self.debugSortDescription(decoded.sort))"
+                    )
+#endif
+                    return
+                }
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.refresh.success gen=\(requestGeneration) " +
+                    "responseSort=\(Self.debugSortDescription(decoded.sort)) " +
+                    "items=\(Self.debugItemOrder(decoded.items))"
+                )
+#endif
+                self.summaryPriority = decoded
+                self.mergeContextSummaries(items: decoded.items)
+            }
+        }
+    }
+
+    /// Connection-class failures from the digest socket: file not present yet
+    /// (daemon still starting) or peer refused. UI retries once after a short
+    /// back-off; protocol/decode errors surface immediately.
+    private static func isTransientConnectionError(_ error: Error) -> Bool {
+        guard let socketError = error as? CmuxSocketError else { return false }
+        let message = socketError.message
+        return message.contains("Socket not found")
+            || message.contains("Failed to connect")
+            || message.contains("Failed to create socket")
+            || message.contains("Command timed out")
+            || message.contains("Socket read error")
+            || message.contains("Socket closed")
+            || message.contains("connection refused")
+    }
+
+    private static func displayMessage(for error: Error) -> String {
+        if let socketError = error as? CmuxSocketError {
+            return socketError.message
+        }
+        return error.localizedDescription
+    }
+
+    func setSort(_ sort: WorkspaceSidebarSummaryPrioritySort) {
+        selectedSort = sort
+        persistSelectedSort(sort)
+        sortRequestGeneration += 1
+        let requestGeneration = sortRequestGeneration
+
+#if DEBUG
+        cmuxDebugLog("summaryPriority.setSort.start gen=\(requestGeneration) sort=\(Self.debugSortDescription(sort))")
+#endif
+
+        isLoading = true
+        errorMessage = nil
+        sendDigestCommand(
+            "set_summary_priority_sort",
+            payload: sort.requestPayload,
+            decoding: WorkspaceSidebarSummaryPriorityState.self
+        ) { [weak self] result in
+            guard let self else { return }
+            guard requestGeneration == self.sortRequestGeneration else { return }
+            self.isLoading = false
+            switch result {
+            case .failure(let error):
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.setSort.failure gen=\(requestGeneration) " +
+                    "sort=\(Self.debugSortDescription(sort)) error=\(Self.displayMessage(for: error))"
+                )
+#endif
+                self.errorMessage = Self.displayMessage(for: error)
+            case .success(let decoded):
+                guard sort == self.selectedSort else { return }
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.setSort.success gen=\(requestGeneration) " +
+                    "responseSort=\(Self.debugSortDescription(decoded.sort)) " +
+                    "items=\(Self.debugItemOrder(decoded.items))"
+                )
+#endif
+                self.summaryPriority = decoded
+                self.mergeContextSummaries(items: decoded.items)
+            }
+        }
+    }
+
+    func setDisplayMode(_ mode: WorkspaceSidebarDisplayMode) {
+        sendDigestCommand(
+            "set_workspace_tab_mode",
+            payload: ["displayMode": mode.rawValue]
+        ) { _ in }
+    }
+
+    func refreshWorkspace(_ item: WorkspaceSidebarSummaryPriorityItem) {
+        refreshWorkspace(workspaceId: item.workspaceId)
+    }
+
+    func refreshWorkspace(workspaceId: String) {
+        guard workspaceRefreshesInFlight.insert(workspaceId).inserted else { return }
+        errorMessage = nil
+        var nextRefreshingWorkspaceIds = refreshingWorkspaceIds
+        nextRefreshingWorkspaceIds.insert(workspaceId)
+        refreshingWorkspaceIds = nextRefreshingWorkspaceIds
+        sendDigestCommand(
+            "refresh_summary_priority_workspace",
+            payload: ["workspaceId": workspaceId],
+            decoding: WorkspaceSidebarSummaryPriorityItem.self
+        ) { [weak self] result in
+            guard let self else { return }
+            self.workspaceRefreshesInFlight.remove(workspaceId)
+            var nextRefreshingWorkspaceIds = self.refreshingWorkspaceIds
+            nextRefreshingWorkspaceIds.remove(workspaceId)
+            self.refreshingWorkspaceIds = nextRefreshingWorkspaceIds
+            switch result {
+            case .failure(let error):
+                self.errorMessage = Self.displayMessage(for: error)
+            case .success(let item):
+                self.applyRefreshedWorkspaceItem(item)
+            }
+        }
+    }
+
+    private func applyRefreshedWorkspaceItem(_ item: WorkspaceSidebarSummaryPriorityItem) {
+        let current = summaryPriority ?? WorkspaceSidebarSummaryPriorityState(
+            profileId: "default",
+            sort: selectedSort,
+            items: [],
+            dimensions: WorkspaceSidebarDimensionDefinition.builtinDefaults,
+            stats: WorkspaceSidebarSummaryPriorityStats(
+                total: 0,
+                needsAttention: 0,
+                topScore: 0,
+                staleDigestCount: 0
+            ),
+            generatedAt: Self.iso8601Formatter.string(from: Date())
+        )
+        var items = current.items
+        let alreadyHadItem = current.items.contains { $0.workspaceId == item.workspaceId }
+        if let index = items.firstIndex(where: { $0.workspaceId == item.workspaceId }) {
+            items[index] = item
+        } else {
+            items.append(item)
+        }
+
+        let sortedItems = Self.sortedSummaryPriorityItems(items, sort: current.sort)
+        let topScore = sortedItems
+            .map { Self.activeScore(item: $0, sort: current.sort) }
+            .max() ?? 0
+        let staleDigestCount = max(
+            0,
+            current.stats.staleDigestCount - (alreadyHadItem ? 0 : 1)
+        )
+
+        summaryPriority = WorkspaceSidebarSummaryPriorityState(
+            profileId: current.profileId,
+            sort: current.sort,
+            items: sortedItems,
+            dimensions: current.dimensions,
+            stats: WorkspaceSidebarSummaryPriorityStats(
+                total: max(current.stats.total, sortedItems.count),
+                needsAttention: sortedItems.filter { ($0.scores.dimensions["urgency"]?.rawScore ?? 0) >= 70 }.count,
+                topScore: topScore,
+                staleDigestCount: staleDigestCount
+            ),
+            generatedAt: Self.iso8601Formatter.string(from: Date())
+        )
+        mergeContextSummaries(items: [item])
+    }
+
+    private static func sortedSummaryPriorityItems(
+        _ items: [WorkspaceSidebarSummaryPriorityItem],
+        sort: WorkspaceSidebarSummaryPrioritySort
+    ) -> [WorkspaceSidebarSummaryPriorityItem] {
+        items.sorted { lhs, rhs in
+            if lhs.pinned != rhs.pinned {
+                return lhs.pinned && !rhs.pinned
+            }
+
+            let comparison: ComparisonResult
+            switch sort.mode {
+            case "native_order":
+                comparison = compare(lhs.nativeOrder, rhs.nativeOrder)
+            case "recent":
+                comparison = compare(lhs.generatedAt, rhs.generatedAt)
+            default:
+                let id = sort.dimensionId ?? "urgency"
+                let lhsScore = lhs.scores.dimensions[id]?.rawScore ?? 0
+                let rhsScore = rhs.scores.dimensions[id]?.rawScore ?? 0
+                comparison = compare(lhsScore, rhsScore)
+            }
+
+            if comparison != .orderedSame {
+                return sort.direction == "desc"
+                    ? comparison == .orderedDescending
+                    : comparison == .orderedAscending
+            }
+
+            return lhs.nativeOrder < rhs.nativeOrder
+        }
+    }
+
+    private static func activeScore(
+        item: WorkspaceSidebarSummaryPriorityItem,
+        sort: WorkspaceSidebarSummaryPrioritySort
+    ) -> Double {
+        guard sort.mode == "dimension" else { return 0 }
+        return item.scores.dimensions[sort.dimensionId ?? "urgency"]?.rawScore ?? 0
+    }
+
+    private static func compare<T: Comparable>(_ lhs: T, _ rhs: T) -> ComparisonResult {
+        if lhs < rhs { return .orderedAscending }
+        if lhs > rhs { return .orderedDescending }
+        return .orderedSame
+    }
+
+    func setPinned(_ pinned: Bool, item: WorkspaceSidebarSummaryPriorityItem) {
+        sendDigestCommand(
+            "set_summary_priority_override",
+            payload: ["workspaceId": item.workspaceId, "pinned": pinned]
+        ) { [weak self] _ in
+            self?.refreshSummaryPriority()
+        }
+    }
+
+    private func sendDigestCommand(
+        _ command: String,
+        payload: [String: Any],
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        sendDigestCommandRaw(command, payload: payload) { result in
+            switch result {
+            case .success: completion(.success(()))
+            case .failure(let error): completion(.failure(error))
+            }
+        }
+    }
+
+    private func sendDigestCommand<Response: Decodable>(
+        _ command: String,
+        payload: [String: Any],
+        decoding _: Response.Type,
+        completion: @escaping (Result<Response, Error>) -> Void
+    ) {
+        sendDigestCommandRaw(command, payload: payload) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let body):
+                guard let data = body.data(using: .utf8) else {
+                    completion(.failure(CmuxSocketError(message: "Invalid UTF-8 from digest daemon")))
+                    return
+                }
+                do {
+                    let decoded = try Self.jsonDecoder.decode(Response.self, from: data)
+                    completion(.success(decoded))
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func sendDigestCommandRaw(
+        _ command: String,
+        payload: [String: Any],
+        completion: @escaping (Result<String, Error>) -> Void
+    ) {
+        CmuxDigestDaemonSupervisor.shared.update(enabled: true)
+        let socketPath = CmuxDigestDaemonSupervisor.digestSocketPath()
+        Self.socketQueue.async {
+            let result: Result<String, Error>
+            do {
+                let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [])
+                let payloadString = String(data: payloadData, encoding: .utf8) ?? "{}"
+                let line = "\(command) \(payloadString)"
+                let client = CmuxSocketClient(path: socketPath)
+                try client.connect()
+                defer { client.close() }
+                let response = try client.send(command: line)
+                if response.hasPrefix("ERROR:") {
+                    let message = response.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespacesAndNewlines)
+                    result = .failure(CmuxSocketError(message: message))
+                } else if response.hasPrefix("OK ") {
+                    result = .success(String(response.dropFirst(3)))
+                } else if response == "OK" {
+                    result = .success("")
+                } else {
+                    result = .failure(CmuxSocketError(message: "Unexpected response: \(response)"))
+                }
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
+#if DEBUG
+    private static func debugSortDescription(_ sort: WorkspaceSidebarSummaryPrioritySort) -> String {
+        "\(sort.mode):\(sort.dimensionId ?? "nil"):\(sort.direction)"
+    }
+
+    private static func debugItemOrder(_ items: [WorkspaceSidebarSummaryPriorityItem]) -> String {
+        items.map { item in
+            let urgency = Int(item.scores.dimensions["urgency"]?.rawScore ?? 0)
+            let importance = Int(item.scores.dimensions["importance"]?.rawScore ?? 0)
+            return "\(item.workspaceId.prefix(8))#\(item.nativeOrder):U\(urgency):I\(importance)"
+        }.joined(separator: ",")
+    }
+#endif
+}
+
+private struct WorkspaceSidebarModeHeader: View {
+    @AppStorage(ExtensionColumnSettings.openKey)
+    private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
+    @EnvironmentObject private var workspaceTabStore: WorkspaceTabStore
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(String(localized: "sidebar.workspaceTab.title", defaultValue: "Workspaces"))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+            Spacer(minLength: 0)
+
+            Button {
+                workspaceTabStore.refreshSummaryPriority(force: true)
+            } label: {
+                ZStack {
+                    if workspaceTabStore.isLoading {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 9, weight: .semibold))
+                    }
+                }
+                .foregroundColor(.primary.opacity(0.7))
+                .frame(width: 22, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(0.07))
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(workspaceTabStore.isLoading)
+            .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
+
+            Button {
+                extensionColumnOpen.toggle()
+            } label: {
+                Image(systemName: extensionColumnOpen ? "chevron.left.2" : "chevron.right.2")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(extensionColumnOpen ? Color.accentColor : .primary)
+                    .frame(width: 22, height: 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.primary.opacity(extensionColumnOpen ? 0.12 : 0.07))
+                    )
+            }
+            .buttonStyle(.plain)
+            .safeHelp(
+                extensionColumnOpen
+                    ? String(localized: "extensionColumn.toggle.tooltip", defaultValue: "Hide extension column")
+                    : String(localized: "extensionColumn.toggle.openTooltip", defaultValue: "Show extension column")
+            )
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 5)
+    }
+}
+
+private struct SummaryPriorityWorkspaceList: View {
+    @ObservedObject var store: WorkspaceTabStore
+    let tabs: [Workspace]
+    let selectedWorkspaceId: UUID?
+    let activeTabIndicatorStyle: SidebarActiveTabIndicatorStyle
+    let selectionColorHex: String?
+    let workspaceShortcutModifierSymbol: String
+    let showsModifierShortcutHints: Bool
+    let shortcutHintXOffset: Double
+    let shortcutHintYOffset: Double
+    let alwaysShowShortcutHints: Bool
+    let onOpenWorkspace: (WorkspaceSidebarSummaryPriorityItem) -> Void
+    let onOpenNativeWorkspace: (Workspace, Int) -> Void
+
+    var body: some View {
+        let activeSort = store.selectedSort
+        let rows = displayRows(
+            items: store.summaryPriority?.items ?? [],
+            tabs: tabs,
+            sort: activeSort,
+            isRefreshing: store.isLoading
+        )
+
+        VStack(alignment: .leading, spacing: 8) {
+            SummaryPriorityToolbar(
+                sort: activeSort,
+                dimensions: store.summaryPriority?.dimensions ?? WorkspaceSidebarDimensionDefinition.builtinDefaults,
+                isLoading: store.isLoading,
+                onSort: { sort in store.setSort(sort) },
+                onRefresh: {
+                    store.refreshSummaryPriority(
+                        force: true,
+                        sort: activeSort
+                    )
+                }
+            )
+
+            if let errorMessage = store.errorMessage, store.summaryPriority == nil, !store.isLoading {
+                Text(errorMessage)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+            } else if !rows.isEmpty {
+                ForEach(rows) { row in
+                    switch row {
+                    case .summary(let item):
+                        SummaryPriorityWorkspaceRow(
+                            item: item,
+                            sort: activeSort,
+                            isActive: isActive(item: item),
+                            presentStatus: presentStatusText(for: item),
+                            activeTabIndicatorStyle: activeTabIndicatorStyle,
+                            selectionColorHex: selectionColorHex,
+                            workspaceShortcutLabel: shortcutLabel(
+                                nativeOrder: currentNativeOrder(for: item) ?? item.nativeOrder
+                            ),
+                            showsModifierShortcutHints: showsModifierShortcutHints,
+                            shortcutHintXOffset: shortcutHintXOffset,
+                            shortcutHintYOffset: shortcutHintYOffset,
+                            alwaysShowShortcutHints: alwaysShowShortcutHints,
+                            onOpen: { onOpenWorkspace(item) },
+                            onRefresh: { store.refreshWorkspace(item) },
+                            onTogglePin: { store.setPinned(!item.pinned, item: item) }
+                        )
+                    case .pending(let pending):
+                        SummaryPriorityPendingWorkspaceRow(
+                            pending: pending,
+                            isActive: selectedWorkspaceId == pending.tab.id,
+                            presentStatus: nil,
+                            activeTabIndicatorStyle: activeTabIndicatorStyle,
+                            selectionColorHex: selectionColorHex,
+                            workspaceShortcutLabel: shortcutLabel(nativeOrder: pending.nativeOrder),
+                            showsModifierShortcutHints: showsModifierShortcutHints,
+                            shortcutHintXOffset: shortcutHintXOffset,
+                            shortcutHintYOffset: shortcutHintYOffset,
+                            alwaysShowShortcutHints: alwaysShowShortcutHints,
+                            onOpen: { onOpenNativeWorkspace(pending.tab, pending.nativeOrder) }
+                        )
+                    }
+                }
+            } else if store.isLoading {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 20)
+            } else {
+                Text(store.errorMessage ?? String(localized: "sidebar.workspaceSummary.empty", defaultValue: "No workspace summaries yet."))
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.top, 8)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func displayRows(
+        items: [WorkspaceSidebarSummaryPriorityItem],
+        tabs: [Workspace],
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        isRefreshing: Bool
+    ) -> [SummaryPriorityWorkspaceDisplayRow] {
+        var coveredTabIds = Set<UUID>()
+        let currentItems = items.filter { item in
+            guard let match = currentTabMatch(for: item),
+                  coveredTabIds.contains(match.tab.id) == false else {
+                return false
+            }
+            coveredTabIds.insert(match.tab.id)
+            return true
+        }
+#if DEBUG
+        if items.isEmpty || currentItems.count != items.count {
+            let tabIds = tabs
+                .map { String($0.id.uuidString.prefix(8)) }
+                .joined(separator: ",")
+            let itemIds = items
+                .map { item in "\(item.workspaceId.prefix(8))#\(item.nativeOrder)" }
+                .joined(separator: ",")
+            cmuxDebugLog(
+                "summaryPriority.rows.filtered input=\(items.count) current=\(currentItems.count) " +
+                "tabs=\(tabIds) items=\(itemIds)"
+            )
+        }
+#endif
+        let sortedSummaryRows = sortedItems(currentItems, by: sort).map {
+            SummaryPriorityWorkspaceDisplayRow.summary($0)
+        }
+        let pendingRows = tabs.enumerated()
+            .filter { _, tab in coveredTabIds.contains(tab.id) == false }
+            .map { index, tab in
+                SummaryPriorityWorkspaceDisplayRow.pending(
+                    SummaryPriorityPendingWorkspace(
+                        tab: tab,
+                        title: tab.title.isEmpty
+                            ? String(localized: "sidebar.workspaceSummary.pending.untitled", defaultValue: "Untitled Workspace")
+                            : tab.title,
+                        nativeOrder: index,
+                        isRefreshing: isRefreshing
+                    )
+                )
+            }
+        return sortedSummaryRows + pendingRows
+    }
+
+    private func sortedItems(
+        _ items: [WorkspaceSidebarSummaryPriorityItem],
+        by sort: WorkspaceSidebarSummaryPrioritySort
+    ) -> [WorkspaceSidebarSummaryPriorityItem] {
+        items.sorted { lhs, rhs in
+            if lhs.pinned != rhs.pinned {
+                return lhs.pinned
+            }
+
+            let comparison: ComparisonResult
+            switch sort.mode {
+            case "native_order":
+                comparison = compare(
+                    currentNativeOrder(for: lhs) ?? lhs.nativeOrder,
+                    currentNativeOrder(for: rhs) ?? rhs.nativeOrder
+                )
+            case "recent":
+                comparison = compare(dateValue(lhs.generatedAt), dateValue(rhs.generatedAt))
+            default:
+                let dimensionId = sort.dimensionId ?? "urgency"
+                comparison = compare(
+                    lhs.scores.dimensions[dimensionId]?.rawScore ?? 0,
+                    rhs.scores.dimensions[dimensionId]?.rawScore ?? 0
+                )
+            }
+
+            if comparison != .orderedSame {
+                return sort.direction == "asc"
+                    ? comparison == .orderedAscending
+                    : comparison == .orderedDescending
+            }
+
+            return (currentNativeOrder(for: lhs) ?? lhs.nativeOrder)
+                < (currentNativeOrder(for: rhs) ?? rhs.nativeOrder)
+        }
+    }
+
+    private func compare<T: Comparable>(_ lhs: T, _ rhs: T) -> ComparisonResult {
+        if lhs < rhs { return .orderedAscending }
+        if lhs > rhs { return .orderedDescending }
+        return .orderedSame
+    }
+
+    private static let iso8601Formatter = ISO8601DateFormatter()
+
+    private func dateValue(_ value: String) -> TimeInterval {
+        Self.iso8601Formatter.date(from: value)?.timeIntervalSince1970 ?? 0
+    }
+
+    private func shortcutLabel(nativeOrder: Int) -> String? {
+        guard let digit = WorkspaceShortcutMapper.digitForWorkspace(
+            at: nativeOrder,
+            workspaceCount: tabs.count
+        ) else {
+            return nil
+        }
+        return "\(workspaceShortcutModifierSymbol)\(digit)"
+    }
+
+    private func isActive(item: WorkspaceSidebarSummaryPriorityItem) -> Bool {
+        guard let selectedWorkspaceId,
+              let match = currentTabMatch(for: item) else { return false }
+        return match.tab.id == selectedWorkspaceId
+    }
+
+    private func presentStatusText(for item: WorkspaceSidebarSummaryPriorityItem) -> String? {
+        guard let selectedWorkspaceId,
+              currentTabMatch(for: item)?.tab.id == selectedWorkspaceId else {
+            return nil
+        }
+        let value = item.presentStatus?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value : nil
+    }
+
+    private func currentNativeOrder(for item: WorkspaceSidebarSummaryPriorityItem) -> Int? {
+        currentTabMatch(for: item)?.index
+    }
+
+    private func currentTabMatch(for item: WorkspaceSidebarSummaryPriorityItem) -> (tab: Workspace, index: Int)? {
+        if let itemId = UUID(uuidString: item.workspaceId) {
+            guard let index = tabs.firstIndex(where: { $0.id == itemId }) else {
+                return nil
+            }
+            return (tabs[index], index)
+        }
+        guard tabs.indices.contains(item.nativeOrder) else { return nil }
+        return (tabs[item.nativeOrder], item.nativeOrder)
+    }
+}
+
+private enum SummaryPriorityWorkspaceDisplayRow: Identifiable {
+    case summary(WorkspaceSidebarSummaryPriorityItem)
+    case pending(SummaryPriorityPendingWorkspace)
+
+    var id: String {
+        switch self {
+        case .summary(let item):
+            return "summary-\(item.workspaceId)-\(item.nativeOrder)"
+        case .pending(let pending):
+            return "pending-\(pending.id.uuidString)"
+        }
+    }
+}
+
+private struct SummaryPriorityPendingWorkspace: Identifiable {
+    let tab: Workspace
+    let title: String
+    let nativeOrder: Int
+    let isRefreshing: Bool
+
+    var id: UUID { tab.id }
+}
+
+private struct SummaryPriorityToolbar: View {
+    let sort: WorkspaceSidebarSummaryPrioritySort
+    let dimensions: [WorkspaceSidebarDimensionDefinition]
+    let isLoading: Bool
+    let onSort: (WorkspaceSidebarSummaryPrioritySort) -> Void
+    let onRefresh: () -> Void
+
+    private var visibleDimensions: [WorkspaceSidebarDimensionDefinition] {
+        dimensions.filter { $0.enabled && $0.visible }
+    }
+
+    private var activeSortTitle: String {
+        if sort.mode == "native_order" {
+            return String(localized: "sidebar.workspaceSummary.sort.nativeOrder", defaultValue: "Native Order")
+        }
+        if sort.mode == "recent" {
+            return String(localized: "sidebar.workspaceSummary.sort.recent", defaultValue: "Recent")
+        }
+        let dimensionId = sort.dimensionId ?? "urgency"
+        return title(forDimensionId: dimensionId)
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(String(localized: "sidebar.workspaceSummary.sort.label", defaultValue: "Sort"))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            Menu {
+                ForEach(visibleDimensions) { dimension in
+                    sortMenuItem(
+                        title: title(for: dimension),
+                        sort: WorkspaceSidebarSummaryPrioritySort(
+                            mode: "dimension",
+                            dimensionId: dimension.id,
+                            direction: "desc"
+                        )
+                    )
+                }
+
+                Divider()
+
+                sortMenuItem(
+                    title: String(localized: "sidebar.workspaceSummary.sort.nativeOrder", defaultValue: "Native Order"),
+                    sort: WorkspaceSidebarSummaryPrioritySort(mode: "native_order", dimensionId: nil, direction: "asc")
+                )
+                sortMenuItem(
+                    title: String(localized: "sidebar.workspaceSummary.sort.recent", defaultValue: "Recent"),
+                    sort: WorkspaceSidebarSummaryPrioritySort(mode: "recent", dimensionId: nil, direction: "desc")
+                )
+            } label: {
+                HStack(spacing: 4) {
+                    Text(activeSortTitle)
+                        .font(.system(size: 10, weight: .semibold))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8, weight: .semibold))
+                }
+                .foregroundColor(.primary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.08))
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize(horizontal: true, vertical: false)
+
+            Spacer(minLength: 0)
+
+            Button(action: onRefresh) {
+                if isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .buttonStyle(.borderless)
+            .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
+            .disabled(isLoading)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    @ViewBuilder
+    private func sortMenuItem(title: String, sort: WorkspaceSidebarSummaryPrioritySort) -> some View {
+        Button {
+            onSort(sort)
+        } label: {
+            if isSelected(sort) {
+                Label(title, systemImage: "checkmark")
+            } else {
+                Text(title)
+            }
+        }
+    }
+
+    private func isSelected(_ candidate: WorkspaceSidebarSummaryPrioritySort) -> Bool {
+        sort.mode == candidate.mode && sort.dimensionId == candidate.dimensionId
+    }
+
+    private func title(for dimension: WorkspaceSidebarDimensionDefinition) -> String {
+        title(forDimensionId: dimension.id, fallback: dimension.label)
+    }
+
+    private func title(forDimensionId dimensionId: String, fallback: String? = nil) -> String {
+        if dimensionId == "urgency" {
+            return String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency")
+        }
+        if dimensionId == "importance" {
+            return String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance")
+        }
+        return fallback ?? dimensionId
+    }
+}
+
+private struct SummaryPriorityWorkspaceRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let item: WorkspaceSidebarSummaryPriorityItem
+    let sort: WorkspaceSidebarSummaryPrioritySort
+    let isActive: Bool
+    let presentStatus: String?
+    let activeTabIndicatorStyle: SidebarActiveTabIndicatorStyle
+    let selectionColorHex: String?
+    let workspaceShortcutLabel: String?
+    let showsModifierShortcutHints: Bool
+    let shortcutHintXOffset: Double
+    let shortcutHintYOffset: Double
+    let alwaysShowShortcutHints: Bool
+    let onOpen: () -> Void
+    let onRefresh: () -> Void
+    let onTogglePin: () -> Void
+
+    private var activeDimensionId: String {
+        sort.mode == "dimension" ? (sort.dimensionId ?? "urgency") : "urgency"
+    }
+
+    private var activeScore: Double {
+        item.scores.dimensions[activeDimensionId]?.rawScore ?? 0
+    }
+
+    private var category: SummaryPriorityWorkspaceCategory {
+        SummaryPriorityWorkspaceCategory(status: item.status)
+    }
+
+    private var showsWorkspaceShortcutHint: Bool {
+        (showsModifierShortcutHints || alwaysShowShortcutHints) && workspaceShortcutLabel != nil
+    }
+
+    private var shortcutHintEmphasis: Double {
+        isActive ? 1.0 : 0.9
+    }
+
+    private var activeAppearance: SummaryPriorityWorkspaceActiveAppearance {
+        SummaryPriorityWorkspaceActiveAppearance(
+            isActive: isActive,
+            activeTabIndicatorStyle: activeTabIndicatorStyle,
+            selectionColorHex: selectionColorHex,
+            colorScheme: colorScheme
+        )
+    }
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(category.color)
+                    .frame(width: 3)
+                    .padding(.vertical, 10)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 5) {
+                        if let emoji = item.topic.emoji, !emoji.isEmpty {
+                            Text(emoji)
+                                .font(.system(size: 11, weight: .semibold))
+                        }
+                        Text(item.topic.text)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(activeAppearance.primaryTextColor)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        HStack(spacing: 5) {
+                            Text("\(Int(activeScore))")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(activeScoreColor)
+                            if showsWorkspaceShortcutHint, let workspaceShortcutLabel {
+                                ShortcutHintPill(text: workspaceShortcutLabel, fontSize: 10, emphasis: shortcutHintEmphasis)
+                                    .offset(
+                                        x: ShortcutHintDebugSettings.clamped(shortcutHintXOffset),
+                                        y: ShortcutHintDebugSettings.clamped(shortcutHintYOffset)
+                                    )
+                                    .transition(.opacity)
+                            }
+                        }
+                        .animation(.easeOut(duration: 0.12), value: showsModifierShortcutHints || alwaysShowShortcutHints)
+                    }
+
+                    HStack(spacing: 5) {
+                        Text(item.title)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundColor(activeAppearance.secondaryTextColor())
+                            .lineLimit(1)
+                        if item.pinned {
+                            Image(systemName: "pin.fill")
+                                .font(.system(size: 8, weight: .semibold))
+                                .foregroundColor(activeAppearance.secondaryTextColor())
+                        }
+                    }
+
+                    if let presentStatus {
+                        SummaryPriorityPresentStatusLine(
+                            text: presentStatus,
+                            color: category.color,
+                            activeAppearance: activeAppearance
+                        )
+                    }
+
+                    HStack(spacing: 7) {
+                        scoreLabel("U", score: item.scores.dimensions["urgency"]?.rawScore)
+                        scoreLabel("I", score: item.scores.dimensions["importance"]?.rawScore)
+                        Text(category.label)
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(activeAppearance.badgeForegroundColor(defaultColor: category.color))
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(activeAppearance.badgeBackgroundColor(defaultColor: category.color.opacity(0.12)))
+                            )
+                    }
+
+                    Text(item.summary.short)
+                        .font(.system(size: 10))
+                        .foregroundColor(activeAppearance.secondaryTextColor())
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let nextAction = item.nextAction {
+                        Text("\(String(localized: "sidebar.workspaceSummary.next", defaultValue: "Next:")) \(nextAction.label)")
+                            .font(.system(size: 10))
+                            .foregroundColor(activeAppearance.secondaryTextColor())
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.vertical, 10)
+                .padding(.leading, 9)
+                .padding(.trailing, 9)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(activeAppearance.backgroundColor(inactiveColor: category.color.opacity(0.055)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(
+                        activeAppearance.borderColor(inactiveColor: category.color.opacity(0.22)),
+                        lineWidth: activeAppearance.borderLineWidth(inactiveWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button(action: onRefresh) {
+                Label(String(localized: "sidebar.workspaceSummary.row.refresh", defaultValue: "Refresh Summary"), systemImage: "arrow.clockwise")
+            }
+            Button(action: onTogglePin) {
+                Label(
+                    item.pinned
+                        ? String(localized: "sidebar.workspaceSummary.row.unpin", defaultValue: "Unpin")
+                        : String(localized: "sidebar.workspaceSummary.row.pin", defaultValue: "Pin"),
+                    systemImage: item.pinned ? "pin.slash" : "pin"
+                )
+            }
+        }
+        .safeHelp(fullHelpText)
+    }
+
+    private var activeScoreColor: Color {
+        if isActive {
+            return activeAppearance.primaryTextColor
+        }
+        return activeScore >= 70 ? category.color : .secondary
+    }
+
+    private func scoreLabel(_ label: String, score: Double?) -> some View {
+        Text("\(label) \(Int(score ?? 0))")
+            .font(.system(size: 9, weight: .semibold, design: .monospaced))
+            .foregroundColor(activeAppearance.secondaryTextColor())
+            .lineLimit(1)
+    }
+
+    private var fullHelpText: String {
+        var lines: [String] = []
+        lines.append("\(item.topic.text) - \(category.label)")
+        lines.append(item.title)
+        if let subtitle = item.subtitle, !subtitle.isEmpty {
+            lines.append(subtitle)
+        }
+        if let presentStatus {
+            lines.append("\(String(localized: "sidebar.workspaceSummary.presentStatus", defaultValue: "Current")): \(presentStatus)")
+        }
+
+        let urgency = item.scores.dimensions["urgency"]
+        let importance = item.scores.dimensions["importance"]
+        lines.append("\(String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency")) \(Int(urgency?.rawScore ?? 0)): \(urgency?.reason ?? "")")
+        lines.append("\(String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance")) \(Int(importance?.rawScore ?? 0)): \(importance?.reason ?? "")")
+
+        lines.append(item.summary.short)
+        let detailed = item.summary.detailed.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !detailed.isEmpty, detailed != item.summary.short {
+            lines.append(detailed)
+        }
+        if let nextAction = item.nextAction {
+            lines.append("\(String(localized: "sidebar.workspaceSummary.next", defaultValue: "Next:")) \(nextAction.label)")
+            if let detail = nextAction.detail, !detail.isEmpty {
+                lines.append(detail)
+            }
+        }
+        if !item.scores.rankReason.isEmpty {
+            lines.append(item.scores.rankReason)
+        }
+        lines += (item.evidence ?? []).prefix(3).compactMap { evidence in
+            let quote = evidence.quote.trimmingCharacters(in: .whitespacesAndNewlines)
+            return quote.isEmpty ? nil : quote
+        }
+        return lines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .joined(separator: "\n\n")
+    }
+}
+
+private struct SummaryPriorityPendingWorkspaceRow: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let pending: SummaryPriorityPendingWorkspace
+    let isActive: Bool
+    let presentStatus: String?
+    let activeTabIndicatorStyle: SidebarActiveTabIndicatorStyle
+    let selectionColorHex: String?
+    let workspaceShortcutLabel: String?
+    let showsModifierShortcutHints: Bool
+    let shortcutHintXOffset: Double
+    let shortcutHintYOffset: Double
+    let alwaysShowShortcutHints: Bool
+    let onOpen: () -> Void
+
+    private var category: SummaryPriorityWorkspaceCategory { .unknown }
+
+    private var showsWorkspaceShortcutHint: Bool {
+        (showsModifierShortcutHints || alwaysShowShortcutHints) && workspaceShortcutLabel != nil
+    }
+
+    private var activeAppearance: SummaryPriorityWorkspaceActiveAppearance {
+        SummaryPriorityWorkspaceActiveAppearance(
+            isActive: isActive,
+            activeTabIndicatorStyle: activeTabIndicatorStyle,
+            selectionColorHex: selectionColorHex,
+            colorScheme: colorScheme
+        )
+    }
+
+    var body: some View {
+        Button(action: onOpen) {
+            HStack(spacing: 0) {
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
+                    .fill(category.color)
+                    .frame(width: 3)
+                    .padding(.vertical, 10)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack(spacing: 5) {
+                        Text(pending.title)
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundColor(activeAppearance.primaryTextColor)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        HStack(spacing: 5) {
+                            Text("--")
+                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                .foregroundColor(activeAppearance.secondaryTextColor())
+                            if showsWorkspaceShortcutHint, let workspaceShortcutLabel {
+                                ShortcutHintPill(text: workspaceShortcutLabel, fontSize: 10, emphasis: isActive ? 1.0 : 0.9)
+                                    .offset(
+                                        x: ShortcutHintDebugSettings.clamped(shortcutHintXOffset),
+                                        y: ShortcutHintDebugSettings.clamped(shortcutHintYOffset)
+                                    )
+                                    .transition(.opacity)
+                            }
+                        }
+                        .animation(.easeOut(duration: 0.12), value: showsModifierShortcutHints || alwaysShowShortcutHints)
+                    }
+
+                    if let presentStatus {
+                        SummaryPriorityPresentStatusLine(
+                            text: presentStatus,
+                            color: category.color,
+                            activeAppearance: activeAppearance
+                        )
+                    }
+
+                    HStack(spacing: 7) {
+                        Text(pending.isRefreshing
+                            ? String(localized: "sidebar.workspaceSummary.pending.refreshing", defaultValue: "Refreshing")
+                            : String(localized: "sidebar.workspaceSummary.pending.unsorted", defaultValue: "Unsorted"))
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(activeAppearance.badgeForegroundColor(defaultColor: category.color))
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(
+                                Capsule(style: .continuous)
+                                    .fill(activeAppearance.badgeBackgroundColor(defaultColor: category.color.opacity(0.12)))
+                            )
+                    }
+
+                    Text(String(localized: "sidebar.workspaceSummary.pending.summary", defaultValue: "Waiting for summary and score. This workspace stays at the bottom until refresh finishes."))
+                        .font(.system(size: 10))
+                        .foregroundColor(activeAppearance.secondaryTextColor())
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(.vertical, 10)
+                .padding(.leading, 9)
+                .padding(.trailing, 9)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(activeAppearance.backgroundColor(inactiveColor: category.color.opacity(0.045)))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(
+                        activeAppearance.borderColor(inactiveColor: category.color.opacity(0.18)),
+                        lineWidth: activeAppearance.borderLineWidth(inactiveWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .safeHelp(helpText)
+    }
+
+    private var helpText: String {
+        [
+            pending.title,
+            presentStatus.map {
+                "\(String(localized: "sidebar.workspaceSummary.presentStatus", defaultValue: "Current")): \($0)"
+            },
+            pending.isRefreshing
+                ? String(localized: "sidebar.workspaceSummary.pending.refreshing", defaultValue: "Refreshing")
+                : String(localized: "sidebar.workspaceSummary.pending.unsorted", defaultValue: "Unsorted"),
+            String(localized: "sidebar.workspaceSummary.pending.summary", defaultValue: "Waiting for summary and score. This workspace stays at the bottom until refresh finishes.")
+        ].compactMap { $0 }.joined(separator: "\n\n")
+    }
+}
+
+private struct SummaryPriorityPresentStatusLine: View {
+    let text: String
+    let color: Color
+    let activeAppearance: SummaryPriorityWorkspaceActiveAppearance
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundColor(activeAppearance.badgeForegroundColor(defaultColor: color))
+            Text("\(String(localized: "sidebar.workspaceSummary.presentStatus", defaultValue: "Current")): \(text)")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(activeAppearance.secondaryTextColor(0.86))
+                .lineLimit(2)
+                .truncationMode(.tail)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private struct SummaryPriorityWorkspaceActiveAppearance {
+    let isActive: Bool
+    let activeTabIndicatorStyle: SidebarActiveTabIndicatorStyle
+    let selectionColorHex: String?
+    let colorScheme: ColorScheme
+
+    private var selectionBackgroundColor: NSColor {
+        if let selectionColorHex, let parsed = NSColor(hex: selectionColorHex) {
+            return parsed
+        }
+        return cmuxAccentNSColor(for: colorScheme)
+    }
+
+    var primaryTextColor: Color {
+        isActive
+            ? Color(nsColor: sidebarSelectedWorkspaceForegroundNSColor(opacity: 1.0))
+            : .primary
+    }
+
+    func secondaryTextColor(_ opacity: Double = 0.75) -> Color {
+        isActive
+            ? Color(nsColor: sidebarSelectedWorkspaceForegroundNSColor(opacity: CGFloat(opacity)))
+            : .secondary
+    }
+
+    func backgroundColor(inactiveColor: Color) -> Color {
+        isActive ? Color(nsColor: selectionBackgroundColor) : inactiveColor
+    }
+
+    func borderColor(inactiveColor: Color) -> Color {
+        guard isActive else { return inactiveColor }
+        switch activeTabIndicatorStyle {
+        case .leftRail:
+            return .clear
+        case .solidFill:
+            return Color.primary.opacity(0.5)
+        }
+    }
+
+    func borderLineWidth(inactiveWidth: CGFloat) -> CGFloat {
+        guard isActive else { return inactiveWidth }
+        switch activeTabIndicatorStyle {
+        case .leftRail:
+            return 0
+        case .solidFill:
+            return 1.5
+        }
+    }
+
+    func badgeForegroundColor(defaultColor: Color) -> Color {
+        isActive ? secondaryTextColor(0.92) : defaultColor
+    }
+
+    func badgeBackgroundColor(defaultColor: Color) -> Color {
+        isActive ? Color.white.opacity(0.16) : defaultColor
+    }
+}
+
+private enum SummaryPriorityWorkspaceCategory {
+    case waiting
+    case blocked
+    case testing
+    case working
+    case done
+    case idle
+    case unknown
+
+    init(status: String) {
+        switch status {
+        case "waiting_for_user":
+            self = .waiting
+        case "blocked":
+            self = .blocked
+        case "running_tests":
+            self = .testing
+        case "working":
+            self = .working
+        case "done":
+            self = .done
+        case "idle":
+            self = .idle
+        default:
+            self = .unknown
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .waiting: return .orange
+        case .blocked: return .red
+        case .testing: return .blue
+        case .working: return .green
+        case .done: return .mint
+        case .idle: return .secondary
+        case .unknown: return .gray
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .waiting:
+            return String(localized: "sidebar.workspaceSummary.status.waiting", defaultValue: "Waiting")
+        case .blocked:
+            return String(localized: "sidebar.workspaceSummary.status.blocked", defaultValue: "Blocked")
+        case .testing:
+            return String(localized: "sidebar.workspaceSummary.status.testing", defaultValue: "Testing")
+        case .working:
+            return String(localized: "sidebar.workspaceSummary.status.working", defaultValue: "Working")
+        case .done:
+            return String(localized: "sidebar.workspaceSummary.status.done", defaultValue: "Done")
+        case .idle:
+            return String(localized: "sidebar.workspaceSummary.status.idle", defaultValue: "Idle")
+        case .unknown:
+            return String(localized: "sidebar.workspaceSummary.status.unknown", defaultValue: "Unknown")
+        }
+    }
+}
+
 #if DEBUG
 private struct SidebarDevFooter: View {
     @ObservedObject var updateViewModel: UpdateViewModel
@@ -12388,6 +14428,8 @@ private struct TabItemView: View, Equatable {
     let livePresentation: SidebarTabItemPresentationSnapshot
     @Binding var frozenPresentation: SidebarTabItemPresentationSnapshot?
     @State private var workspaceSnapshotStorage: SidebarWorkspaceSnapshotBuilder.Snapshot?
+    let reportLayoutFrame: (UUID, CGRect?) -> Void
+    let reportHoverState: (UUID, Bool) -> Void
     @StateObject private var contextMenuState = SidebarTabItemContextMenuState()
     @State private var isHovering = false
     @State private var rowHeight: CGFloat = 1
@@ -12540,6 +14582,20 @@ private struct TabItemView: View, Equatable {
             return trimmedTarget
         }
         return String(localized: "sidebar.remote.subtitleFallback", defaultValue: "SSH workspace")
+    }
+
+    private var workspaceDigestDisplay: SidebarWorkspaceDigestDisplay? {
+        guard let entry = tab.statusEntries["digest"] else { return nil }
+        let value = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        let summary = tab.metadataBlocks["digest.summary"]?.markdown
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return SidebarWorkspaceDigestDisplay(
+            text: value,
+            summary: summary?.isEmpty == false ? summary : nil,
+            color: entry.color,
+            icon: entry.icon
+        )
     }
 
     private var copyableSidebarSSHError: String? {
@@ -12722,7 +14778,9 @@ private struct TabItemView: View, Equatable {
 
             if detailVisibility.showsMetadata {
                 let metadataEntries = workspaceSnapshot.metadataEntries
+                    .filter { $0.key != "digest" }
                 let metadataBlocks = workspaceSnapshot.metadataBlocks
+                    .filter { $0.key != "digest.summary" }
                 if !metadataEntries.isEmpty {
                     SidebarMetadataRows(
                         entries: metadataEntries,
@@ -12919,6 +14977,12 @@ private struct TabItemView: View, Equatable {
                     }
             }
         }
+        .background {
+            WorkspaceSidebarRowFrameReporter(
+                workspaceId: tab.id,
+                onFrameChange: reportLayoutFrame
+            )
+        }
         .contentShape(Rectangle())
         .opacity(isBeingDragged ? 0.6 : 1)
         .overlay {
@@ -13009,8 +15073,14 @@ private struct TabItemView: View, Equatable {
             updateSelection()
         }
         .onHover { hovering in
-            guard !contextMenuState.isVisible else { return }
+            guard !contextMenuState.isVisible else {
+                if !hovering {
+                    reportHoverState(tab.id, false)
+                }
+                return
+            }
             isHovering = hovering
+            reportHoverState(tab.id, hovering)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text(accessibilityTitle))
@@ -13024,6 +15094,7 @@ private struct TabItemView: View, Equatable {
         .contextMenu {
             workspaceContextMenu
                 .onAppear {
+                    reportHoverState(tab.id, false)
                     contextMenuState.isVisible = true
                     contextMenuState.hasDeferredWorkspaceObservationInvalidation = false
                     contextMenuState.pendingWorkspaceSnapshot = nil
@@ -13032,6 +15103,7 @@ private struct TabItemView: View, Equatable {
                 .onDisappear {
                     contextMenuState.isVisible = false
                     frozenPresentation = nil
+                    reportHoverState(tab.id, false)
                     if isHovering {
                         isHovering = false
                     }
@@ -14111,6 +16183,90 @@ enum SidebarMarkdownRenderer {
             markdown: markdown,
             options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
         )
+    }
+}
+
+private struct SidebarWorkspaceDigestDisplay: Equatable {
+    let text: String
+    let summary: String?
+    let color: String?
+    let icon: String?
+}
+
+private struct SidebarWorkspaceDigestLine: View {
+    let digest: SidebarWorkspaceDigestDisplay
+    let isActive: Bool
+    let fallbackColor: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            iconView
+            Text(digest.text)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(foregroundColor)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer(minLength: 0)
+        }
+        .safeHelp(helpText)
+    }
+
+    private var foregroundColor: Color {
+        if isActive {
+            return Color(nsColor: sidebarSelectedWorkspaceForegroundNSColor(opacity: 0.88))
+        }
+        if let raw = digest.color, let color = Color(hex: raw) {
+            return color
+        }
+        return fallbackColor
+    }
+
+    private var helpText: String {
+        guard let summary = digest.summary, !summary.isEmpty else {
+            return digest.text
+        }
+        return "\(digest.text)\n\n\(summary)"
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        switch SidebarWorkspaceDigestIcon(rawSpec: digest.icon) {
+        case .emoji(let value):
+            Text(value).font(.system(size: 9))
+        case .text(let value):
+            Text(value).font(.system(size: 8, weight: .semibold))
+        case .symbol(let name):
+            Image(systemName: name).font(.system(size: 8, weight: .medium))
+        case .none:
+            EmptyView()
+        }
+    }
+}
+
+private enum SidebarWorkspaceDigestIcon {
+    case emoji(String)
+    case text(String)
+    case symbol(String)
+    case none
+
+    init(rawSpec: String?) {
+        guard let raw = rawSpec?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            self = .none
+            return
+        }
+        if raw.hasPrefix("emoji:") {
+            let value = String(raw.dropFirst("emoji:".count))
+            self = value.isEmpty ? .none : .emoji(value)
+            return
+        }
+        if raw.hasPrefix("text:") {
+            let value = String(raw.dropFirst("text:".count))
+            self = value.isEmpty ? .none : .text(value)
+            return
+        }
+        let symbolName = raw.hasPrefix("sf:") ? String(raw.dropFirst("sf:".count)) : raw
+        self = symbolName.isEmpty ? .none : .symbol(symbolName)
     }
 }
 
@@ -15549,6 +17705,95 @@ private struct LayerBackedBackdropColor: NSViewRepresentable {
     }
 }
 
+private struct SidebarTerminalBackgroundView: NSViewRepresentable {
+    let backgroundColor: NSColor
+    let opacity: CGFloat
+
+    func makeNSView(context _: Context) -> NSView {
+        let view = NSView()
+        view.wantsLayer = true
+        view.layer?.backgroundColor = backgroundColor.withAlphaComponent(1.0).cgColor
+        view.layer?.opacity = Float(opacity)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context _: Context) {
+        nsView.layer?.backgroundColor = backgroundColor.withAlphaComponent(1.0).cgColor
+        nsView.layer?.opacity = Float(opacity)
+    }
+}
+
+private struct SidebarBackdrop: View {
+    var cornerRadiusOverride: CGFloat? = nil
+
+    @AppStorage("sidebarMatchTerminalBackground") private var matchTerminalBackground = false
+    @AppStorage("sidebarTintOpacity") private var sidebarTintOpacity = SidebarTintDefaults.opacity
+    @AppStorage("sidebarTintHex") private var sidebarTintHex = SidebarTintDefaults.hex
+    @AppStorage("sidebarTintHexLight") private var sidebarTintHexLight: String?
+    @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
+    @AppStorage("sidebarMaterial") private var sidebarMaterial = SidebarMaterialOption.sidebar.rawValue
+    @AppStorage("sidebarBlendMode") private var sidebarBlendMode = SidebarBlendModeOption.withinWindow.rawValue
+    @AppStorage("sidebarState") private var sidebarState = SidebarStateOption.followWindow.rawValue
+    @AppStorage("sidebarCornerRadius") private var sidebarCornerRadius = 0.0
+    @AppStorage("sidebarBlurOpacity") private var sidebarBlurOpacity = 1.0
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var terminalBackgroundColor: NSColor = GhosttyBackgroundTheme.currentColor()
+
+    var body: some View {
+        let cornerRadius = cornerRadiusOverride ?? CGFloat(max(0, sidebarCornerRadius))
+
+        if matchTerminalBackground {
+            let alpha = CGFloat(GhosttyApp.shared.defaultBackgroundOpacity)
+            return AnyView(
+                SidebarTerminalBackgroundView(
+                    backgroundColor: GhosttyApp.shared.defaultBackgroundColor,
+                    opacity: alpha
+                )
+                .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+                .onReceive(NotificationCenter.default.publisher(for: .ghosttyDefaultBackgroundDidChange)) { _ in
+                    terminalBackgroundColor = GhosttyBackgroundTheme.currentColor()
+                }
+            )
+        }
+
+        let materialOption = SidebarMaterialOption(rawValue: sidebarMaterial)
+        let blendingMode = SidebarBlendModeOption(rawValue: sidebarBlendMode)?.mode ?? .behindWindow
+        let state = SidebarStateOption(rawValue: sidebarState)?.state ?? .active
+        let resolvedHex: String = {
+            if colorScheme == .dark, let dark = sidebarTintHexDark {
+                return dark
+            } else if colorScheme == .light, let light = sidebarTintHexLight {
+                return light
+            }
+            return sidebarTintHex
+        }()
+        let tintColor = (NSColor(hex: resolvedHex) ?? NSColor(hex: sidebarTintHex) ?? .black)
+            .withAlphaComponent(sidebarTintOpacity)
+        let useLiquidGlass = materialOption?.usesLiquidGlass ?? false
+        let useWindowLevelGlass = useLiquidGlass && blendingMode == .behindWindow
+
+        return AnyView(
+            ZStack {
+                if let material = materialOption?.material, !useWindowLevelGlass {
+                    SidebarVisualEffectBackground(
+                        material: material,
+                        blendingMode: blendingMode,
+                        state: state,
+                        opacity: sidebarBlurOpacity,
+                        tintColor: tintColor,
+                        cornerRadius: cornerRadius,
+                        preferLiquidGlass: useLiquidGlass
+                    )
+                    if !useLiquidGlass {
+                        Color(nsColor: tintColor)
+                    }
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
+        )
+    }
+}
+
 enum SidebarMaterialOption: String, CaseIterable, Identifiable {
     case none
     case liquidGlass  // macOS 26+ NSGlassEffectView
@@ -15773,5 +18018,1289 @@ extension NSColor {
             return String(format: "#%02X%02X%02X%02X", redByte, greenByte, blueByte, alphaByte)
         }
         return String(format: "#%02X%02X%02X", redByte, greenByte, blueByte)
+    }
+}
+
+// MARK: - Extension column (cockpit + peek)
+
+enum ExtensionColumnSettings {
+    static let openKey = "extensionColumn.open"
+    static let defaultOpen = false
+    static let columnWidth: CGFloat = 240
+    static let l2PanelWidth: CGFloat = 340
+    static let overlayHitWidth: CGFloat = columnWidth + l2PanelWidth + 24
+    static let dimensions: [String] = ["urgency", "importance", "progress"]
+    static let trafficLightInset: CGFloat = 28
+    static let backgroundOpacity: Double = 0.90
+    static let rowSpacing: CGFloat = 2
+    static let hoverDismissDelay: TimeInterval = 0.14
+}
+
+private struct ExtensionColumnRowData: Identifiable, Equatable {
+    let tabId: UUID
+    let tabIndex: Int
+    let title: String
+    let item: WorkspaceSidebarSummaryPriorityItem?
+    let contextSummary: WorkspaceTabContextSummary?
+
+    var id: UUID { tabId }
+}
+
+private struct ExtensionColumnDimensionInfo {
+    let id: String
+    let label: String
+    let glyph: String
+}
+
+private enum ExtensionColumnDimensions {
+    static let all: [ExtensionColumnDimensionInfo] = [
+        ExtensionColumnDimensionInfo(
+            id: "urgency",
+            label: String(localized: "extensionColumn.sort.urgency", defaultValue: "Urgency"),
+            glyph: "bolt.fill"
+        ),
+        ExtensionColumnDimensionInfo(
+            id: "importance",
+            label: String(localized: "extensionColumn.sort.importance", defaultValue: "Importance"),
+            glyph: "star.fill"
+        ),
+        ExtensionColumnDimensionInfo(
+            id: "progress",
+            label: String(localized: "extensionColumn.sort.progress", defaultValue: "Progress"),
+            glyph: "circle.lefthalf.filled"
+        )
+    ]
+
+    static func info(for id: String) -> ExtensionColumnDimensionInfo {
+        all.first(where: { $0.id == id }) ?? all[0]
+    }
+}
+
+private enum ExtensionColumnPalette {
+    static func selectionBackground(for colorScheme: ColorScheme, customHex: String? = nil) -> Color {
+        if let customHex, let parsed = NSColor(hex: customHex) {
+            return Color(nsColor: parsed)
+        }
+        return Color(nsColor: sidebarSelectedWorkspaceBackgroundNSColor(for: colorScheme))
+    }
+
+    static func selectedForeground(opacity: CGFloat) -> Color {
+        Color(nsColor: sidebarSelectedWorkspaceForegroundNSColor(opacity: opacity))
+    }
+
+    static func rowHoverFill(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color.white.opacity(0.045) : Color.black.opacity(0.055)
+    }
+
+    static func subtleFill(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color.white.opacity(0.07) : Color.black.opacity(0.055)
+    }
+
+    static func separator(for colorScheme: ColorScheme, opacity: Double = 1.0) -> Color {
+        let base = colorScheme == .dark ? Color.white.opacity(0.10) : Color.black.opacity(0.14)
+        return base.opacity(opacity)
+    }
+
+    static func dropShadow(for colorScheme: ColorScheme, opacity: Double) -> Color {
+        Color.black.opacity(colorScheme == .dark ? opacity : opacity * 0.22)
+    }
+
+    static func panelOverlay(for colorScheme: ColorScheme) -> Color {
+        colorScheme == .dark ? Color.black.opacity(0.24) : Color.white.opacity(0.48)
+    }
+}
+
+private struct ExtensionColumnHairline: View {
+    @Environment(\.colorScheme) private var colorScheme
+    let opacity: Double
+
+    var body: some View {
+        Rectangle()
+            .fill(ExtensionColumnPalette.separator(for: colorScheme, opacity: opacity))
+            .frame(width: 1)
+    }
+}
+
+private struct ExtensionColumnWindowOverlayRoot: View {
+    @ObservedObject var workspaceTabStore: WorkspaceTabStore
+    @ObservedObject var workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
+    @ObservedObject var tabManager: TabManager
+    let isOpen: Bool
+    let sidebarWidth: CGFloat
+    let onClose: () -> Void
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .topLeading) {
+                Color.clear
+                if isOpen {
+                    ExtensionColumnOverlay(
+                        workspaceTabStore: workspaceTabStore,
+                        workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore,
+                        isOpen: isOpen,
+                        containerHeight: proxy.size.height,
+                        topInset: ExtensionColumnSettings.trafficLightInset,
+                        onClose: onClose
+                    )
+                    .environmentObject(tabManager)
+                    .frame(
+                        width: ExtensionColumnSettings.overlayHitWidth,
+                        height: proxy.size.height,
+                        alignment: .topLeading
+                    )
+                    .padding(.leading, sidebarWidth)
+                }
+            }
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .ignoresSafeArea()
+    }
+}
+
+struct ExtensionColumnOverlay: View {
+    @ObservedObject var workspaceTabStore: WorkspaceTabStore
+    @ObservedObject var workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
+    @EnvironmentObject var tabManager: TabManager
+    @Environment(\.colorScheme) private var colorScheme
+    let isOpen: Bool
+    let containerHeight: CGFloat
+    let topInset: CGFloat
+    let onClose: () -> Void
+
+    private var rows: [ExtensionColumnRowData] {
+        let items = workspaceTabStore.summaryPriority?.items ?? []
+        let itemsById: [UUID: WorkspaceSidebarSummaryPriorityItem] = Dictionary(
+            uniqueKeysWithValues: items.compactMap { item in
+                guard let uuid = UUID(uuidString: item.workspaceId) else { return nil }
+                return (uuid, item)
+            }
+        )
+        return tabManager.tabs.enumerated().map { index, tab in
+            let contextSummary = workspaceTabStore.contextSummary(for: tab.id)
+            return ExtensionColumnRowData(
+                tabId: tab.id,
+                tabIndex: index,
+                title: contextSummary?.title ?? (tab.title.isEmpty ? "Workspace \(index + 1)" : tab.title),
+                item: itemsById[tab.id],
+                contextSummary: contextSummary
+            )
+        }
+    }
+
+    private var sortKey: String {
+        let raw = workspaceTabStore.selectedSort.dimensionId
+        let resolved = raw.flatMap { id -> String? in
+            ExtensionColumnSettings.dimensions.contains(id) ? id : nil
+        }
+        return resolved ?? "urgency"
+    }
+
+    private func refreshSingle(workspace: Workspace) {
+        workspaceTabStore.refreshWorkspace(workspaceId: workspace.id.uuidString)
+    }
+
+    private func refreshSingle(row: ExtensionColumnRowData) {
+        guard let workspace = tabManager.tabs.first(where: { $0.id == row.tabId }) else { return }
+        refreshSingle(workspace: workspace)
+    }
+
+    private func setHovering(_ workspaceId: UUID, hovering: Bool) {
+        if hovering {
+            workspaceSidebarLayoutMetricsStore.setHoveredWorkspaceId(workspaceId)
+        } else {
+            workspaceSidebarLayoutMetricsStore.clearHoveredWorkspaceId(
+                ifCurrent: workspaceId,
+                delay: ExtensionColumnSettings.hoverDismissDelay
+            )
+        }
+    }
+
+    var body: some View {
+        let rows = self.rows
+        return ZStack(alignment: .topLeading) {
+            extensionColumn(rows: rows)
+                .frame(width: isOpen ? ExtensionColumnSettings.columnWidth : 0)
+                .frame(height: containerHeight, alignment: .topLeading)
+                .opacity(isOpen ? 1 : 0)
+                .clipped()
+                .animation(.spring(response: 0.36, dampingFraction: 0.86), value: isOpen)
+
+            if isOpen, let hoveredId = workspaceSidebarLayoutMetricsStore.hoveredWorkspaceId,
+               let row = rows.first(where: { $0.tabId == hoveredId }),
+               let rowFrame = workspaceSidebarLayoutMetricsStore.rowFrame(for: hoveredId) {
+                HStack(spacing: 0) {
+                    L2PanelArrow()
+                        .frame(width: 10, height: 14)
+                        .offset(x: 1, y: 16)
+                    hoverDetailPanel(for: row)
+                        .frame(width: ExtensionColumnSettings.l2PanelWidth)
+                }
+                .contentShape(Rectangle())
+                .onHover { hovering in
+                    setHovering(row.tabId, hovering: hovering)
+                }
+                .offset(
+                    x: ExtensionColumnSettings.columnWidth + 6,
+                    y: max(0, rowFrame.minY - 6)
+                )
+                .transition(.opacity.combined(with: .move(edge: .leading)))
+                .zIndex(40)
+            }
+        }
+        .frame(
+            width: ExtensionColumnSettings.overlayHitWidth,
+            height: containerHeight,
+            alignment: .topLeading
+        )
+        .allowsHitTesting(isOpen)
+        .onAppear {
+            workspaceTabStore.extensionDidOpen(tabs: tabManager.tabs)
+        }
+        .onChange(of: tabManager.tabs.map(\.id)) { _ in
+            workspaceTabStore.extensionTabsDidChange(tabs: tabManager.tabs)
+        }
+        .onChange(of: isOpen) { isOpen in
+            if !isOpen {
+                workspaceSidebarLayoutMetricsStore.clearHoveredWorkspaceId()
+            }
+        }
+        .onDisappear {
+            workspaceSidebarLayoutMetricsStore.clearHoveredWorkspaceId()
+        }
+    }
+
+    @ViewBuilder
+    private func hoverDetailPanel(for row: ExtensionColumnRowData) -> some View {
+        if let item = row.item {
+            L2TimelinePanel(
+                item: item,
+                sortKey: sortKey,
+                isRefreshing: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
+                onRefresh: {
+                    refreshSingle(row: row)
+                }
+            )
+        } else {
+            L2PendingTimelinePanel(
+                row: row,
+                isLoading: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
+                onRefresh: {
+                    refreshSingle(row: row)
+                }
+            )
+        }
+    }
+
+    private func extensionColumn(rows: [ExtensionColumnRowData]) -> some View {
+        ZStack(alignment: .topLeading) {
+            VStack(spacing: 0) {
+                Spacer().frame(height: topInset)
+
+                extensionHeader
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+
+                Spacer(minLength: 0)
+            }
+
+            rowsLayer(rows: rows)
+        }
+        .frame(width: ExtensionColumnSettings.columnWidth, alignment: .topLeading)
+        .frame(height: containerHeight, alignment: .topLeading)
+        .background(
+            SidebarBackdrop(cornerRadiusOverride: 0)
+                .opacity(ExtensionColumnSettings.backgroundOpacity)
+        )
+        .overlay(alignment: .leading) {
+            ExtensionColumnHairline(opacity: 0.65)
+        }
+        .overlay(alignment: .trailing) {
+            ExtensionColumnHairline(opacity: 0.85)
+        }
+        .shadow(color: ExtensionColumnPalette.dropShadow(for: colorScheme, opacity: 0.5), radius: 18, x: 8, y: 0)
+    }
+
+    private func rowsLayer(rows: [ExtensionColumnRowData]) -> some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(rows) { row in
+                if let rowFrame = workspaceSidebarLayoutMetricsStore.rowFrame(for: row.tabId) {
+                    ExtensionRowDual(
+                        row: row,
+                        sortKey: sortKey,
+                        isHovered: workspaceSidebarLayoutMetricsStore.hoveredWorkspaceId == row.tabId,
+                        isActive: tabManager.selectedTabId == row.tabId,
+                        isLoading: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
+                        targetHeight: rowFrame.height,
+                        onRefresh: {
+                            if let workspace = tabManager.tabs.first(where: { $0.id == row.tabId }) {
+                                refreshSingle(workspace: workspace)
+                            }
+                        }
+                    )
+                    .frame(
+                        width: ExtensionColumnSettings.columnWidth - 12,
+                        height: rowFrame.height,
+                        alignment: .center
+                    )
+                    .padding(.horizontal, 6)
+                    .contentShape(Rectangle())
+                    .onHover { hovering in
+                        setHovering(row.tabId, hovering: hovering)
+                    }
+                    .onTapGesture {
+                        if let workspace = tabManager.tabs.first(where: { $0.id == row.tabId }) {
+                            tabManager.selectTab(workspace)
+                        }
+                    }
+                    .offset(y: rowFrame.minY)
+                }
+            }
+        }
+        .frame(
+            width: ExtensionColumnSettings.columnWidth,
+            height: containerHeight,
+            alignment: .topLeading
+        )
+    }
+
+    private var extensionHeader: some View {
+        HStack(spacing: 6) {
+            Text(String(localized: "extensionColumn.header.title", defaultValue: "Extension"))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+            Spacer(minLength: 0)
+            Text(String(localized: "sidebar.workspaceSummary.sort.label", defaultValue: "Sort"))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+            sortMenu
+            refreshButton
+            Button(action: onClose) {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.primary.opacity(0.7))
+                    .frame(width: 20, height: 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.primary.opacity(0.07))
+                    )
+            }
+            .buttonStyle(.plain)
+            .safeHelp(String(localized: "extensionColumn.toggle.tooltip", defaultValue: "Hide extension column"))
+        }
+    }
+
+    private var refreshButton: some View {
+        Button {
+            workspaceTabStore.refreshSummaryPriority(force: true)
+        } label: {
+            ZStack {
+                if workspaceTabStore.isLoading {
+                    ProgressView()
+                        .controlSize(.mini)
+                } else {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 10, weight: .semibold))
+                }
+            }
+            .foregroundColor(.primary.opacity(0.7))
+            .frame(width: 20, height: 20)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(0.07))
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(workspaceTabStore.isLoading)
+        .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
+    }
+
+    private var sortMenu: some View {
+        let current = ExtensionColumnDimensions.info(for: sortKey)
+        return Menu {
+            ForEach(ExtensionColumnDimensions.all, id: \.id) { dim in
+                Button {
+                    workspaceTabStore.setSort(
+                        WorkspaceSidebarSummaryPrioritySort(
+                            mode: "dimension",
+                            dimensionId: dim.id,
+                            direction: "desc"
+                        )
+                    )
+                } label: {
+                    Label {
+                        Text(dim.label)
+                    } icon: {
+                        Image(systemName: dim.id == sortKey ? "checkmark" : dim.glyph)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: current.glyph)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(current.label)
+                    .font(.system(size: 10, weight: .medium))
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .opacity(0.6)
+            }
+            .foregroundColor(.primary)
+            .padding(.horizontal, 7)
+            .frame(height: 20)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(0.07))
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .safeHelp(String(localized: "extensionColumn.sort.tooltip", defaultValue: "Sort dimension"))
+    }
+}
+
+private enum ExtensionColumnAssistantText {
+    static func displayText(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let text = cleanSummaryFragment(raw)
+        guard !text.isEmpty,
+              !isLowInformation(text),
+              !isCodeLike(text) else { return nil }
+        return text
+    }
+
+    static func summaryLines(from detailed: String, excluding rawExcluded: [String?]) -> [String] {
+        let excluded = Set(
+            rawExcluded
+                .compactMap { displayText($0).flatMap(normalizedSummaryText) }
+                .filter { !$0.isEmpty }
+        )
+        let fragments = detailed
+            .split(whereSeparator: \.isNewline)
+            .flatMap(summaryDisplayFragments(from:))
+            .compactMap(displayText)
+            .filter { fragment in
+                guard let normalized = normalizedSummaryText(fragment) else { return false }
+                return !excluded.contains(normalized)
+            }
+
+        var seen = Set<String>()
+        var unique: [String] = []
+        for fragment in fragments {
+            guard let normalized = normalizedSummaryText(fragment), seen.insert(normalized).inserted else { continue }
+            unique.append(fragment)
+        }
+        return unique
+    }
+
+    static func fallbackStatus(for rawStatus: String?) -> String {
+        switch rawStatus {
+        case "blocked":
+            return String(localized: "extensionColumn.status.blockedFallback", defaultValue: "Blocked: failing command or tool result needs investigation")
+        case "waiting_for_user", "waitingForUser":
+            return String(localized: "extensionColumn.status.waitingFallback", defaultValue: "Waiting for user input")
+        case "running_tests", "runningTests":
+            return String(localized: "extensionColumn.status.testingFallback", defaultValue: "Verifying changes")
+        case "working":
+            return String(localized: "extensionColumn.status.workingFallback", defaultValue: "Working on implementation")
+        case "done":
+            return String(localized: "extensionColumn.status.doneFallback", defaultValue: "Finished current task")
+        default:
+            return String(localized: "extensionColumn.status.unknownFallback", defaultValue: "Needs inspection")
+        }
+    }
+
+    private static func summaryDisplayFragments(from line: Substring) -> [String] {
+        let raw = cleanSummaryFragment(String(line))
+        guard !raw.isEmpty else { return [] }
+        let lower = raw.lowercased()
+        if lower.hasPrefix("workspace:")
+            || lower.hasPrefix("topic:")
+            || lower.hasPrefix("status:")
+            || lower.hasPrefix("git:") {
+            return []
+        }
+
+        let activityPrefixes = ["progress:", "blockers:", "blocked by", "summary:"]
+        for prefix in activityPrefixes where lower.hasPrefix(prefix) {
+            let value = String(raw.dropFirst(prefix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+            return value
+                .split(separator: ";")
+                .map { cleanSummaryFragment(String($0)) }
+                .filter { !$0.isEmpty }
+        }
+
+        if lower.hasPrefix("next:") {
+            return []
+        }
+        return [raw]
+    }
+
+    private static func cleanSummaryFragment(_ raw: String) -> String {
+        var text = raw
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = text.first, "-*•·".contains(first) {
+            text.removeFirst()
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        if let match = text.range(of: #"^\d+[\.)]\s+"#, options: .regularExpression) {
+            text.removeSubrange(match)
+            text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return text
+    }
+
+    private static func isLowInformation(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        let exact: Set<String> = [
+            "idle",
+            "done",
+            "unknown",
+            "working",
+            "testing",
+            "blocked",
+            "waiting",
+            "needs inspection"
+        ]
+        return exact.contains(lower)
+    }
+
+    private static func isCodeLike(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = trimmed.lowercased()
+        if trimmed.range(of: #"^\d+\s*[{}\]);,]*$"#, options: .regularExpression) != nil {
+            return true
+        }
+        if trimmed.range(
+            of: #"^\d+\s+(private|public|internal|final|class|struct|enum|func|let|var|return|if|else|guard|case|switch|import|extension)\b"#,
+            options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
+        }
+        if trimmed.contains("{") || trimmed.contains("}") || trimmed.contains(";") {
+            return true
+        }
+        let hasLineNumber = trimmed.range(of: #"\b\d{2,5}\b"#, options: .regularExpression) != nil
+        let hasCodeToken = lower.range(
+            of: #"\b(private|public|internal|final|class|struct|enum|func|let|var|return|import|guard|throws?|extension|jsonencoder|jsondecoder|url|string|bool|int)\b"#,
+            options: .regularExpression
+        ) != nil
+        if hasLineNumber && hasCodeToken {
+            return true
+        }
+        let codeSymbolCount = trimmed.filter { "()[]=<>".contains($0) }.count
+        return codeSymbolCount >= 3 && hasCodeToken
+    }
+
+    private static func normalizedSummaryText(_ raw: String?) -> String? {
+        let value = raw?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+        return value?.isEmpty == true ? nil : value
+    }
+}
+
+private struct ExtensionRowDual: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("sidebarSelectionColorHex") private var sidebarSelectionColorHex: String?
+    @AppStorage(SidebarActiveTabIndicatorSettings.styleKey)
+    private var sidebarActiveTabIndicatorStyle = SidebarActiveTabIndicatorSettings.defaultStyle.rawValue
+
+    let row: ExtensionColumnRowData
+    let sortKey: String
+    let isHovered: Bool
+    let isActive: Bool
+    let isLoading: Bool
+    let targetHeight: CGFloat?
+    let onRefresh: () -> Void
+
+    private enum RowState {
+        case loaded
+        case refreshing
+        case awaiting
+    }
+
+    private var rowState: RowState {
+        if isLoading { return .refreshing }
+        if row.item != nil { return .loaded }
+        return .awaiting
+    }
+
+    private var activeTabIndicatorStyle: SidebarActiveTabIndicatorStyle {
+        SidebarActiveTabIndicatorSettings.resolvedStyle(rawValue: sidebarActiveTabIndicatorStyle)
+    }
+
+    var body: some View {
+        HStack(spacing: 8) {
+            statusPip
+            VStack(alignment: .leading, spacing: 1) {
+                Text(currentText)
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundColor(currentColor)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                bottomLine
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            trailingAffordance
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(height: targetHeight, alignment: .center)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(backgroundFill)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(borderColor, lineWidth: borderLineWidth)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(accessibilityLabel)
+        .contextMenu {
+            Button(action: onRefresh) {
+                Label(
+                    String(localized: "extensionColumn.row.refresh.tooltip", defaultValue: "Refresh this workspace"),
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .disabled(rowState == .refreshing)
+        }
+    }
+
+    @ViewBuilder
+    private var bottomLine: some View {
+        switch rowState {
+        case .loaded:
+            HStack(spacing: 4) {
+                Text(String(localized: "extensionColumn.next.prefix", defaultValue: "next:"))
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(secondaryTextColor(0.42))
+                Text(nextText)
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(secondaryTextColor(0.62))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        case .refreshing:
+            HStack(spacing: 5) {
+                AnimatedTypingDots()
+                Text(String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…"))
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(secondaryTextColor(0.52))
+            }
+        case .awaiting:
+            HStack(spacing: 5) {
+                Image(systemName: "clock")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(secondaryTextColor(0.42))
+                Text(row.contextSummary?.next ?? String(localized: "extensionColumn.row.awaiting", defaultValue: "awaiting digest — click to refresh"))
+                    .font(.system(size: 9.5, design: .monospaced))
+                    .foregroundColor(secondaryTextColor(0.52))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var trailingAffordance: some View {
+        switch rowState {
+        case .loaded:
+            if let score = scoreValue {
+                Text("\(score)")
+                    .font(.system(size: 9.5, weight: .medium, design: .monospaced))
+                    .foregroundColor(secondaryTextColor(0.74))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        Capsule()
+                            .stroke(ExtensionColumnPalette.separator(for: colorScheme, opacity: 0.85), lineWidth: 1)
+                    )
+            }
+            Image(systemName: "chevron.right")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(secondaryTextColor(0.30))
+        case .refreshing:
+            EmptyView()
+        case .awaiting:
+            Button(action: onRefresh) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(secondaryTextColor(0.68))
+                    .frame(width: 18, height: 18)
+                    .background(
+                        Circle().fill(ExtensionColumnPalette.subtleFill(for: colorScheme))
+                    )
+            }
+            .buttonStyle(.plain)
+            .safeHelp(String(localized: "extensionColumn.row.refresh.tooltip", defaultValue: "Refresh this workspace"))
+        }
+    }
+
+    private var statusPip: some View {
+        Group {
+            switch rowState {
+            case .loaded:
+                Circle()
+                    .fill(pipColor)
+                    .frame(width: 6, height: 6)
+                    .shadow(color: pipColor.opacity(pipGlow), radius: 4, x: 0, y: 0)
+            case .refreshing:
+                Circle()
+                    .strokeBorder(secondaryTextColor(0.55), lineWidth: 1)
+                    .frame(width: 6, height: 6)
+                    .modifier(BreatheOpacity())
+            case .awaiting:
+                Circle()
+                    .strokeBorder(secondaryTextColor(0.35), lineWidth: 1)
+                    .frame(width: 6, height: 6)
+            }
+        }
+    }
+
+    private var scoreValue: Int? {
+        guard let raw = row.item?.scores.dimensions[sortKey]?.rawScore else { return nil }
+        return Int(raw.rounded())
+    }
+
+    private var currentText: String {
+        switch rowState {
+        case .loaded:
+            if let presentStatus = ExtensionColumnAssistantText.displayText(row.item?.presentStatus) {
+                return presentStatus
+            }
+            if let summary = ExtensionColumnAssistantText.displayText(row.item?.summary.short) {
+                return summary
+            }
+            if let item = row.item {
+                return ExtensionColumnAssistantText.fallbackStatus(for: item.status)
+            }
+            return row.title
+        case .refreshing, .awaiting:
+            return ExtensionColumnAssistantText.displayText(row.contextSummary?.status) ?? row.title
+        }
+    }
+
+    private var nextText: String {
+        if let label = ExtensionColumnAssistantText.displayText(row.item?.nextAction?.label) {
+            return label
+        }
+        if let next = ExtensionColumnAssistantText.displayText(row.contextSummary?.next) {
+            return next
+        }
+        return String(localized: "extensionColumn.next.placeholder", defaultValue: "—")
+    }
+
+    private var currentColor: Color {
+        switch rowState {
+        case .loaded: return primaryTextColor(0.92)
+        case .refreshing, .awaiting: return secondaryTextColor(0.72)
+        }
+    }
+
+    private var pipColor: Color {
+        guard let status = row.item?.status else { return Color.primary.opacity(0.18) }
+        switch status {
+        case "blocked", "waiting_for_user", "waitingForUser":
+            return Color(nsColor: .systemOrange)
+        case "running_tests", "runningTests":
+            return Color(nsColor: .systemYellow)
+        case "working":
+            return Color(nsColor: .systemBlue)
+        case "done":
+            return Color(nsColor: .systemGreen)
+        default:
+            return Color.primary.opacity(0.25)
+        }
+    }
+
+    private var pipGlow: Double {
+        guard let status = row.item?.status else { return 0 }
+        return ["blocked", "waiting_for_user", "waitingForUser"].contains(status) ? 0.8 : 0
+    }
+
+    private var backgroundFill: Color {
+        if isActive {
+            return ExtensionColumnPalette.selectionBackground(
+                for: colorScheme,
+                customHex: sidebarSelectionColorHex
+            )
+        }
+        if isHovered { return ExtensionColumnPalette.rowHoverFill(for: colorScheme) }
+        return Color.clear
+    }
+
+    private var borderColor: Color {
+        if isActive {
+            switch activeTabIndicatorStyle {
+            case .leftRail:
+                return .clear
+            case .solidFill:
+                return ExtensionColumnPalette.separator(for: colorScheme, opacity: 1.25)
+            }
+        }
+        return isHovered ? ExtensionColumnPalette.separator(for: colorScheme, opacity: 0.75) : Color.clear
+    }
+
+    private var borderLineWidth: CGFloat {
+        if isActive {
+            switch activeTabIndicatorStyle {
+            case .leftRail:
+                return 0
+            case .solidFill:
+                return 1.5
+            }
+        }
+        return isHovered ? 1 : 0
+    }
+
+    private var accessibilityLabel: String {
+        switch rowState {
+        case .loaded:
+            return [row.title, currentText, "next: \(nextText)"].joined(separator: ", ")
+        case .refreshing:
+            return "\(row.title), \(currentText), refreshing"
+        case .awaiting:
+            return "\(row.title), \(currentText), awaiting digest"
+        }
+    }
+
+    private func primaryTextColor(_ opacity: CGFloat = 1) -> Color {
+        isActive
+            ? ExtensionColumnPalette.selectedForeground(opacity: opacity)
+            : Color.primary.opacity(Double(opacity))
+    }
+
+    private func secondaryTextColor(_ opacity: CGFloat = 0.75) -> Color {
+        isActive
+            ? ExtensionColumnPalette.selectedForeground(opacity: opacity)
+            : Color.secondary.opacity(Double(opacity / 0.75))
+    }
+}
+
+private struct AnimatedTypingDots: View {
+    @State private var phase: Int = 0
+    private let timer = Timer.publish(every: 0.35, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(0..<3, id: \.self) { i in
+                Circle()
+                    .fill(Color.primary.opacity(phase == i ? 0.7 : 0.25))
+                    .frame(width: 3, height: 3)
+            }
+        }
+        .onReceive(timer) { _ in
+            phase = (phase + 1) % 3
+        }
+    }
+}
+
+private struct BreatheOpacity: ViewModifier {
+    @State private var bright = false
+
+    func body(content: Content) -> some View {
+        content
+            .opacity(bright ? 1.0 : 0.45)
+            .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: bright)
+            .onAppear { bright = true }
+    }
+}
+
+private struct L2PendingTimelinePanel: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    let row: ExtensionColumnRowData
+    let isLoading: Bool
+    let onRefresh: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+
+            Text(String(localized: "extensionColumn.l2.heading.activity", defaultValue: "Activity"))
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundColor(.primary.opacity(0.35))
+                .kerning(1)
+
+            timeline
+
+            if let detail = row.contextSummary?.detail, !detail.isEmpty {
+                Text(detail)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.primary.opacity(0.45))
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            Button(action: onRefresh) {
+                Label(
+                    String(localized: "extensionColumn.row.refresh.tooltip", defaultValue: "Refresh this workspace"),
+                    systemImage: "arrow.clockwise"
+                )
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .disabled(isLoading)
+            .safeHelp(String(localized: "extensionColumn.row.refresh.tooltip", defaultValue: "Refresh this workspace"))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(
+            ZStack {
+                SidebarBackdrop(cornerRadiusOverride: 10)
+                ExtensionColumnPalette.panelOverlay(for: colorScheme)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(ExtensionColumnPalette.separator(for: colorScheme, opacity: 0.9), lineWidth: 1)
+        )
+        .shadow(color: ExtensionColumnPalette.dropShadow(for: colorScheme, opacity: 0.55), radius: 22, x: 0, y: 14)
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            pendingDot
+            Text(row.contextSummary?.title ?? row.title)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            Image(systemName: isLoading ? "arrow.triangle.2.circlepath" : "clock")
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var timeline: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                pendingDot
+                    .padding(.top, 4)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(stateText)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundColor(.primary.opacity(isLoading ? 0.75 : 0.6))
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+
+            HStack(alignment: .top, spacing: 10) {
+                Circle()
+                    .strokeBorder(Color.primary.opacity(0.35), lineWidth: 1)
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 4)
+                HStack(spacing: 4) {
+                    Text(String(localized: "extensionColumn.next.prefix", defaultValue: "next:"))
+                        .foregroundColor(.primary.opacity(0.35))
+                    Text(row.contextSummary?.next ?? String(localized: "extensionColumn.row.refresh.tooltip", defaultValue: "Refresh this workspace"))
+                        .foregroundColor(.primary.opacity(0.6))
+                        .lineLimit(2)
+                }
+                .font(.system(size: 11, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+
+    private var pendingDot: some View {
+        Group {
+            if isLoading {
+                Circle()
+                    .strokeBorder(Color.secondary.opacity(0.65), lineWidth: 1)
+                    .frame(width: 7, height: 7)
+                    .modifier(BreatheOpacity())
+            } else {
+                Circle()
+                    .strokeBorder(Color.secondary.opacity(0.45), lineWidth: 1)
+                    .frame(width: 7, height: 7)
+            }
+        }
+    }
+
+    private var stateText: String {
+        if isLoading {
+            return String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…")
+        }
+        return row.contextSummary?.status
+            ?? String(localized: "extensionColumn.row.awaiting", defaultValue: "awaiting digest — click to refresh")
+    }
+}
+
+private struct L2TimelinePanel: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("sidebarSelectionColorHex") private var sidebarSelectionColorHex: String?
+
+    private static let iso8601Formatter = ISO8601DateFormatter()
+
+    let item: WorkspaceSidebarSummaryPriorityItem
+    let sortKey: String
+    let isRefreshing: Bool
+    let onRefresh: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            header
+
+            Text(String(localized: "extensionColumn.l2.heading.activity", defaultValue: "Activity"))
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundColor(.primary.opacity(0.35))
+                .kerning(1)
+
+            timeline
+
+            if let reason = rankReason, !reason.isEmpty {
+                rankReasonBlock(reason)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .background(
+            ZStack {
+                SidebarBackdrop(cornerRadiusOverride: 10)
+                ExtensionColumnPalette.panelOverlay(for: colorScheme)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(ExtensionColumnPalette.separator(for: colorScheme, opacity: 0.9), lineWidth: 1)
+        )
+        .shadow(color: ExtensionColumnPalette.dropShadow(for: colorScheme, opacity: 0.55), radius: 22, x: 0, y: 14)
+        .contextMenu {
+            Button(action: onRefresh) {
+                Label(
+                    String(localized: "extensionColumn.row.refresh.tooltip", defaultValue: "Refresh this workspace"),
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .disabled(isRefreshing)
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 6, height: 6)
+            Text(item.title)
+                .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                .foregroundColor(.primary)
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            scoreBadge
+        }
+    }
+
+    private var scoreBadge: some View {
+        let dim = ExtensionColumnDimensions.info(for: sortKey)
+        let score = Int((item.scores.dimensions[sortKey]?.rawScore ?? 0).rounded())
+        return HStack(spacing: 4) {
+            Image(systemName: dim.glyph)
+                .font(.system(size: 9, weight: .semibold))
+            Text("\(dim.label) · \(score)")
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+        }
+        .foregroundColor(accentColor)
+        .padding(.horizontal, 7)
+        .padding(.vertical, 2)
+        .overlay(
+            Capsule().strokeBorder(accentColor.opacity(0.45), lineWidth: 1)
+        )
+    }
+
+    private struct TimelineEntry {
+        let kind: TimelineEntryKind
+        let text: String
+        let timeLabel: String?
+    }
+
+    private var timelineEntries: [TimelineEntry] {
+        var entries: [TimelineEntry] = []
+
+        for line in summarizedActivityLines.prefix(3) {
+            entries.append(TimelineEntry(kind: .done, text: line, timeLabel: nil))
+        }
+
+        let nowLabel = relativeTimeLabel(from: item.generatedAt)
+        if let present = ExtensionColumnAssistantText.displayText(item.presentStatus) {
+            entries.append(TimelineEntry(kind: .now, text: present, timeLabel: nowLabel))
+        } else if let summary = ExtensionColumnAssistantText.displayText(item.summary.short) {
+            entries.append(TimelineEntry(kind: .now, text: summary, timeLabel: nowLabel))
+        } else {
+            entries.append(
+                TimelineEntry(
+                    kind: .now,
+                    text: ExtensionColumnAssistantText.fallbackStatus(for: item.status),
+                    timeLabel: nowLabel
+                )
+            )
+        }
+        if let next = item.nextAction,
+           let label = ExtensionColumnAssistantText.displayText(next.label) {
+            let combined: String
+            if let detail = ExtensionColumnAssistantText.displayText(next.detail) {
+                combined = "\(label) — \(detail)"
+            } else {
+                combined = label
+            }
+            entries.append(TimelineEntry(kind: .todo, text: combined, timeLabel: nil))
+        }
+        return entries
+    }
+
+    private var summarizedActivityLines: [String] {
+        ExtensionColumnAssistantText.summaryLines(
+            from: item.summary.detailed,
+            excluding: [item.summary.short, item.presentStatus, item.nextAction?.label]
+        )
+    }
+
+    private var timeline: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(timelineEntries.enumerated()), id: \.offset) { _, entry in
+                HStack(alignment: .top, spacing: 10) {
+                    timelineDot(for: entry.kind)
+                        .padding(.top, 4)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.text)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(timelineTextColor(for: entry.kind))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if let label = entry.timeLabel {
+                            Text(label)
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.primary.opacity(0.35))
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private func relativeTimeLabel(from iso: String) -> String? {
+        guard let date = Self.iso8601Formatter.date(from: iso) else { return nil }
+        let interval = Date().timeIntervalSince(date)
+        if interval < 60 { return String(localized: "extensionColumn.l2.relativeTime.now", defaultValue: "just now") }
+        let minutes = Int(interval / 60)
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h ago" }
+        let days = hours / 24
+        return "\(days)d ago"
+    }
+
+    private func timelineDot(for kind: TimelineEntryKind) -> some View {
+        Group {
+            switch kind {
+            case .done:
+                Circle()
+                    .fill(Color(nsColor: .systemGreen))
+                    .frame(width: 7, height: 7)
+            case .now:
+                Circle()
+                    .fill(accentColor)
+                    .frame(width: 7, height: 7)
+                    .shadow(color: accentColor.opacity(0.85), radius: 4)
+            case .todo:
+                Circle()
+                    .strokeBorder(Color.primary.opacity(0.35), lineWidth: 1)
+                    .frame(width: 7, height: 7)
+            }
+        }
+    }
+
+    private func timelineTextColor(for kind: TimelineEntryKind) -> Color {
+        switch kind {
+        case .done: return .primary.opacity(0.68)
+        case .now: return .primary.opacity(0.95)
+        case .todo: return .primary.opacity(0.6)
+        }
+    }
+
+    private var rankReason: String? {
+        let reason = item.scores.rankReason.trimmingCharacters(in: .whitespacesAndNewlines)
+        return reason.isEmpty ? nil : reason
+    }
+
+    private func rankReasonBlock(_ reason: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(String(localized: "extensionColumn.l2.heading.whyRanked", defaultValue: "Why ranked"))
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundColor(.primary.opacity(0.35))
+                .kerning(1)
+            Text(reason)
+                .font(.system(size: 11))
+                .foregroundColor(.primary.opacity(0.7))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(ExtensionColumnPalette.subtleFill(for: colorScheme).opacity(0.75))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                .foregroundColor(ExtensionColumnPalette.separator(for: colorScheme, opacity: 0.9))
+        )
+    }
+
+    private var accentColor: Color {
+        ExtensionColumnPalette.selectionBackground(for: colorScheme, customHex: sidebarSelectionColorHex)
+    }
+
+    private var statusColor: Color {
+        switch item.status {
+        case "blocked", "waiting_for_user", "waitingForUser":
+            return Color(nsColor: .systemOrange)
+        case "running_tests", "runningTests":
+            return Color(nsColor: .systemYellow)
+        case "working":
+            return Color(nsColor: .systemBlue)
+        case "done":
+            return Color(nsColor: .systemGreen)
+        default:
+            return Color.secondary
+        }
+    }
+
+    private enum TimelineEntryKind { case done, now, todo }
+}
+
+private struct L2PanelArrow: View {
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        ZStack {
+            Triangle()
+                .fill(ExtensionColumnPalette.panelOverlay(for: colorScheme))
+            Triangle()
+                .stroke(ExtensionColumnPalette.separator(for: colorScheme, opacity: 0.9), lineWidth: 1)
+        }
+        .compositingGroup()
+        .shadow(color: ExtensionColumnPalette.dropShadow(for: colorScheme, opacity: 0.4), radius: 12, x: -4, y: 6)
+    }
+}
+
+private struct Triangle: Shape {
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        path.move(to: CGPoint(x: rect.maxX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.closeSubpath()
+        return path
     }
 }
