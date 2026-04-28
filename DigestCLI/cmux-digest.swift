@@ -3322,8 +3322,8 @@ private final class DigestController {
         ))
 
         let previous = store.getWorkspaceDigest(workspaceId: workspace.id)
-        if !force, previous?.inputHash == workspaceInputHash {
-            return previous!
+        if !force, let previous, previous.inputHash == workspaceInputHash {
+            return previous
         }
 
         let fallback = HeuristicDigestEngine.workspaceDigest(

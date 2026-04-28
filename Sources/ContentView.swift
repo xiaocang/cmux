@@ -12962,6 +12962,7 @@ final class WorkspaceTabStore: ObservableObject {
     private static let maxRefreshRetryAttempts = 5
     private static let jsonEncoder = JSONEncoder()
     private static let jsonDecoder = JSONDecoder()
+    private static let iso8601Formatter = ISO8601DateFormatter()
     private var sortRequestGeneration = 0
     private var didLoadForExtension = false
     private var trackedExtensionWorkspaceIds: Set<UUID> = []
@@ -13325,7 +13326,7 @@ final class WorkspaceTabStore: ObservableObject {
                 topScore: 0,
                 staleDigestCount: 0
             ),
-            generatedAt: ISO8601DateFormatter().string(from: Date())
+            generatedAt: Self.iso8601Formatter.string(from: Date())
         )
         var items = current.items
         let alreadyHadItem = current.items.contains { $0.workspaceId == item.workspaceId }
@@ -13355,7 +13356,7 @@ final class WorkspaceTabStore: ObservableObject {
                 topScore: topScore,
                 staleDigestCount: staleDigestCount
             ),
-            generatedAt: ISO8601DateFormatter().string(from: Date())
+            generatedAt: Self.iso8601Formatter.string(from: Date())
         )
         mergeContextSummaries(items: [item])
     }
@@ -18403,7 +18404,14 @@ struct ExtensionColumnOverlay: View {
     @ViewBuilder
     private func hoverDetailPanel(for row: ExtensionColumnRowData) -> some View {
         if let item = row.item {
-            L2TimelinePanel(item: item, sortKey: sortKey)
+            L2TimelinePanel(
+                item: item,
+                sortKey: sortKey,
+                isRefreshing: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
+                onRefresh: {
+                    refreshSingle(row: row)
+                }
+            )
         } else {
             L2PendingTimelinePanel(
                 row: row,
@@ -18785,6 +18793,15 @@ private struct ExtensionRowDual: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityLabel)
+        .contextMenu {
+            Button(action: onRefresh) {
+                Label(
+                    String(localized: "extensionColumn.row.refresh.tooltip", defaultValue: "Refresh this workspace"),
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .disabled(rowState == .refreshing)
+        }
     }
 
     @ViewBuilder
@@ -19154,8 +19171,12 @@ private struct L2TimelinePanel: View {
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("sidebarSelectionColorHex") private var sidebarSelectionColorHex: String?
 
+    private static let iso8601Formatter = ISO8601DateFormatter()
+
     let item: WorkspaceSidebarSummaryPriorityItem
     let sortKey: String
+    let isRefreshing: Bool
+    let onRefresh: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -19186,6 +19207,15 @@ private struct L2TimelinePanel: View {
                 .strokeBorder(ExtensionColumnPalette.separator(for: colorScheme, opacity: 0.9), lineWidth: 1)
         )
         .shadow(color: ExtensionColumnPalette.dropShadow(for: colorScheme, opacity: 0.55), radius: 22, x: 0, y: 14)
+        .contextMenu {
+            Button(action: onRefresh) {
+                Label(
+                    String(localized: "extensionColumn.row.refresh.tooltip", defaultValue: "Refresh this workspace"),
+                    systemImage: "arrow.clockwise"
+                )
+            }
+            .disabled(isRefreshing)
+        }
     }
 
     private var header: some View {
@@ -19290,7 +19320,7 @@ private struct L2TimelinePanel: View {
     }
 
     private func relativeTimeLabel(from iso: String) -> String? {
-        guard let date = ISO8601DateFormatter().date(from: iso) else { return nil }
+        guard let date = Self.iso8601Formatter.date(from: iso) else { return nil }
         let interval = Date().timeIntervalSince(date)
         if interval < 60 { return String(localized: "extensionColumn.l2.relativeTime.now", defaultValue: "just now") }
         let minutes = Int(interval / 60)

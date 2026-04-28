@@ -1,12 +1,7 @@
 import Darwin
 import Foundation
 
-/// Minimal Unix-domain-socket client used by the cmux app and the cmux-digest
-/// sidecar to talk over the v1 line protocol or the v2 JSON-RPC protocol.
-///
-/// The CLI ships a separate, more feature-rich `SocketClient` in `CLI/cmux.swift`
-/// that also handles relay-over-TCP authentication; this client is intentionally
-/// stripped down to the parent ↔ child IPC use case (Unix socket only).
+/// Unix-domain-socket client for the v1 line and v2 JSON-RPC protocols.
 struct CmuxSocketError: Error, CustomStringConvertible, LocalizedError {
     let message: String
     var description: String { message }
