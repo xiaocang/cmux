@@ -308,6 +308,8 @@ struct cmuxApp: App {
     @AppStorage(SocketControlSettings.appStorageKey) private var socketControlMode = SocketControlSettings.defaultMode.rawValue
     @AppStorage("digest.daemonEnabled") private var digestDaemonEnabled = false
     @AppStorage("workspaceTab.displayMode") private var workspaceTabDisplayMode = "native"
+    @AppStorage(ExtensionColumnSettings.openKey)
+    private var extensionColumnOpen = ExtensionColumnSettings.defaultOpen
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
@@ -316,7 +318,7 @@ struct cmuxApp: App {
     }
 
     private var shouldRunDigestDaemon: Bool {
-        digestDaemonEnabled || workspaceTabDisplayMode == "summary_priority"
+        digestDaemonEnabled || workspaceTabDisplayMode == "summary_priority" || extensionColumnOpen
     }
 
     init() {
@@ -519,6 +521,9 @@ struct cmuxApp: App {
                     CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
                 }
                 .onChange(of: workspaceTabDisplayMode) { _ in
+                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
+                }
+                .onChange(of: extensionColumnOpen) { _ in
                     CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
                 }
         }

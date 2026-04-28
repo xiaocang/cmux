@@ -245,6 +245,7 @@ def main() -> int:
             env["CMUX_SOCKET"] = cmux_socket_path
             env["CMUX_DIGEST_SOCKET_PATH"] = digest_socket_path
             env["CMUX_DIGEST_HOME"] = str(root / "digest-home")
+            env["CODEX_HOME"] = str(root / ".codex")
             # The daemon's settings.json discovery starts in $HOME; isolate to
             # the temp dir so a real settings.json doesn't leak into the test.
             env["HOME"] = str(root)
@@ -359,6 +360,164 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     daemon.kill()
                     daemon.wait(timeout=2)
+
+            transcript = root / "claude-session.jsonl"
+            transcript.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "type": "user",
+                                "sessionId": "session-fixture",
+                                "cwd": str(root),
+                                "timestamp": "2026-04-28T00:00:00Z",
+                                "message": {
+                                    "role": "user",
+                                    "content": "Implement Claude and Codex private session reader for workspace summaries.",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "type": "assistant",
+                                "sessionId": "session-fixture",
+                                "cwd": str(root),
+                                "timestamp": "2026-04-28T00:01:00Z",
+                                "message": {
+                                    "role": "assistant",
+                                    "content": [
+                                        {
+                                            "type": "text",
+                                            "text": "I added the session digest reader and am waiting for review.",
+                                        },
+                                        {
+                                            "type": "tool_use",
+                                            "name": "Edit",
+                                            "input": {"file_path": "DigestCLI/cmux-digest.swift"},
+                                        },
+                                        {
+                                            "type": "tool_use",
+                                            "name": "AskUserQuestion",
+                                            "input": {"question": "Should local session discovery stay disabled by default?"},
+                                        },
+                                    ],
+                                },
+                            }
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            links_dir = root / "digest-home" / "agent_sessions" / "links"
+            links_dir.mkdir(parents=True, exist_ok=True)
+            (links_dir / "claude-code-session-fixture.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "vibe.cmux.agent_session_link.v1",
+                        "provider": "claude-code",
+                        "sessionId": "session-fixture",
+                        "transcriptPath": str(transcript),
+                        "cmux": {"workspaceId": "workspace-2", "surfaceId": "surface-2"},
+                        "cwd": str(root),
+                        "lastHookEvent": "UserPromptSubmit",
+                        "lastAssistantMessage": "Waiting on the local session discovery decision.",
+                        "firstSeenAt": "2026-04-28T00:00:00Z",
+                        "lastSeenAt": "2026-04-28T00:01:00Z",
+                        "source": "claude_hook_env",
+                        "confidence": 1.0,
+                        "metadata": {},
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            linked = _run([digest, "refresh", "--workspace", "workspace-2", "--force"], env)
+            _must(linked.returncode == 0, f"linked session refresh failed: stdout={linked.stdout!r} stderr={linked.stderr!r}")
+            _must("Implement Claude And Codex" in linked.stdout, linked.stdout)
+            _must("waiting_for_user" in linked.stdout, linked.stdout)
+
+            codex_session_dir = root / ".codex" / "sessions" / "2026" / "04" / "28"
+            codex_session_dir.mkdir(parents=True, exist_ok=True)
+            codex_session = codex_session_dir / "rollout-2026-04-28T00-02-00-thread-fixture.jsonl"
+            codex_session.write_text(
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-28T00:02:00Z",
+                                "type": "session_meta",
+                                "payload": {
+                                    "id": "thread-fixture",
+                                    "cwd": str(root),
+                                    "git": {"branch": "agent-session-summary"},
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-28T00:03:00Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "user_message",
+                                    "message": "Resolve Codex private rollout transcript for workspace summaries.",
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-28T00:04:00Z",
+                                "type": "response_item",
+                                "payload": {
+                                    "type": "function_call",
+                                    "name": "exec_command",
+                                    "arguments": json.dumps({"command": "swift build"}),
+                                },
+                            }
+                        ),
+                        json.dumps(
+                            {
+                                "timestamp": "2026-04-28T00:05:00Z",
+                                "type": "event_msg",
+                                "payload": {
+                                    "type": "task_complete",
+                                    "last_agent_message": "Codex session reader is implemented.",
+                                },
+                            }
+                        ),
+                        "{malformed",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (links_dir / "codex-thread-fixture.json").write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": "vibe.cmux.agent_session_link.v1",
+                        "provider": "codex",
+                        "sessionId": "thread-fixture",
+                        "cmux": {"workspaceId": "workspace-1", "surfaceId": "surface-1"},
+                        "cwd": str(root),
+                        "lastHookEvent": "agent-turn-complete",
+                        "lastAssistantMessage": "Codex session reader is implemented.",
+                        "firstSeenAt": "2026-04-28T00:02:00Z",
+                        "lastSeenAt": "2026-04-28T00:05:00Z",
+                        "source": "codex_notify_env",
+                        "confidence": 0.95,
+                        "metadata": {"turn_id": "turn-fixture"},
+                    },
+                    sort_keys=True,
+                ),
+                encoding="utf-8",
+            )
+            codex_linked = _run([digest, "refresh", "--workspace", "workspace-1", "--force"], env)
+            _must(
+                codex_linked.returncode == 0,
+                f"codex linked session refresh failed: stdout={codex_linked.stdout!r} stderr={codex_linked.stderr!r}",
+            )
+            _must("Resolve Codex Private Rollout" in codex_linked.stdout, codex_linked.stdout)
+            _must("status: done" in codex_linked.stdout, codex_linked.stdout)
         finally:
             server.stop()
 

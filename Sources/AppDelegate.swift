@@ -11148,6 +11148,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        if matchConfiguredShortcut(event: event, action: .toggleExtensionColumn) {
+            DispatchQueue.main.async {
+                let key = ExtensionColumnSettings.openKey
+                let current = UserDefaults.standard.bool(forKey: key)
+                UserDefaults.standard.set(!current, forKey: key)
+            }
+            return true
+        }
+
         if matchConfiguredShortcut(event: event, action: .sendFeedback) {
             guard let targetContext = preferredMainWindowContextForShortcuts(event: event),
                   let targetWindow = targetContext.window ?? windowForMainWindowId(targetContext.windowId) else {

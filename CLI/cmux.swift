@@ -316,6 +316,11 @@ private struct ClaudeHookParsedInput {
     let sessionId: String?
     let cwd: String?
     let transcriptPath: String?
+    let agentTranscriptPath: String?
+    let lastAssistantMessage: String?
+    let hookEventName: String?
+    let agentId: String?
+    let agentType: String?
 }
 
 private struct ClaudeHookSessionRecord: Codable {
@@ -511,6 +516,239 @@ private final class ClaudeHookSessionStore {
             return nil
         }
         return value
+    }
+}
+
+private enum SharedISO8601 {
+    static let formatter: ISO8601DateFormatter = ISO8601DateFormatter()
+}
+
+private struct AgentSessionLinkRecord: Codable {
+    struct CmuxBinding: Codable {
+        var workspaceId: String?
+        var surfaceId: String?
+        var socketPath: String?
+    }
+
+    var schemaVersion: String = "vibe.cmux.agent_session_link.v1"
+    var provider: String
+    var sessionId: String
+    var transcriptPath: String?
+    var agentTranscriptPath: String?
+    var cmux: CmuxBinding
+    var cwd: String?
+    var lastHookEvent: String?
+    var lastAssistantMessage: String?
+    var firstSeenAt: String
+    var lastSeenAt: String
+    var source: String
+    var confidence: Double
+    var metadata: [String: String]
+}
+
+private struct AnyCodable: Codable {
+    let value: Any
+
+    init(_ value: Any) {
+        self.value = value
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let value = try? container.decode(String.self) { self.value = value }
+        else if let value = try? container.decode(Bool.self) { self.value = value }
+        else if let value = try? container.decode(Int.self) { self.value = value }
+        else if let value = try? container.decode(Double.self) { self.value = value }
+        else if let value = try? container.decode([String: AnyCodable].self) { self.value = value.mapValues(\.value) }
+        else if let value = try? container.decode([AnyCodable].self) { self.value = value.map(\.value) }
+        else { self.value = NSNull() }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch value {
+        case let value as String:
+            try container.encode(value)
+        case let value as Bool:
+            try container.encode(value)
+        case let value as Int:
+            try container.encode(value)
+        case let value as Double:
+            try container.encode(value)
+        case let value as [String: Any]:
+            try container.encode(value.mapValues { AnyCodable($0) })
+        case let value as [Any]:
+            try container.encode(value.map { AnyCodable($0) })
+        case _ as NSNull:
+            try container.encodeNil()
+        default:
+            try container.encode(String(describing: value))
+        }
+    }
+}
+
+private struct AgentSessionEventRecord: Codable {
+    var schemaVersion: String = "vibe.cmux.agent_session_event.v1"
+    var id: String
+    var provider: String
+    var sessionId: String
+    var eventType: String
+    var observedAt: String
+    var json: [String: AnyCodable]
+}
+
+private final class AgentSessionLinkStore {
+    private let root: URL
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+    private let fileManager: FileManager
+
+    init(
+        processEnv: [String: String] = ProcessInfo.processInfo.environment,
+        fileManager: FileManager = .default
+    ) {
+        self.fileManager = fileManager
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let rootPath = processEnv["CMUX_AGENT_SESSION_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? processEnv["CMUX_DIGEST_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            ?? home.appendingPathComponent("Library/Application Support/cmux/digest").path
+        self.root = URL(fileURLWithPath: NSString(string: rootPath).expandingTildeInPath, isDirectory: true)
+        self.encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    }
+
+    func upsert(_ link: AgentSessionLinkRecord, eventType: String, eventJSON: [String: Any]) throws {
+        try fileManager.createDirectory(at: linksURL, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: eventsURL, withIntermediateDirectories: true)
+
+        let url = linkURL(provider: link.provider, sessionId: link.sessionId)
+        var next = link
+        if let data = try? Data(contentsOf: url),
+           let existing = try? decoder.decode(AgentSessionLinkRecord.self, from: data) {
+            next.firstSeenAt = existing.firstSeenAt
+            next.transcriptPath = next.transcriptPath ?? existing.transcriptPath
+            next.agentTranscriptPath = next.agentTranscriptPath ?? existing.agentTranscriptPath
+            next.cwd = next.cwd ?? existing.cwd
+            next.lastAssistantMessage = next.lastAssistantMessage ?? existing.lastAssistantMessage
+            next.metadata = existing.metadata.merging(next.metadata) { _, new in new }
+        }
+        try encoder.encode(next).write(to: url, options: .atomic)
+
+        let event = AgentSessionEventRecord(
+            id: UUID().uuidString,
+            provider: next.provider,
+            sessionId: next.sessionId,
+            eventType: eventType,
+            observedAt: next.lastSeenAt,
+            json: eventJSON.mapValues { AnyCodable($0) }
+        )
+        try appendEvent(event)
+        updateSQLiteIndex(link: next, event: event)
+    }
+
+    private var linksURL: URL { root.appendingPathComponent("agent_sessions/links", isDirectory: true) }
+    private var eventsURL: URL { root.appendingPathComponent("agent_sessions/events", isDirectory: true) }
+    private var sqliteURL: URL { root.appendingPathComponent("index.sqlite", isDirectory: false) }
+
+    private func linkURL(provider: String, sessionId: String) -> URL {
+        linksURL.appendingPathComponent("\(safeName(provider))-\(safeName(sessionId)).json")
+    }
+
+    private func appendEvent(_ event: AgentSessionEventRecord) throws {
+        let day = String(event.observedAt.prefix(10))
+        let url = eventsURL.appendingPathComponent("\(day).ndjson")
+        var data = try encoder.encode(event)
+        data.append(0x0a)
+        if fileManager.fileExists(atPath: url.path) {
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.close()
+        } else {
+            try data.write(to: url, options: .atomic)
+        }
+    }
+
+    private func updateSQLiteIndex(link: AgentSessionLinkRecord, event: AgentSessionEventRecord) {
+        let create = """
+        create table if not exists agent_session_links (
+          id text primary key,
+          provider text not null,
+          session_id text not null,
+          transcript_path text,
+          cmux_workspace_id text,
+          cmux_surface_id text,
+          cwd text,
+          source text not null,
+          confidence real not null,
+          first_seen_at text not null,
+          last_seen_at text not null,
+          json text not null
+        );
+        create index if not exists idx_agent_session_links_surface
+          on agent_session_links(cmux_workspace_id, cmux_surface_id, last_seen_at);
+        create table if not exists agent_session_events (
+          id text primary key,
+          provider text not null,
+          session_id text not null,
+          event_type text not null,
+          observed_at text not null,
+          json text not null
+        );
+        create table if not exists agent_session_digests (
+          provider text not null,
+          session_id text not null,
+          generated_at text not null,
+          input_hash text not null,
+          json text not null,
+          primary key(provider, session_id)
+        );
+        """
+        _ = try? runSQLite(create)
+
+        let id = "\(link.provider):\(link.sessionId)"
+        let linkJSON = String(data: (try? encoder.encode(link)) ?? Data(), encoding: .utf8) ?? "{}"
+        let eventJSON = String(data: (try? encoder.encode(event)) ?? Data(), encoding: .utf8) ?? "{}"
+        let upsertLink = """
+        insert into agent_session_links
+          (id, provider, session_id, transcript_path, cmux_workspace_id, cmux_surface_id, cwd, source, confidence, first_seen_at, last_seen_at, json)
+        values
+          ('\(escapeSQL(id))', '\(escapeSQL(link.provider))', '\(escapeSQL(link.sessionId))', '\(escapeSQL(link.transcriptPath ?? ""))', '\(escapeSQL(link.cmux.workspaceId ?? ""))', '\(escapeSQL(link.cmux.surfaceId ?? ""))', '\(escapeSQL(link.cwd ?? ""))', '\(escapeSQL(link.source))', \(link.confidence), '\(escapeSQL(link.firstSeenAt))', '\(escapeSQL(link.lastSeenAt))', '\(escapeSQL(linkJSON))')
+        on conflict(id) do update set
+          transcript_path=excluded.transcript_path,
+          cmux_workspace_id=excluded.cmux_workspace_id,
+          cmux_surface_id=excluded.cmux_surface_id,
+          cwd=excluded.cwd,
+          source=excluded.source,
+          confidence=excluded.confidence,
+          last_seen_at=excluded.last_seen_at,
+          json=excluded.json;
+        """
+        _ = try? runSQLite(upsertLink)
+        let insertEvent = """
+        insert or ignore into agent_session_events
+          (id, provider, session_id, event_type, observed_at, json)
+        values
+          ('\(escapeSQL(event.id))', '\(escapeSQL(event.provider))', '\(escapeSQL(event.sessionId))', '\(escapeSQL(event.eventType))', '\(escapeSQL(event.observedAt))', '\(escapeSQL(eventJSON))');
+        """
+        _ = try? runSQLite(insertEvent)
+    }
+
+    private func runSQLite(_ sql: String) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
+        process.arguments = [sqliteURL.path, sql]
+        try process.run()
+        process.waitUntilExit()
+    }
+
+    private func safeName(_ value: String) -> String {
+        value.map { ch in
+            ch.isLetter || ch.isNumber || ch == "-" || ch == "_" ? String(ch) : "_"
+        }.joined()
+    }
+
+    private func escapeSQL(_ value: String) -> String {
+        value.replacingOccurrences(of: "'", with: "''")
     }
 }
 
@@ -1821,6 +2059,11 @@ struct CMUXCLI {
         // Codex hook handler: gracefully no-op when not inside cmux
         // (before socket connection, so it doesn't fail when no socket exists)
         if command == "codex-hook" {
+            if (commandArgs.first?.lowercased() ?? "") == "notify",
+               ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] == nil {
+                try runCodexNotifyHook(hookArgs: Array(commandArgs.dropFirst()), client: nil, telemetry: cliTelemetry)
+                return
+            }
             guard ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] != nil else {
                 print("{}")
                 return
@@ -8023,9 +8266,9 @@ struct CMUXCLI {
             """
         case "claude-hook":
             return """
-            Usage: cmux claude-hook <session-start|active|stop|idle|notification|notify|prompt-submit> [flags]
+            Usage: cmux claude-hook <session-start|active|stop|idle|notification|notify|prompt-submit|pre-tool-use|post-tool-use|post-tool-use-failure|subagent-stop|session-end> [flags]
 
-            Hook for Claude Code integration. Reads JSON from stdin.
+            Hook for Claude Code integration. Reads JSON from stdin and records linked local transcript metadata.
 
             Subcommands:
               session-start   Signal that a Claude session has started
@@ -8035,6 +8278,12 @@ struct CMUXCLI {
               notification    Forward a Claude notification
               notify          Alias for notification
               prompt-submit   Clear notification and set Running on user prompt
+              pre-tool-use    Track permission/question state before tool use
+              post-tool-use   Track transcript/tool metadata after tool use
+              post-tool-use-failure
+                              Track transcript/tool failure metadata
+              subagent-stop   Track explicit subagent transcript result metadata
+              session-end     Clear session mapping when Claude exits
 
             Flags:
               --workspace <id|ref>   Target workspace (default: $CMUX_WORKSPACE_ID)
@@ -8048,23 +8297,24 @@ struct CMUXCLI {
             return """
             Usage: cmux codex <install-hooks|uninstall-hooks>
 
-            Manage Codex CLI hooks integration.
+            Manage Codex CLI hooks integration and Codex notify session linking.
 
             Subcommands:
-              install-hooks     Install cmux hooks into ~/.codex/hooks.json
-              uninstall-hooks   Remove cmux hooks from ~/.codex/hooks.json
+              install-hooks     Install cmux hooks into ~/.codex/hooks.json and notify in config.toml
+              uninstall-hooks   Remove cmux hooks and the cmux-owned notify line
             """
         case "codex-hook":
             return """
-            Usage: cmux codex-hook <session-start|prompt-submit|stop> [flags]
+            Usage: cmux codex-hook <session-start|prompt-submit|stop|notify> [flags]
 
-            Hook for Codex CLI integration. Reads JSON from stdin.
+            Hook for Codex CLI integration. Reads JSON from stdin or from notify argv.
             Gracefully no-ops when not running inside cmux.
 
             Subcommands:
               session-start   Register a Codex session
               prompt-submit   Set Running status on user prompt
               stop            Send completion notification, set Idle
+              notify          Record Codex thread-id/cwd/last assistant message for session digesting
 
             Flags:
               --workspace <id|ref>   Target workspace (default: $CMUX_WORKSPACE_ID)
@@ -12520,6 +12770,12 @@ struct CMUXCLI {
                     pid: claudePid
                 )
             }
+            recordClaudeAgentSession(
+                parsedInput: parsedInput,
+                eventType: parsedInput.hookEventName ?? subcommand,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId
+            )
             // Register PID for stale-session detection and OSC suppression,
             // but don't set a visible status. "Running" only appears when the
             // user submits a prompt (UserPromptSubmit) or Claude starts working
@@ -12565,6 +12821,12 @@ struct CMUXCLI {
                         lastBody: completion.body
                     )
                 }
+                recordClaudeAgentSession(
+                    parsedInput: parsedInput,
+                    eventType: parsedInput.hookEventName ?? subcommand,
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId
+                )
 
                 if let completion {
                     let title = "Claude Code"
@@ -12598,6 +12860,18 @@ struct CMUXCLI {
                 preferred: mappedSession?.workspaceId,
                 fallback: workspaceArg,
                 client: client
+            )
+            let surfaceId = try? resolvePreferredSurfaceIdForClaudeHook(
+                preferred: mappedSession?.surfaceId,
+                fallback: surfaceArg,
+                workspaceId: workspaceId,
+                client: client
+            )
+            recordClaudeAgentSession(
+                parsedInput: parsedInput,
+                eventType: parsedInput.hookEventName ?? subcommand,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId
             )
             _ = try sendV1Command("clear_notifications --tab=\(workspaceId)", client: client)
             try setClaudeStatus(
@@ -12647,6 +12921,12 @@ struct CMUXCLI {
                     lastBody: summary.body
                 )
             }
+            recordClaudeAgentSession(
+                parsedInput: parsedInput,
+                eventType: parsedInput.hookEventName ?? subcommand,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId
+            )
 
             let response = try client.send(command: "notify_target \(workspaceId) \(surfaceId) \(payload)")
             _ = try? setClaudeStatus(
@@ -12690,6 +12970,12 @@ struct CMUXCLI {
                 _ = try? sendV1Command("clear_agent_pid claude_code --tab=\(workspaceId)", client: client)
                 _ = try? sendV1Command("clear_notifications --tab=\(workspaceId)", client: client)
             }
+            recordClaudeAgentSession(
+                parsedInput: parsedInput,
+                eventType: parsedInput.hookEventName ?? subcommand,
+                workspaceId: consumedSession?.workspaceId ?? fallbackWorkspaceId,
+                surfaceId: consumedSession?.surfaceId ?? fallbackSurfaceId
+            )
             print("OK")
 
         case "pre-tool-use":
@@ -12722,6 +13008,12 @@ struct CMUXCLI {
                     lastSubtitle: "Waiting",
                     lastBody: question
                 )
+                recordClaudeAgentSession(
+                    parsedInput: parsedInput,
+                    eventType: parsedInput.hookEventName ?? subcommand,
+                    workspaceId: workspaceId,
+                    surfaceId: existingSurfaceId
+                )
                 // Don't clear notifications or set status here.
                 // The Notification hook fires right after and will use the saved question.
                 print("OK")
@@ -12745,19 +13037,111 @@ struct CMUXCLI {
                 color: "#4C8DFF",
                 pid: claudePid
             )
+            recordClaudeAgentSession(
+                parsedInput: parsedInput,
+                eventType: parsedInput.hookEventName ?? subcommand,
+                workspaceId: workspaceId,
+                surfaceId: mappedSession?.surfaceId ?? surfaceArg
+            )
+            print("OK")
+
+        case "post-tool-use", "post-tool-use-failure", "subagent-stop":
+            let mappedSession = parsedInput.sessionId.flatMap { try? sessionStore.lookup(sessionId: $0) }
+            let workspaceId = try? resolvePreferredWorkspaceIdForClaudeHook(
+                preferred: mappedSession?.workspaceId,
+                fallback: workspaceArg,
+                client: client
+            )
+            let surfaceId = workspaceId.flatMap { workspaceId in
+                try? resolvePreferredSurfaceIdForClaudeHook(
+                    preferred: mappedSession?.surfaceId,
+                    fallback: surfaceArg,
+                    workspaceId: workspaceId,
+                    client: client
+                )
+            }
+            if let sessionId = parsedInput.sessionId, let workspaceId {
+                try? sessionStore.upsert(
+                    sessionId: sessionId,
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId ?? "",
+                    cwd: parsedInput.cwd ?? mappedSession?.cwd,
+                    lastSubtitle: parsedInput.agentType,
+                    lastBody: parsedInput.lastAssistantMessage
+                )
+            }
+            recordClaudeAgentSession(
+                parsedInput: parsedInput,
+                eventType: parsedInput.hookEventName ?? subcommand,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId
+            )
             print("OK")
 
         case "help", "--help", "-h":
             telemetry.breadcrumb("claude-hook.help")
             print(
                 """
-                cmux claude-hook <session-start|stop|session-end|notification|prompt-submit|pre-tool-use> [--workspace <id|index>] [--surface <id|index>]
+                cmux claude-hook <session-start|stop|session-end|notification|prompt-submit|pre-tool-use|post-tool-use|post-tool-use-failure|subagent-stop> [--workspace <id|index>] [--surface <id|index>]
                 """
             )
 
         default:
             throw CLIError(message: "Unknown claude-hook subcommand: \(subcommand)")
         }
+    }
+
+    private func recordClaudeAgentSession(
+        parsedInput: ClaudeHookParsedInput,
+        eventType: String,
+        workspaceId: String?,
+        surfaceId: String?
+    ) {
+        guard let sessionId = parsedInput.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionId.isEmpty else {
+            return
+        }
+        let env = ProcessInfo.processInfo.environment
+        let now = SharedISO8601.formatter.string(from: Date())
+        var metadata: [String: String] = [:]
+        if let agentId = parsedInput.agentId?.trimmingCharacters(in: .whitespacesAndNewlines), !agentId.isEmpty {
+            metadata["agent_id"] = agentId
+        }
+        if let agentType = parsedInput.agentType?.trimmingCharacters(in: .whitespacesAndNewlines), !agentType.isEmpty {
+            metadata["agent_type"] = agentType
+        }
+        let explicitSurface = surfaceId.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        let source = explicitSurface ? "claude_hook_env" : "process_inference"
+        var eventJSON: [String: Any] = parsedInput.object ?? [:]
+        eventJSON["session_id"] = sessionId
+        eventJSON["provider"] = "claude-code"
+        eventJSON["cmux_workspace_id"] = workspaceId ?? ""
+        eventJSON["cmux_surface_id"] = surfaceId ?? ""
+        eventJSON["transcript_path"] = parsedInput.transcriptPath ?? ""
+        eventJSON["agent_transcript_path"] = parsedInput.agentTranscriptPath ?? ""
+        if let rawFallback = parsedInput.rawFallback {
+            eventJSON["raw_fallback"] = rawFallback
+        }
+        let link = AgentSessionLinkRecord(
+            provider: "claude-code",
+            sessionId: sessionId,
+            transcriptPath: parsedInput.transcriptPath,
+            agentTranscriptPath: parsedInput.agentTranscriptPath,
+            cmux: .init(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                socketPath: env["CMUX_SOCKET_PATH"] ?? env["CMUX_SOCKET"]
+            ),
+            cwd: parsedInput.cwd,
+            lastHookEvent: parsedInput.hookEventName ?? eventType,
+            lastAssistantMessage: parsedInput.lastAssistantMessage,
+            firstSeenAt: now,
+            lastSeenAt: now,
+            source: source,
+            confidence: explicitSurface ? 1.0 : 0.6,
+            metadata: metadata
+        )
+        try? AgentSessionLinkStore().upsert(link, eventType: eventType, eventJSON: eventJSON)
     }
 
     private func setClaudeStatus(
@@ -13066,19 +13450,40 @@ struct CMUXCLI {
                 normalizedSingleLine(redactClaudeSensitiveSpans(trimmed)),
                 maxLength: 180
             )
-            return ClaudeHookParsedInput(object: nil, rawFallback: fallback, sessionId: nil, cwd: nil, transcriptPath: nil)
+            return ClaudeHookParsedInput(
+                object: nil,
+                rawFallback: fallback,
+                sessionId: nil,
+                cwd: nil,
+                transcriptPath: nil,
+                agentTranscriptPath: nil,
+                lastAssistantMessage: nil,
+                hookEventName: nil,
+                agentId: nil,
+                agentType: nil
+            )
         }
 
         let sessionId = extractClaudeHookSessionId(from: object)
         let cwd = extractClaudeHookCWD(from: object)
         let transcriptPath = firstString(in: object, keys: ["transcript_path", "transcriptPath"])
+        let agentTranscriptPath = firstString(in: object, keys: ["agent_transcript_path", "agentTranscriptPath"])
+        let lastAssistantMessage = firstString(in: object, keys: ["last_assistant_message", "lastAssistantMessage"])
+        let hookEventName = firstString(in: object, keys: ["hook_event_name", "hookEventName", "event_name", "event"])
+        let agentId = firstString(in: object, keys: ["agent_id", "agentId"])
+        let agentType = firstString(in: object, keys: ["agent_type", "agentType"])
         let compactObject = compactClaudeHookObject(object)
         return ClaudeHookParsedInput(
             object: compactObject,
             rawFallback: nil,
             sessionId: sessionId,
             cwd: cwd,
-            transcriptPath: transcriptPath
+            transcriptPath: transcriptPath,
+            agentTranscriptPath: agentTranscriptPath,
+            lastAssistantMessage: lastAssistantMessage,
+            hookEventName: hookEventName,
+            agentId: agentId,
+            agentType: agentType
         )
     }
 
@@ -13089,6 +13494,12 @@ struct CMUXCLI {
             "tool_name",
             "last_assistant_message",
             "lastAssistantMessage",
+            "agent_id",
+            "agentId",
+            "agent_type",
+            "agentType",
+            "agent_transcript_path",
+            "agentTranscriptPath",
             "event",
             "event_name",
             "hook_event_name",
@@ -13718,6 +14129,40 @@ struct CMUXCLI {
         return result
     }
 
+    private func cmuxCodexNotifyLine() -> String {
+        "notify = [\"cmux\", \"codex-hook\", \"notify\"]"
+    }
+
+    private func installCodexNotifyConfig(in content: String) -> (content: String, changed: Bool, skipped: Bool) {
+        let line = cmuxCodexNotifyLine()
+        let pattern = #"(?m)^notify\s*=\s*\[[^\n]*\]\s*$"#
+        if let range = content.range(of: pattern, options: .regularExpression) {
+            let existing = String(content[range])
+            guard existing.contains("cmux"), existing.contains("codex-hook"), existing.contains("notify") else {
+                return (content, false, true)
+            }
+            let next = content.replacingCharacters(in: range, with: line)
+            return (next, next != content, false)
+        }
+        let sectionPattern = #"(?m)^\[[^\]]+\]"#
+        if let range = content.range(of: sectionPattern, options: .regularExpression) {
+            var next = content
+            next.insert(contentsOf: "\(line)\n", at: range.lowerBound)
+            return (next, true, false)
+        }
+        let separator = content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "" : "\n"
+        return (content + separator + line + "\n", true, false)
+    }
+
+    private func uninstallCodexNotifyConfig(from content: String) -> (content: String, changed: Bool) {
+        let pattern = #"(?m)^notify\s*=\s*\[[^\n]*(?:cmux|codex-hook)[^\n]*notify[^\n]*\]\s*\n?"#
+        guard let range = content.range(of: pattern, options: .regularExpression) else {
+            return (content, false)
+        }
+        let next = content.replacingCharacters(in: range, with: "")
+        return (next, next != content)
+    }
+
     private func installAgentHooks(_ def: AgentHookDef) throws {
         let fm = FileManager.default
         let configDir = def.resolvedConfigDir()
@@ -13818,6 +14263,14 @@ struct CMUXCLI {
                     try newContent.write(toFile: configPath, atomically: true, encoding: .utf8)
                     print("Enabled codex_hooks in \(configPath)")
                 }
+                let currentContent = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? newContent
+                let notifyResult = installCodexNotifyConfig(in: currentContent)
+                if notifyResult.skipped {
+                    print("Codex notify already has a non-cmux command in \(configPath); leaving it unchanged.")
+                } else if notifyResult.changed {
+                    try notifyResult.content.write(toFile: configPath, atomically: true, encoding: .utf8)
+                    print("Installed Codex notify session link at \(configPath)")
+                }
             }
         }
     }
@@ -13879,6 +14332,12 @@ struct CMUXCLI {
                     try newContent.write(toFile: configPath, atomically: true, encoding: .utf8)
                     print("Removed codex_hooks from \(configPath)")
                 }
+                let currentContent = (try? String(contentsOfFile: configPath, encoding: .utf8)) ?? newContent
+                let notifyResult = uninstallCodexNotifyConfig(from: currentContent)
+                if notifyResult.changed {
+                    try notifyResult.content.write(toFile: configPath, atomically: true, encoding: .utf8)
+                    print("Removed Codex notify session link from \(configPath)")
+                }
             }
         }
     }
@@ -13890,6 +14349,11 @@ struct CMUXCLI {
         let subcommand = commandArgs.first?.lowercased() ?? ""
         let hookArgs = Array(commandArgs.dropFirst())
         telemetry.breadcrumb("\(def.name)-hook.\(subcommand)")
+
+        if def.name == "codex", subcommand == "notify" {
+            try runCodexNotifyHook(hookArgs: hookArgs, client: client, telemetry: telemetry)
+            return
+        }
 
         // Workspace/surface resolution: prefer --workspace/--surface flags, then session store, then env
         let hookWsFlag = optionValue(hookArgs, name: "--workspace")
@@ -13985,6 +14449,99 @@ struct CMUXCLI {
             break
         }
 
+        print("{}")
+    }
+
+    private func runCodexNotifyHook(
+        hookArgs: [String],
+        client: SocketClient?,
+        telemetry: CLISocketSentryTelemetry
+    ) throws {
+        let env = ProcessInfo.processInfo.environment
+        let rawInput: String
+        if !hookArgs.isEmpty {
+            rawInput = hookArgs.joined(separator: " ")
+        } else {
+            rawInput = String(data: FileHandle.standardInput.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        }
+        let trimmed = rawInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let data = trimmed.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            print("{}")
+            return
+        }
+        guard let threadId = firstString(in: payload, keys: ["thread-id", "thread_id", "threadId"]) else {
+            print("{}")
+            return
+        }
+        let workspaceArg = env["CMUX_WORKSPACE_ID"]
+        let surfaceArg = env["CMUX_SURFACE_ID"]
+        let workspaceId: String?
+        if let client {
+            workspaceId = (try? resolvePreferredWorkspaceIdForClaudeHook(
+                preferred: nil,
+                fallback: workspaceArg,
+                client: client
+            )) ?? workspaceArg
+        } else {
+            workspaceId = workspaceArg
+        }
+        let surfaceId: String? = {
+            guard let workspaceId else { return surfaceArg }
+            guard let client else { return surfaceArg }
+            return (try? resolvePreferredSurfaceIdForClaudeHook(
+                preferred: nil,
+                fallback: surfaceArg,
+                workspaceId: workspaceId,
+                client: client
+            )) ?? surfaceArg
+        }()
+        let now = SharedISO8601.formatter.string(from: Date())
+        var metadata: [String: String] = [:]
+        if let turnId = firstString(in: payload, keys: ["turn-id", "turn_id", "turnId"]) {
+            metadata["turn_id"] = turnId
+        }
+        if let type = firstString(in: payload, keys: ["type"]) {
+            metadata["notify_type"] = type
+        }
+        let lastAssistant = firstString(in: payload, keys: ["last-assistant-message", "last_assistant_message", "lastAssistantMessage"])
+        let cwd = firstString(in: payload, keys: ["cwd"])
+        let explicitSurface = surfaceId.map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? false
+        let link = AgentSessionLinkRecord(
+            provider: "codex",
+            sessionId: threadId,
+            transcriptPath: nil,
+            agentTranscriptPath: nil,
+            cmux: .init(
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                socketPath: env["CMUX_SOCKET_PATH"] ?? env["CMUX_SOCKET"]
+            ),
+            cwd: cwd,
+            lastHookEvent: firstString(in: payload, keys: ["type"]) ?? "notify",
+            lastAssistantMessage: lastAssistant,
+            firstSeenAt: now,
+            lastSeenAt: now,
+            source: explicitSurface ? "codex_notify_env" : "cwd_recent_session",
+            confidence: explicitSurface ? 0.95 : 0.55,
+            metadata: metadata
+        )
+        var eventJSON = payload
+        eventJSON["provider"] = "codex"
+        eventJSON["session_id"] = threadId
+        eventJSON["cmux_workspace_id"] = workspaceId ?? ""
+        eventJSON["cmux_surface_id"] = surfaceId ?? ""
+        try? AgentSessionLinkStore().upsert(
+            link,
+            eventType: firstString(in: payload, keys: ["type"]) ?? "notify",
+            eventJSON: eventJSON
+        )
+        telemetry.breadcrumb("codex-hook.notify.linked", data: [
+            "has_workspace": workspaceId != nil,
+            "has_surface": surfaceId != nil,
+            "has_last_assistant_message": lastAssistant != nil
+        ])
         print("{}")
     }
 
