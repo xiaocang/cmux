@@ -5501,6 +5501,19 @@ private struct WorkspaceSummarySettingsProfile: Codable, Equatable {
     )
 }
 
+private enum DigestProviderOption: String, CaseIterable, Identifiable {
+    case heuristic
+    case claudeCode = "claude-code"
+    case openai
+
+    var id: String { rawValue }
+
+    static func normalizedRawValue(_ rawValue: String) -> String {
+        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return Self(rawValue: normalized)?.rawValue ?? Self.heuristic.rawValue
+    }
+}
+
 private enum WorkspaceSummaryProfileStatus: Equatable {
     case saved
     case reset
@@ -5933,6 +5946,13 @@ struct SettingsView: View {
             set: { newValue in
                 browserThemeMode = BrowserThemeSettings.mode(for: newValue).rawValue
             }
+        )
+    }
+
+    private var digestProviderSelection: Binding<String> {
+        Binding(
+            get: { DigestProviderOption.normalizedRawValue(digestProvider) },
+            set: { digestProvider = DigestProviderOption.normalizedRawValue($0) }
         )
     }
 
@@ -7250,14 +7270,17 @@ struct SettingsView: View {
 
                         SettingsCardDivider()
 
-                        SettingsCardRow(
+                        SettingsPickerRow(
                             configurationReview: .json("digest.provider"),
                             String(localized: "settings.digest.provider", defaultValue: "Provider"),
-                            subtitle: String(localized: "settings.digest.provider.subtitle", defaultValue: "heuristic, claude-code (local CLI), or openai. claude-code uses your installed `claude` binary; no API key needed.")
+                            subtitle: String(localized: "settings.digest.provider.subtitle", defaultValue: "heuristic, claude-code (local CLI), or openai. claude-code uses your installed `claude` binary; no API key needed."),
+                            controlWidth: pickerColumnWidth,
+                            selection: digestProviderSelection,
+                            accessibilityId: "SettingsDigestProviderPicker"
                         ) {
-                            TextField("", text: $digestProvider)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 140)
+                            ForEach(DigestProviderOption.allCases) { option in
+                                Text(verbatim: option.rawValue).tag(option.rawValue)
+                            }
                         }
 
                         SettingsCardDivider()

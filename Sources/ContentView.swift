@@ -12632,6 +12632,7 @@ struct WorkspaceTabContextSummary: Equatable {
     let status: String
     let next: String
     let detail: String?
+    let expandedDetail: String?
 }
 
 @MainActor
@@ -12734,8 +12735,7 @@ final class WorkspaceTabStore: ObservableObject {
     private static func contextSummary(for workspace: Workspace, index: Int) -> WorkspaceTabContextSummary {
         let title = normalized(workspace.title)
             ?? "\(String(localized: "extensionColumn.context.workspace", defaultValue: "Workspace")) \(index + 1)"
-        let directory = normalizedDirectory(workspace.currentDirectory)
-        let branch = normalized(workspace.gitBranch?.branch).map { workspace.gitBranch?.isDirty == true ? "\($0) *" : $0 }
+        let context = branchDirectoryContext(for: workspace, title: title)
         let progress = normalized(workspace.progress?.label)
         let description = normalized(workspace.customDescription)
         let tag = normalized(workspace.tag)
@@ -12744,13 +12744,28 @@ final class WorkspaceTabStore: ObservableObject {
 
         let status = description
             ?? progress
-            ?? branch.map { "\(branchPrefix) \($0)" }
-            ?? directory.map { "\(directoryPrefix) \($0)" }
+            ?? context.primaryBranch.map { "\(branchPrefix) \($0)" }
+            ?? context.primaryDirectoryName.map { "\(directoryPrefix) \($0)" }
             ?? title
+        let statusContextParts: [String?] = {
+            guard description == nil, progress == nil else { return [] }
+            if context.primaryBranch != nil {
+                return [context.primaryBranch]
+            }
+            return [context.primaryDirectoryName, context.primaryDirectoryPath]
+        }()
 
-        let detailParts = [tag, branch, directory].compactMap { $0 }
+        let detailParts = uniqueContextParts(
+            [tag, context.primaryBranch, context.primaryDirectoryPath],
+            excluding: [title, description, progress, status] + statusContextParts
+        )
         let detail = detailParts.isEmpty ? nil : detailParts.joined(separator: " • ")
-        let next = progress
+        let nextContext = uniqueContextParts(
+            [context.primaryBranch, context.primaryDirectoryPath],
+            excluding: [title, description, progress, status] + statusContextParts
+        ).joined(separator: " • ")
+        let next = (nextContext.isEmpty ? nil : nextContext)
+            ?? progress
             ?? detail
             ?? String(localized: "extensionColumn.context.refreshHint", defaultValue: "Refresh to summarize this workspace")
 
@@ -12759,7 +12774,8 @@ final class WorkspaceTabStore: ObservableObject {
             title: title,
             status: status,
             next: next,
-            detail: detail
+            detail: detail,
+            expandedDetail: context.expandedDetail
         )
     }
 
@@ -12784,7 +12800,8 @@ final class WorkspaceTabStore: ObservableObject {
             title: title,
             status: status,
             next: next,
-            detail: detail
+            detail: detail,
+            expandedDetail: fallback?.expandedDetail
         )
     }
 
@@ -12811,6 +12828,72 @@ final class WorkspaceTabStore: ObservableObject {
         let url = URL(fileURLWithPath: normalized)
         let lastPathComponent = url.lastPathComponent
         return lastPathComponent.isEmpty ? normalized : lastPathComponent
+    }
+
+    private struct BranchDirectoryContext {
+        let primaryBranch: String?
+        let primaryDirectoryName: String?
+        let primaryDirectoryPath: String?
+        let expandedDetail: String?
+    }
+
+    private static func branchDirectoryContext(for workspace: Workspace, title: String) -> BranchDirectoryContext {
+        let orderedPanelIds = workspace.sidebarOrderedPanelIds()
+        let branches = workspace.sidebarGitBranchesInDisplayOrder(orderedPanelIds: orderedPanelIds)
+            .map { "\($0.branch)\($0.isDirty ? "*" : "")" }
+        let directories = workspace.sidebarDirectoriesInDisplayOrder(orderedPanelIds: orderedPanelIds)
+        let primaryDirectoryPath = directories.first.map {
+            SidebarPathFormatter.shortenedPath($0)
+        }.flatMap { normalized($0) }
+        let primaryDirectoryName = normalizedDirectory(directories.first)
+        let branchDirectoryLines = workspace.sidebarBranchDirectoryEntriesInDisplayOrder(orderedPanelIds: orderedPanelIds)
+            .compactMap(branchDirectoryDetailLine)
+        let expandedLines = uniqueContextParts(
+            branchDirectoryLines.map { Optional($0) },
+            excluding: [title]
+        )
+
+        return BranchDirectoryContext(
+            primaryBranch: branches.first,
+            primaryDirectoryName: primaryDirectoryName,
+            primaryDirectoryPath: primaryDirectoryPath,
+            expandedDetail: expandedLines.count > 1 ? expandedLines.joined(separator: "\n") : nil
+        )
+    }
+
+    private static func branchDirectoryDetailLine(_ entry: SidebarBranchOrdering.BranchDirectoryEntry) -> String? {
+        let branch = entry.branch.map { "\($0)\(entry.isDirty ? "*" : "")" }
+        let directory = entry.directory.map {
+            SidebarPathFormatter.shortenedPath($0)
+        }.flatMap { normalized($0) }
+        let parts = uniqueContextParts([branch, directory])
+        guard !parts.isEmpty else { return nil }
+        return parts.joined(separator: " • ")
+    }
+
+    private static func uniqueContextParts(
+        _ parts: [String?],
+        excluding excluded: [String?] = []
+    ) -> [String] {
+        var seen = Set(excluded.compactMap(contextComparisonKey))
+        var output: [String] = []
+        for part in parts {
+            guard let value = normalized(part),
+                  let key = contextComparisonKey(value),
+                  seen.insert(key).inserted else { continue }
+            output.append(value)
+        }
+        return output
+    }
+
+    private static func contextComparisonKey(_ value: String?) -> String? {
+        guard let value = normalized(value) else { return nil }
+        let simplified = value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: " • ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return simplified.isEmpty ? nil : simplified
     }
 
     func refreshSummaryPriority(force: Bool = false, sort: WorkspaceSidebarSummaryPrioritySort? = nil) {
@@ -18275,6 +18358,7 @@ struct ExtensionColumnOverlay: View {
         if let item = row.item {
             L2TimelinePanel(
                 item: item,
+                contextSummary: row.contextSummary,
                 sortKey: sortKey,
                 isRefreshing: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
                 onRefresh: {
@@ -18931,11 +19015,11 @@ private struct L2PendingTimelinePanel: View {
 
             timeline
 
-            if let detail = row.contextSummary?.detail, !detail.isEmpty {
+            if let detail = detailText {
                 Text(detail)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundColor(.primary.opacity(0.45))
-                    .lineLimit(2)
+                    .lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
@@ -19034,6 +19118,28 @@ private struct L2PendingTimelinePanel: View {
         return row.contextSummary?.status
             ?? String(localized: "extensionColumn.row.awaiting", defaultValue: "awaiting digest — click to refresh")
     }
+
+    private var detailText: String? {
+        let detail = row.contextSummary?.expandedDetail ?? row.contextSummary?.detail
+        guard let detail = ExtensionColumnAssistantText.displayText(detail) else { return nil }
+        let repeated = [
+            row.contextSummary?.title,
+            row.contextSummary?.status,
+            row.contextSummary?.next
+        ].contains { Self.sameDisplayText($0, detail) }
+        return repeated ? nil : detail
+    }
+
+    private static func sameDisplayText(_ lhs: String?, _ rhs: String) -> Bool {
+        guard let lhs = ExtensionColumnAssistantText.displayText(lhs) else { return false }
+        let lhsKey = lhs
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+        let rhsKey = rhs
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+        return lhsKey == rhsKey
+    }
 }
 
 private struct L2TimelinePanel: View {
@@ -19043,6 +19149,7 @@ private struct L2TimelinePanel: View {
     private static let iso8601Formatter = ISO8601DateFormatter()
 
     let item: WorkspaceSidebarSummaryPriorityItem
+    let contextSummary: WorkspaceTabContextSummary?
     let sortKey: String
     let isRefreshing: Bool
     let onRefresh: () -> Void
@@ -19057,6 +19164,14 @@ private struct L2TimelinePanel: View {
                 .kerning(1)
 
             timeline
+
+            if let contextDetail {
+                Text(contextDetail)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundColor(.primary.opacity(0.45))
+                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
 
             if let reason = rankReason, !reason.isEmpty {
                 rankReasonBlock(reason)
@@ -19163,6 +19278,30 @@ private struct L2TimelinePanel: View {
             from: item.summary.detailed,
             excluding: [item.summary.short, item.presentStatus, item.nextAction?.label]
         )
+    }
+
+    private var contextDetail: String? {
+        let detail = contextSummary?.expandedDetail ?? contextSummary?.detail
+        guard let detail = ExtensionColumnAssistantText.displayText(detail) else { return nil }
+        let repeated = [
+            item.title,
+            item.subtitle,
+            item.presentStatus,
+            item.summary.short,
+            item.nextAction?.label
+        ].contains { Self.sameDisplayText($0, detail) }
+        return repeated ? nil : detail
+    }
+
+    private static func sameDisplayText(_ lhs: String?, _ rhs: String) -> Bool {
+        guard let lhs = ExtensionColumnAssistantText.displayText(lhs) else { return false }
+        let lhsKey = lhs
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+        let rhsKey = rhs
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .lowercased()
+        return lhsKey == rhsKey
     }
 
     private var timeline: some View {

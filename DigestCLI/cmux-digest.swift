@@ -469,6 +469,7 @@ private struct DigestConfig {
     var claudeCodePath: String?
     var claudeCodeModel: String?
     var llmTimeoutSec: Int
+    var maxConcurrentLLM: Int
     var currentWorkspaceMinIntervalSec: Int
     var backgroundMinIntervalSec: Int
     var screenLines: Int
@@ -495,6 +496,7 @@ private struct DigestConfig {
             claudeCodePath: env["CMUX_DIGEST_CLAUDE_PATH"] ?? settings.string("claudeCodePath"),
             claudeCodeModel: env["CMUX_DIGEST_CLAUDE_MODEL"] ?? settings.string("claudeCodeModel"),
             llmTimeoutSec: Int(env["CMUX_DIGEST_LLM_TIMEOUT"] ?? "") ?? settings.int("llmTimeoutSec") ?? 60,
+            maxConcurrentLLM: max(1, Int(env["CMUX_DIGEST_MAX_CONCURRENT_LLM"] ?? "") ?? settings.int("maxConcurrentLLM") ?? 2),
             currentWorkspaceMinIntervalSec: Int(env["CMUX_DIGEST_CURRENT_INTERVAL"] ?? "") ?? settings.int("currentWorkspaceMinIntervalSec") ?? 45,
             backgroundMinIntervalSec: Int(env["CMUX_DIGEST_BACKGROUND_INTERVAL"] ?? "") ?? settings.int("backgroundMinIntervalSec") ?? 300,
             screenLines: Int(env["CMUX_DIGEST_SCREEN_LINES"] ?? "") ?? settings.int("screenLines") ?? 160,
@@ -1726,9 +1728,14 @@ private final class DigestLLMClient {
     private let config: DigestConfig
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
+    // Caps in-flight LLM/claude-code calls so a "refresh-all" burst doesn't
+    // fan out one subprocess per workspace and time-out under API rate limits.
+    // Excess callers block on wait() and resume FIFO when a slot frees up.
+    private let throttle: DispatchSemaphore
 
     init(config: DigestConfig) {
         self.config = config
+        self.throttle = DispatchSemaphore(value: max(1, config.maxConcurrentLLM))
         encoder.outputFormatting = [.sortedKeys]
     }
 
@@ -1882,6 +1889,8 @@ private final class DigestLLMClient {
     }
 
     private func performRequest(_ template: RequestTemplate, system: String, user: String) throws -> String {
+        throttle.wait()
+        defer { throttle.signal() }
         switch template {
         case let .http(endpoint, apiKey, model):
             return try performHTTPRequest(endpoint: endpoint, apiKey: apiKey, model: model, system: system, user: user)

@@ -92,6 +92,7 @@ final class CmuxSettingsFileStore {
         "digest.includeDiffStat",
         "digest.sendFullDiffToLLM",
         "digest.writeSidebarMetadata",
+        "digest.maxConcurrentLLM",
         "workspaceTab.displayMode",
         "workspaceTab.summaryPriority.sortMode",
         "workspaceTab.summaryPriority.sortDimensionId",
@@ -816,6 +817,13 @@ final class CmuxSettingsFileStore {
         }
         if let value = jsonBool(section["writeSidebarMetadata"]) {
             snapshot.managedUserDefaults["digest.writeSidebarMetadata"] = .bool(value)
+        }
+        if let value = jsonInt(section["maxConcurrentLLM"]) {
+            if (1...16).contains(value) {
+                snapshot.managedUserDefaults["digest.maxConcurrentLLM"] = .int(value)
+            } else {
+                logInvalid("digest.maxConcurrentLLM", sourcePath: sourcePath)
+            }
         }
     }
 
