@@ -7944,15 +7944,15 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         let debugPoint = convert(event.locationInWindow, from: nil)
         cmuxDebugLog("terminal.mouseDown surface=\(terminalSurface?.id.uuidString.prefix(5) ?? "nil") mods=[\(debugModifierString(event.modifierFlags))] clickCount=\(event.clickCount) point=(\(String(format: "%.0f", debugPoint.x)),\(String(format: "%.0f", debugPoint.y)))")
         #endif
-        // Double-click in the terminal collapses an open extension column.
-        // Side-effect only: the press still falls through to Ghostty so word
-        // selection works as usual.
-        if event.clickCount == 2 {
+        // Two-or-more click in the terminal collapses an open extension column.
+        // Side-effect only: the press still falls through to Ghostty so word /
+        // line selection works as usual.
+        if event.clickCount >= 2 {
             let key = ExtensionColumnSettings.openKey
             if UserDefaults.standard.bool(forKey: key) {
                 UserDefaults.standard.set(false, forKey: key)
                 #if DEBUG
-                cmuxDebugLog("extensionColumn.collapseFromTerminalDoubleClick")
+                cmuxDebugLog("extensionColumn.collapseFromTerminalMultiClick clickCount=\(event.clickCount)")
                 #endif
             }
         }
