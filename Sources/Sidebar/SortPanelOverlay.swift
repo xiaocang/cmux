@@ -1,13 +1,9 @@
 import SwiftUI
 
 enum SortPanelSettings {
-    static let openKey = "sortPanel.open"
     static let lastGoalKey = "sortPanel.lastGoal"
     static let lastModeKey = "sortPanel.mode.lastSelected"
-
-    static let cardWidth: CGFloat = 320
-    static let cardMaxHeight: CGFloat = 560
-    static let trafficLightInset: CGFloat = 28
+    static let inlineExpandedKey = "extensionColumn.sortInline.expanded"
 }
 
 enum SortPanelMode: String, CaseIterable, Identifiable {
@@ -26,50 +22,15 @@ enum SortPanelMode: String, CaseIterable, Identifiable {
     }
 }
 
-struct SortPanelHostOverlay: View {
+struct ExtensionColumnSortInlinePanel: View {
     @ObservedObject var workspaceTabStore: WorkspaceTabStore
-    let sidebarVisible: Bool
-    let sidebarWidth: CGFloat
-    let topInset: CGFloat
-    @Binding var isOpen: Bool
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            // Click-catcher only over the area to the right of the sidebar.
-            // Clicks here close the panel. The rectangle does not cover the
-            // sidebar so the user can still interact with sidebar items.
-            Color.clear
-                .contentShape(Rectangle())
-                .onTapGesture { isOpen = false }
-                .padding(.leading, sidebarVisible ? sidebarWidth : 0)
-
-            SortPanelCard(
-                workspaceTabStore: workspaceTabStore,
-                onClose: { isOpen = false }
-            )
-            .padding(.leading, sidebarVisible ? sidebarWidth : 0)
-            .padding(.top, max(topInset, SortPanelSettings.trafficLightInset))
-            .padding(.leading, 8)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .ignoresSafeArea()
-        .transition(.asymmetric(
-            insertion: .opacity.combined(with: .move(edge: .leading)),
-            removal: .opacity
-        ))
-    }
-}
-
-private struct SortPanelCard: View {
-    @ObservedObject var workspaceTabStore: WorkspaceTabStore
-    let onClose: () -> Void
+    @Binding var isExpanded: Bool
 
     @AppStorage(SortPanelSettings.lastGoalKey)
     private var lastGoal: String = ""
     @AppStorage(SortPanelSettings.lastModeKey)
     private var lastModeRaw: String = SortPanelMode.quick.rawValue
     @State private var goalDraft: String = ""
-    @Environment(\.colorScheme) private var colorScheme
 
     private var mode: Binding<SortPanelMode> {
         Binding(
@@ -86,8 +47,8 @@ private struct SortPanelCard: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            header
+        VStack(alignment: .leading, spacing: 10) {
+            dimensionQuickRow
 
             Picker("", selection: mode) {
                 ForEach(SortPanelMode.allCases) { value in
@@ -96,8 +57,7 @@ private struct SortPanelCard: View {
             }
             .pickerStyle(.segmented)
             .labelsHidden()
-
-            Divider().opacity(0.4)
+            .controlSize(.small)
 
             switch mode.wrappedValue {
             case .quick:
@@ -106,55 +66,99 @@ private struct SortPanelCard: View {
                 customBody
             }
         }
-        .padding(14)
-        .frame(width: SortPanelSettings.cardWidth, alignment: .leading)
-        .frame(maxHeight: SortPanelSettings.cardMaxHeight, alignment: .top)
+        .padding(.horizontal, 10)
+        .padding(.top, 8)
+        .padding(.bottom, 10)
         .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(.regularMaterial)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.primary.opacity(0.05))
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.10), lineWidth: 0.5)
         )
-        .shadow(
-            color: Color.black.opacity(colorScheme == .dark ? 0.45 : 0.16),
-            radius: 18,
-            x: 0,
-            y: 8
-        )
+        .onAppear {
+            if goalDraft.isEmpty {
+                goalDraft = lastGoal.isEmpty ? defaultGoal : lastGoal
+            }
+        }
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Image(systemName: "slider.horizontal.3")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.secondary)
-            Text(String(localized: "sortPanel.title", defaultValue: "Sort"))
-                .font(.system(size: 13, weight: .semibold))
-            Spacer(minLength: 0)
-            Button(action: onClose) {
-                Image(systemName: "xmark")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 20, height: 20)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.primary.opacity(0.07))
-                    )
+    // MARK: Quick dimension chips
+
+    private var availableDimensions: [WorkspaceSidebarDimensionDefinition] {
+        let dims = workspaceTabStore.summaryPriority?.dimensions
+            ?? WorkspaceSidebarDimensionDefinition.builtinDefaults
+        let visible = dims.filter { $0.enabled && $0.visible }
+        return visible.isEmpty ? WorkspaceSidebarDimensionDefinition.builtinDefaults : visible
+    }
+
+    private var activeDimensionId: String? {
+        let sort = workspaceTabStore.selectedSort
+        return sort.mode == "dimension" ? sort.dimensionId : nil
+    }
+
+    private var dimensionQuickRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(String(
+                localized: "sortPanel.dimensions.heading",
+                defaultValue: "Sort by dimension"
+            ))
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(.secondary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    ForEach(availableDimensions, id: \.id) { dim in
+                        dimensionChip(for: dim)
+                    }
+                }
             }
-            .buttonStyle(.plain)
-            .keyboardShortcut(.cancelAction)
-            .help(String(localized: "sortPanel.close", defaultValue: "Close"))
         }
+    }
+
+    @ViewBuilder
+    private func dimensionChip(for dim: WorkspaceSidebarDimensionDefinition) -> some View {
+        let info = ExtensionColumnDimensions.info(for: dim.id, fallbackLabel: dim.label)
+        let isActive = activeDimensionId == dim.id
+        Button {
+            applyDimension(id: dim.id)
+        } label: {
+            HStack(spacing: 3) {
+                Image(systemName: info.glyph)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(info.label)
+                    .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+            }
+            .foregroundColor(isActive ? Color.accentColor : .primary)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(isActive ? 0.14 : 0.07))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func applyDimension(id: String) {
+        workspaceTabStore.setSort(
+            WorkspaceSidebarSummaryPrioritySort(
+                mode: "dimension",
+                dimensionId: id,
+                direction: "desc"
+            )
+        )
+        isExpanded = false
     }
 
     // MARK: Quick mode
 
     private var quickBody: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 8) {
             Text(String(localized: "sortPanel.goal.heading", defaultValue: "Goal"))
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
 
             TextField(
@@ -167,36 +171,49 @@ private struct SortPanelCard: View {
             )
             .lineLimit(1...3)
             .textFieldStyle(.roundedBorder)
-            .font(.system(size: 12))
-            .onAppear {
-                goalDraft = lastGoal.isEmpty ? defaultGoal : lastGoal
-            }
+            .font(.system(size: 11))
 
-            FlowChips(
-                items: SortPanelChip.allCases,
-                onTap: { chip in goalDraft = chip.text }
-            )
+            chipRow
 
             Text(String(localized: "sortPanel.preview.heading", defaultValue: "Preview"))
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
-                .padding(.top, 4)
+                .padding(.top, 2)
 
             previewList
-
-            Spacer(minLength: 0)
 
             HStack {
                 Spacer()
                 Button(action: applyQuick) {
                     Text(String(localized: "sortPanel.apply", defaultValue: "Apply Sort"))
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.system(size: 11, weight: .semibold))
                 }
-                .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .disabled(trimmedGoal.isEmpty)
             }
+        }
+    }
+
+    private var chipRow: some View {
+        HStack(spacing: 5) {
+            ForEach(SortPanelChip.allCases) { chip in
+                Button {
+                    goalDraft = chip.text
+                } label: {
+                    Text(chip.label)
+                        .font(.system(size: 10, weight: .medium))
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.primary.opacity(0.07))
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -209,7 +226,7 @@ private struct SortPanelCard: View {
         guard !goal.isEmpty else { return }
         lastGoal = goal
         workspaceTabStore.setSort(.goalDriven(goal: goal))
-        onClose()
+        isExpanded = false
     }
 
     @ViewBuilder
@@ -217,23 +234,23 @@ private struct SortPanelCard: View {
         let items = previewItems
         if items.isEmpty {
             Text(String(localized: "sortPanel.preview.empty", defaultValue: "No workspaces to rank yet."))
-                .font(.system(size: 11))
+                .font(.system(size: 10))
                 .foregroundStyle(.tertiary)
                 .frame(maxWidth: .infinity, alignment: .leading)
         } else {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 3) {
                 ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
-                    HStack(spacing: 8) {
+                    HStack(spacing: 6) {
                         Text("\(index + 1).")
-                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
                             .foregroundStyle(.secondary)
-                            .frame(width: 18, alignment: .trailing)
+                            .frame(width: 14, alignment: .trailing)
                         Text(item.title)
-                            .font(.system(size: 12))
+                            .font(.system(size: 11))
                             .lineLimit(1)
                         Spacer(minLength: 4)
                         Text(scoreLabel(for: item))
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .font(.system(size: 9, weight: .semibold, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
                 }
@@ -260,9 +277,9 @@ private struct SortPanelCard: View {
     // MARK: Custom mode
 
     private var customBody: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(String(localized: "sortPanel.custom.heading", defaultValue: "Sort by dimension"))
-                .font(.system(size: 11, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
 
             SummaryPriorityToolbar(
@@ -283,10 +300,8 @@ private struct SortPanelCard: View {
                 localized: "sortPanel.custom.help",
                 defaultValue: "Choose a dimension. Sorting applies live."
             ))
-            .font(.system(size: 11))
+            .font(.system(size: 10))
             .foregroundStyle(.tertiary)
-
-            Spacer(minLength: 0)
         }
     }
 }
@@ -326,32 +341,6 @@ private enum SortPanelChip: String, CaseIterable, Identifiable {
             return String(localized: "sortPanel.goal.chip.release", defaultValue: "Release first")
         case .blocked:
             return String(localized: "sortPanel.goal.chip.blocked", defaultValue: "Blocked first")
-        }
-    }
-}
-
-private struct FlowChips: View {
-    let items: [SortPanelChip]
-    let onTap: (SortPanelChip) -> Void
-
-    var body: some View {
-        HStack(spacing: 6) {
-            ForEach(items) { chip in
-                Button {
-                    onTap(chip)
-                } label: {
-                    Text(chip.label)
-                        .font(.system(size: 11, weight: .medium))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(Color.primary.opacity(0.07))
-                        )
-                }
-                .buttonStyle(.plain)
-            }
-            Spacer(minLength: 0)
         }
     }
 }

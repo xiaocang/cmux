@@ -1666,8 +1666,6 @@ struct ContentView: View {
     @StateObject private var workspaceSidebarLayoutMetricsStore = WorkspaceSidebarLayoutMetricsStore()
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
-    @AppStorage(SortPanelSettings.openKey)
-    private var sortPanelOpen: Bool = false
     @State private var fileExplorerWidth: CGFloat = 220
     @State private var fileExplorerDragStartWidth: CGFloat?
     @State private var previousSelectedWorkspaceId: UUID?
@@ -3161,19 +3159,6 @@ struct ContentView: View {
                         fullscreenControls
                             .padding(.leading, 10)
                             .padding(.top, 4)
-                    }
-                }
-                .overlay(alignment: .topLeading) {
-                    if sortPanelOpen {
-                        SortPanelHostOverlay(
-                            workspaceTabStore: workspaceTabStore,
-                            sidebarVisible: sidebarState.isVisible,
-                            sidebarWidth: sidebarWidth,
-                            topInset: effectiveTitlebarPadding,
-                            isOpen: $sortPanelOpen
-                        )
-                        .zIndex(900)
-                        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: sortPanelOpen)
                     }
                 }
                 .frame(minWidth: CGFloat(SessionPersistencePolicy.minimumWindowWidth), minHeight: CGFloat(SessionPersistencePolicy.minimumWindowHeight))
@@ -13358,8 +13343,6 @@ final class WorkspaceTabStore: ObservableObject {
 private struct WorkspaceSidebarModeHeader: View {
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
-    @AppStorage(SortPanelSettings.openKey)
-    private var sortPanelOpen: Bool = false
     @EnvironmentObject private var workspaceTabStore: WorkspaceTabStore
 
     var body: some View {
@@ -13391,24 +13374,6 @@ private struct WorkspaceSidebarModeHeader: View {
             .buttonStyle(.plain)
             .disabled(workspaceTabStore.isLoading)
             .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
-
-            Button {
-                sortPanelOpen.toggle()
-            } label: {
-                Image(systemName: "slider.horizontal.3")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(sortPanelOpen ? Color.accentColor : .primary.opacity(0.7))
-                    .frame(width: 22, height: 20)
-                    .background(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(Color.primary.opacity(sortPanelOpen ? 0.12 : 0.07))
-                    )
-            }
-            .buttonStyle(.plain)
-            .safeHelp(String(
-                localized: "sortPanel.toggle.tooltip",
-                defaultValue: "Open sort panel"
-            ))
 
             Button {
                 extensionColumnOpen.toggle()
@@ -18230,13 +18195,13 @@ private struct ExtensionColumnRowData: Identifiable, Equatable {
     var id: UUID { tabId }
 }
 
-private struct ExtensionColumnDimensionInfo {
+struct ExtensionColumnDimensionInfo {
     let id: String
     let label: String
     let glyph: String
 }
 
-private enum ExtensionColumnDimensions {
+enum ExtensionColumnDimensions {
     static func info(for id: String, fallbackLabel: String? = nil) -> ExtensionColumnDimensionInfo {
         switch id {
         case "urgency":
@@ -18358,6 +18323,8 @@ struct ExtensionColumnOverlay: View {
     @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
     @StateObject private var summaryProfileStore = WorkspaceSummaryProfileSettingsStore()
     @State private var isConfiguring = false
+    @AppStorage(SortPanelSettings.inlineExpandedKey)
+    private var sortInlineExpanded: Bool = false
     let isOpen: Bool
     let containerHeight: CGFloat
     let topInset: CGFloat
@@ -18536,6 +18503,26 @@ struct ExtensionColumnOverlay: View {
 
             if !isConfiguring && summaryPriorityEnabled {
                 rowsLayer(rows: rows)
+
+                if sortInlineExpanded {
+                    VStack(spacing: 0) {
+                        Spacer().frame(height: topInset + 30)
+
+                        ExtensionColumnSortInlinePanel(
+                            workspaceTabStore: workspaceTabStore,
+                            isExpanded: $sortInlineExpanded
+                        )
+                        .padding(.horizontal, 8)
+                        .background(
+                            SidebarBackdrop(cornerRadiusOverride: 0)
+                                .opacity(ExtensionColumnSettings.backgroundOpacity)
+                        )
+
+                        Spacer(minLength: 0)
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                    .zIndex(20)
+                }
             }
         }
         .frame(width: ExtensionColumnSettings.columnWidth, alignment: .topLeading)
@@ -18551,6 +18538,7 @@ struct ExtensionColumnOverlay: View {
             ExtensionColumnHairline(opacity: 0.85)
         }
         .shadow(color: ExtensionColumnPalette.dropShadow(for: colorScheme, opacity: 0.5), radius: 18, x: 8, y: 0)
+        .animation(.spring(response: 0.32, dampingFraction: 0.85), value: sortInlineExpanded)
     }
 
     private func rowsLayer(rows: [ExtensionColumnRowData]) -> some View {
@@ -18605,7 +18593,7 @@ struct ExtensionColumnOverlay: View {
                 .foregroundColor(.secondary)
             Spacer(minLength: 0)
             if !isConfiguring {
-                sortMenu
+                sortInlineToggle
                 refreshButton
             }
             Button(action: onClose) {
@@ -18644,6 +18632,35 @@ struct ExtensionColumnOverlay: View {
         )
     }
 
+    private var sortInlineToggle: some View {
+        let current = ExtensionColumnDimensions.info(for: sortKey)
+        return Button {
+            sortInlineExpanded.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: current.glyph)
+                    .font(.system(size: 9, weight: .semibold))
+                Text(String(localized: "sidebar.workspaceSummary.sort.label", defaultValue: "Sort"))
+                    .font(.system(size: 10, weight: .medium))
+                Image(systemName: sortInlineExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 8, weight: .semibold))
+                    .opacity(0.7)
+            }
+            .foregroundColor(sortInlineExpanded ? Color.accentColor : .primary)
+            .padding(.horizontal, 7)
+            .frame(height: 20)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(sortInlineExpanded ? 0.12 : 0.07))
+            )
+        }
+        .buttonStyle(.plain)
+        .safeHelp(String(
+            localized: "sortPanel.toggle.tooltip",
+            defaultValue: "Open sort panel"
+        ))
+    }
+
     private var refreshButton: some View {
         Button {
             workspaceTabStore.refreshSummaryPriority(force: true)
@@ -18669,51 +18686,6 @@ struct ExtensionColumnOverlay: View {
         .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
     }
 
-    private var sortMenu: some View {
-        let dimensions = availableSortDimensions
-        let current = dimensions.first(where: { $0.id == sortKey }) ?? ExtensionColumnDimensions.info(for: sortKey)
-        return Menu {
-            ForEach(dimensions, id: \.id) { dim in
-                Button {
-                    workspaceTabStore.setSort(
-                        WorkspaceSidebarSummaryPrioritySort(
-                            mode: "dimension",
-                            dimensionId: dim.id,
-                            direction: "desc"
-                        )
-                    )
-                } label: {
-                    Label {
-                        Text(dim.label)
-                    } icon: {
-                        Image(systemName: dim.id == sortKey ? "checkmark" : dim.glyph)
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: current.glyph)
-                    .font(.system(size: 9, weight: .semibold))
-                Text(current.label)
-                    .font(.system(size: 10, weight: .medium))
-                    .lineLimit(1)
-                    .frame(maxWidth: 74)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .opacity(0.6)
-            }
-            .foregroundColor(.primary)
-            .padding(.horizontal, 7)
-            .frame(height: 20)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color.primary.opacity(0.07))
-            )
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .safeHelp(String(localized: "extensionColumn.sort.tooltip", defaultValue: "Sort dimension"))
-    }
 }
 
 private struct ExtensionColumnDisabledPanel: View {
