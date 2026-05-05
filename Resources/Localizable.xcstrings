@@ -104807,23 +104807,6 @@
         }
       }
     },
-    "shortcut.toggleSortPanel.label": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Toggle Sort Panel"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "並び替えパネルを切り替え"
-          }
-        }
-      }
-    },
     "sortPanel.apply": {
       "extractionState": "manual",
       "localizations": {
@@ -104837,23 +104820,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "並び替えを適用"
-          }
-        }
-      }
-    },
-    "sortPanel.close": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Close"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "閉じる"
           }
         }
       }
@@ -105109,23 +105075,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "プレビュー"
-          }
-        }
-      }
-    },
-    "sortPanel.title": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Sort"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "並び替え"
           }
         }
       }

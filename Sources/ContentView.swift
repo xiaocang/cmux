@@ -18174,6 +18174,7 @@ extension NSColor {
 
 enum ExtensionColumnSettings {
     static let openKey = "extensionColumn.open"
+    static let sortInlineExpandedKey = "extensionColumn.sortInline.expanded"
     static let defaultOpen = false
     static let columnWidth: CGFloat = 240
     static let l2PanelWidth: CGFloat = 340
@@ -18323,7 +18324,7 @@ struct ExtensionColumnOverlay: View {
     @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
     @StateObject private var summaryProfileStore = WorkspaceSummaryProfileSettingsStore()
     @State private var isConfiguring = false
-    @AppStorage(SortPanelSettings.inlineExpandedKey)
+    @AppStorage(ExtensionColumnSettings.sortInlineExpandedKey)
     private var sortInlineExpanded: Bool = false
     let isOpen: Bool
     let containerHeight: CGFloat

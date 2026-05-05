@@ -1,11 +1,5 @@
 import SwiftUI
 
-enum SortPanelSettings {
-    static let lastGoalKey = "sortPanel.lastGoal"
-    static let lastModeKey = "sortPanel.mode.lastSelected"
-    static let inlineExpandedKey = "extensionColumn.sortInline.expanded"
-}
-
 enum SortPanelMode: String, CaseIterable, Identifiable {
     case quick
     case custom
@@ -23,12 +17,15 @@ enum SortPanelMode: String, CaseIterable, Identifiable {
 }
 
 struct ExtensionColumnSortInlinePanel: View {
+    private static let lastGoalKey = "sortPanel.lastGoal"
+    private static let lastModeKey = "sortPanel.mode.lastSelected"
+
     @ObservedObject var workspaceTabStore: WorkspaceTabStore
     @Binding var isExpanded: Bool
 
-    @AppStorage(SortPanelSettings.lastGoalKey)
+    @AppStorage(Self.lastGoalKey)
     private var lastGoal: String = ""
-    @AppStorage(SortPanelSettings.lastModeKey)
+    @AppStorage(Self.lastModeKey)
     private var lastModeRaw: String = SortPanelMode.quick.rawValue
     @State private var goalDraft: String = ""
 
