@@ -1666,6 +1666,8 @@ struct ContentView: View {
     @StateObject private var workspaceSidebarLayoutMetricsStore = WorkspaceSidebarLayoutMetricsStore()
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
+    @AppStorage(SortPanelSettings.openKey)
+    private var sortPanelOpen: Bool = false
     @State private var fileExplorerWidth: CGFloat = 220
     @State private var fileExplorerDragStartWidth: CGFloat?
     @State private var previousSelectedWorkspaceId: UUID?
@@ -3159,6 +3161,19 @@ struct ContentView: View {
                         fullscreenControls
                             .padding(.leading, 10)
                             .padding(.top, 4)
+                    }
+                }
+                .overlay(alignment: .topLeading) {
+                    if sortPanelOpen {
+                        SortPanelHostOverlay(
+                            workspaceTabStore: workspaceTabStore,
+                            sidebarVisible: sidebarState.isVisible,
+                            sidebarWidth: sidebarWidth,
+                            topInset: effectiveTitlebarPadding,
+                            isOpen: $sortPanelOpen
+                        )
+                        .zIndex(900)
+                        .animation(.spring(response: 0.36, dampingFraction: 0.86), value: sortPanelOpen)
                     }
                 }
                 .frame(minWidth: CGFloat(SessionPersistencePolicy.minimumWindowWidth), minHeight: CGFloat(SessionPersistencePolicy.minimumWindowHeight))
@@ -12591,9 +12606,24 @@ struct WorkspaceSidebarSummaryPriorityItem: Codable, Identifiable, Equatable {
 }
 
 struct WorkspaceSidebarSummaryPrioritySort: Codable, Equatable {
+    static let goalDrivenMode = "goal_driven"
+
     let mode: String
     let dimensionId: String?
     let direction: String
+    let goalText: String?
+
+    init(
+        mode: String,
+        dimensionId: String?,
+        direction: String,
+        goalText: String? = nil
+    ) {
+        self.mode = mode
+        self.dimensionId = dimensionId
+        self.direction = direction
+        self.goalText = goalText
+    }
 
     static let defaultSort = WorkspaceSidebarSummaryPrioritySort(
         mode: "dimension",
@@ -12601,12 +12631,27 @@ struct WorkspaceSidebarSummaryPrioritySort: Codable, Equatable {
         direction: "desc"
     )
 
+    static func goalDriven(goal: String) -> WorkspaceSidebarSummaryPrioritySort {
+        WorkspaceSidebarSummaryPrioritySort(
+            mode: goalDrivenMode,
+            dimensionId: nil,
+            direction: "desc",
+            goalText: goal
+        )
+    }
+
+    var isGoalDriven: Bool { mode == Self.goalDrivenMode }
+
     var requestPayload: [String: String] {
-        [
+        var payload: [String: String] = [
             "mode": mode,
             "dimensionId": dimensionId ?? "",
             "direction": direction
         ]
+        if let goalText, !goalText.isEmpty {
+            payload["goalText"] = goalText
+        }
+        return payload
     }
 }
 
@@ -13013,6 +13058,15 @@ final class WorkspaceTabStore: ObservableObject {
         cmuxDebugLog("summaryPriority.setSort.start gen=\(requestGeneration) sort=\(Self.debugSortDescription(sort))")
 #endif
 
+        // Goal-driven sort runs entirely client-side until the real scorer
+        // ships. Reorder cached items using max-of-dimension as a stable
+        // composite; native order is the tie-breaker. The backend never
+        // sees the goal_driven mode in the request payload.
+        if sort.isGoalDriven {
+            applyGoalDrivenSortLocally(sort)
+            return
+        }
+
         isLoading = true
         errorMessage = nil
         sendDigestCommand(
@@ -13052,6 +13106,33 @@ final class WorkspaceTabStore: ObservableObject {
             "set_workspace_tab_mode",
             payload: ["displayMode": mode.rawValue]
         ) { _ in }
+    }
+
+    private func applyGoalDrivenSortLocally(_ sort: WorkspaceSidebarSummaryPrioritySort) {
+        guard let current = summaryPriority else { return }
+        let reordered = current.items.sorted { lhs, rhs in
+            let lScore = Self.goalDrivenComposite(lhs)
+            let rScore = Self.goalDrivenComposite(rhs)
+            if lScore != rScore { return lScore > rScore }
+            return lhs.nativeOrder < rhs.nativeOrder
+        }
+        summaryPriority = WorkspaceSidebarSummaryPriorityState(
+            profileId: current.profileId,
+            sort: sort,
+            items: reordered,
+            dimensions: current.dimensions,
+            stats: current.stats,
+            generatedAt: current.generatedAt
+        )
+        isLoading = false
+        errorMessage = nil
+    }
+
+    private static func goalDrivenComposite(_ item: WorkspaceSidebarSummaryPriorityItem) -> Double {
+        // Phase 1 stub: max raw score across known dimensions. Replace with
+        // the real LLM/heuristic scorer in the follow-up PR.
+        let raws = item.scores.dimensions.values.map(\.rawScore)
+        return raws.max() ?? 0
     }
 
     func refreshWorkspace(_ item: WorkspaceSidebarSummaryPriorityItem) {
@@ -13277,6 +13358,8 @@ final class WorkspaceTabStore: ObservableObject {
 private struct WorkspaceSidebarModeHeader: View {
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
+    @AppStorage(SortPanelSettings.openKey)
+    private var sortPanelOpen: Bool = false
     @EnvironmentObject private var workspaceTabStore: WorkspaceTabStore
 
     var body: some View {
@@ -13308,6 +13391,24 @@ private struct WorkspaceSidebarModeHeader: View {
             .buttonStyle(.plain)
             .disabled(workspaceTabStore.isLoading)
             .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
+
+            Button {
+                sortPanelOpen.toggle()
+            } label: {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(sortPanelOpen ? Color.accentColor : .primary.opacity(0.7))
+                    .frame(width: 22, height: 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.primary.opacity(sortPanelOpen ? 0.12 : 0.07))
+                    )
+            }
+            .buttonStyle(.plain)
+            .safeHelp(String(
+                localized: "sortPanel.toggle.tooltip",
+                defaultValue: "Open sort panel"
+            ))
 
             Button {
                 extensionColumnOpen.toggle()
@@ -13594,7 +13695,7 @@ private struct SummaryPriorityPendingWorkspace: Identifiable {
     var id: UUID { tab.id }
 }
 
-private struct SummaryPriorityToolbar: View {
+struct SummaryPriorityToolbar: View {
     let sort: WorkspaceSidebarSummaryPrioritySort
     let dimensions: [WorkspaceSidebarDimensionDefinition]
     let isLoading: Bool
