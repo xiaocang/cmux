@@ -523,7 +523,7 @@ private struct DigestConfig {
         let normalized = rawProvider?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        if enabled && (normalized == nil || normalized == "" || normalized == "heuristic") {
+        if enabled && (normalized == nil || normalized == "") {
             return "claude-code"
         }
         return normalized?.isEmpty == false ? normalized! : "heuristic"

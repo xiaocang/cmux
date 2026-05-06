@@ -1,6 +1,7 @@
 import AppKit
 import Bonsplit
 import Combine
+import Darwin
 import ImageIO
 import SwiftUI
 import ObjectiveC
@@ -10029,6 +10030,7 @@ struct VerticalTabsSidebar: View {
         let allSelectedRemoteContextMenuTargetsConnecting: Bool
         let allSelectedRemoteContextMenuTargetsDisconnected: Bool
         let workspaceTerminalScrollBarHiddenById: [UUID: Bool]
+        let summaryScoreBadgesById: [UUID: WorkspaceSidebarScoreBadge]
 
         var workspaceIds: [UUID] {
             tabs.map(\.id)
@@ -10053,6 +10055,10 @@ struct VerticalTabsSidebar: View {
         let workspaceTerminalScrollBarHiddenById = Dictionary(
             uniqueKeysWithValues: tabs.map { ($0.id, $0.terminalScrollBarHidden) }
         )
+        let summaryScoreBadgesById = Self.summaryScoreBadgesByWorkspaceId(
+            summaryPriority: workspaceTabStore.summaryPriority,
+            selectedSort: workspaceTabStore.selectedSort
+        )
         let allSelectedRemoteContextMenuTargetsConnecting = !selectedRemoteContextMenuTargets.isEmpty &&
             selectedRemoteContextMenuTargets.allSatisfy { $0.remoteConnectionState == .connecting }
         let allSelectedRemoteContextMenuTargetsDisconnected = !selectedRemoteContextMenuTargets.isEmpty &&
@@ -10068,7 +10074,8 @@ struct VerticalTabsSidebar: View {
             selectedRemoteContextMenuWorkspaceIds: selectedRemoteContextMenuWorkspaceIds,
             allSelectedRemoteContextMenuTargetsConnecting: allSelectedRemoteContextMenuTargetsConnecting,
             allSelectedRemoteContextMenuTargetsDisconnected: allSelectedRemoteContextMenuTargetsDisconnected,
-            workspaceTerminalScrollBarHiddenById: workspaceTerminalScrollBarHiddenById
+            workspaceTerminalScrollBarHiddenById: workspaceTerminalScrollBarHiddenById,
+            summaryScoreBadgesById: summaryScoreBadgesById
         )
 
         VStack(spacing: 0) {
@@ -10327,6 +10334,7 @@ struct VerticalTabsSidebar: View {
             accessibilityWorkspaceCount: renderContext.workspaceCount,
             unreadCount: frozenPresentation?.unreadCount ?? liveUnreadCount,
             latestNotificationText: frozenPresentation?.latestNotificationText ?? liveLatestNotificationText,
+            summaryScoreBadge: renderContext.summaryScoreBadgesById[tab.id],
             rowSpacing: tabRowSpacing,
             setSelectionToTabs: { selection = .tabs },
             selectedTabIds: $selectedTabIds,
@@ -10361,6 +10369,45 @@ struct VerticalTabsSidebar: View {
         .id(tab.id)
         .preference(key: SidebarWorkspaceRowIdsPreferenceKey.self, value: Set([tab.id]))
     }
+
+    private static func summaryScoreBadgesByWorkspaceId(
+        summaryPriority: WorkspaceSidebarSummaryPriorityState?,
+        selectedSort: WorkspaceSidebarSummaryPrioritySort
+    ) -> [UUID: WorkspaceSidebarScoreBadge] {
+        guard let summaryPriority else { return [:] }
+        let dimensionInfo = scoreDimensionInfo(
+            for: selectedSort,
+            summaryPriority: summaryPriority
+        )
+        var result: [UUID: WorkspaceSidebarScoreBadge] = [:]
+        for item in summaryPriority.items {
+            guard let workspaceId = UUID(uuidString: item.workspaceId),
+                  let dimensionScore = item.scores.dimensions[dimensionInfo.id] else {
+                continue
+            }
+            let reason = dimensionScore.reason.trimmingCharacters(in: .whitespacesAndNewlines)
+            result[workspaceId] = WorkspaceSidebarScoreBadge(
+                dimensionLabel: dimensionInfo.label,
+                glyph: dimensionInfo.glyph,
+                score: Int(dimensionScore.rawScore.rounded()),
+                reason: reason.isEmpty ? nil : reason
+            )
+        }
+        return result
+    }
+
+    private static func scoreDimensionInfo(
+        for sort: WorkspaceSidebarSummaryPrioritySort,
+        summaryPriority: WorkspaceSidebarSummaryPriorityState
+    ) -> ExtensionColumnDimensionInfo {
+        let dimensions = ExtensionColumnDimensions.availableInfos(in: summaryPriority)
+        if let dimensionId = sort.dimensionId,
+           let selected = dimensions.first(where: { $0.id == dimensionId }) {
+            return selected
+        }
+        return dimensions.first ?? ExtensionColumnDimensions.info(for: "urgency")
+    }
+
 
     private func debugShortSidebarTabId(_ id: UUID?) -> String {
         guard let id else { return "nil" }
@@ -12506,6 +12553,26 @@ struct WorkspaceSidebarDimensionScore: Codable, Equatable {
     let reason: String
 }
 
+private struct WorkspaceSidebarScoreBadge: Equatable {
+    let dimensionLabel: String
+    let glyph: String
+    let score: Int
+    let reason: String?
+
+    var helpText: String {
+        var lines = ["\(dimensionLabel) \(score)"]
+        if let reason {
+            lines.append(reason)
+        }
+        return lines
+            .compactMap { value in
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            .joined(separator: "\n\n")
+    }
+}
+
 struct WorkspaceSidebarDimensionDefinition: Codable, Identifiable, Equatable {
     let id: String
     let label: String
@@ -12591,22 +12658,58 @@ struct WorkspaceSidebarSummaryPriorityItem: Codable, Identifiable, Equatable {
 }
 
 struct WorkspaceSidebarSummaryPrioritySort: Codable, Equatable {
+    static let goalDrivenMode = "goal_driven"
+    static let dimensionMode = "dimension"
+
     let mode: String
     let dimensionId: String?
     let direction: String
+    let goalText: String?
 
-    static let defaultSort = WorkspaceSidebarSummaryPrioritySort(
-        mode: "dimension",
-        dimensionId: "urgency",
-        direction: "desc"
-    )
+    init(
+        mode: String,
+        dimensionId: String?,
+        direction: String,
+        goalText: String? = nil
+    ) {
+        self.mode = mode
+        self.dimensionId = dimensionId
+        self.direction = direction
+        self.goalText = goalText
+    }
+
+    static let defaultSort = WorkspaceSidebarSummaryPrioritySort.dimension(id: "urgency")
+
+    static func dimension(id: String) -> WorkspaceSidebarSummaryPrioritySort {
+        WorkspaceSidebarSummaryPrioritySort(
+            mode: dimensionMode,
+            dimensionId: id,
+            direction: "desc"
+        )
+    }
+
+    static func goalDriven(goal: String) -> WorkspaceSidebarSummaryPrioritySort {
+        WorkspaceSidebarSummaryPrioritySort(
+            mode: goalDrivenMode,
+            dimensionId: nil,
+            direction: "desc",
+            goalText: goal
+        )
+    }
+
+    var isGoalDriven: Bool { mode == Self.goalDrivenMode }
+    var isDimension: Bool { mode == Self.dimensionMode }
 
     var requestPayload: [String: String] {
-        [
+        var payload: [String: String] = [
             "mode": mode,
             "dimensionId": dimensionId ?? "",
             "direction": direction
         ]
+        if let goalText, !goalText.isEmpty {
+            payload["goalText"] = goalText
+        }
+        return payload
     }
 }
 
@@ -12635,17 +12738,33 @@ struct WorkspaceTabContextSummary: Equatable {
     let expandedDetail: String?
 }
 
+struct WorkspaceSidebarSavedSort: Codable, Identifiable, Equatable {
+    let id: UUID
+    var name: String
+    var goalText: String
+
+    init(id: UUID = UUID(), name: String, goalText: String) {
+        self.id = id
+        self.name = name
+        self.goalText = goalText
+    }
+}
+
 @MainActor
 final class WorkspaceTabStore: ObservableObject {
     @Published var summaryPriority: WorkspaceSidebarSummaryPriorityState?
     @Published var selectedSort: WorkspaceSidebarSummaryPrioritySort
+    @Published var savedSorts: [WorkspaceSidebarSavedSort]
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published private(set) var tabContextSummaries: [UUID: WorkspaceTabContextSummary] = [:]
     @Published private(set) var refreshingWorkspaceIds: Set<String> = []
 
     private static let selectedSortDefaultsKey = "workspaceTab.summaryPriority.selectedSort"
+    private static let savedSortsDefaultsKey = "workspaceTab.summaryPriority.savedSorts"
     private static let socketQueue = DispatchQueue(label: "com.cmux.digest-socket-client", qos: .userInitiated)
+    private static let digestSocketTimeoutSeconds: TimeInterval = 120
+    private static let digestSocketStartupWaitSeconds: TimeInterval = 2
     private static let maxRefreshRetryAttempts = 5
     private static let jsonEncoder = JSONEncoder()
     private static let jsonDecoder = JSONDecoder()
@@ -12657,6 +12776,7 @@ final class WorkspaceTabStore: ObservableObject {
 
     init() {
         selectedSort = Self.loadSelectedSort()
+        savedSorts = Self.loadSavedSorts()
     }
 
     private static func loadSelectedSort() -> WorkspaceSidebarSummaryPrioritySort {
@@ -12670,6 +12790,42 @@ final class WorkspaceTabStore: ObservableObject {
     private func persistSelectedSort(_ sort: WorkspaceSidebarSummaryPrioritySort) {
         guard let data = try? Self.jsonEncoder.encode(sort) else { return }
         UserDefaults.standard.set(data, forKey: Self.selectedSortDefaultsKey)
+    }
+
+    private static func loadSavedSorts() -> [WorkspaceSidebarSavedSort] {
+        guard let data = UserDefaults.standard.data(forKey: savedSortsDefaultsKey),
+              let sorts = try? jsonDecoder.decode([WorkspaceSidebarSavedSort].self, from: data) else {
+            return []
+        }
+        return sorts
+    }
+
+    private func persistSavedSorts() {
+        guard let data = try? Self.jsonEncoder.encode(savedSorts) else { return }
+        UserDefaults.standard.set(data, forKey: Self.savedSortsDefaultsKey)
+    }
+
+    func addSavedSort(name: String, goal: String) {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedGoal = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty, !trimmedGoal.isEmpty else { return }
+
+        if let existingIndex = savedSorts.firstIndex(where: {
+            $0.name.compare(trimmedName, options: .caseInsensitive) == .orderedSame
+        }) {
+            savedSorts[existingIndex].goalText = trimmedGoal
+            savedSorts[existingIndex].name = trimmedName
+        } else {
+            savedSorts.append(
+                WorkspaceSidebarSavedSort(name: trimmedName, goalText: trimmedGoal)
+            )
+        }
+        persistSavedSorts()
+    }
+
+    func applySavedSort(id: UUID) {
+        guard let preset = savedSorts.first(where: { $0.id == id }) else { return }
+        setSort(.goalDriven(goal: preset.goalText))
     }
 
     func contextSummary(for workspaceId: UUID) -> WorkspaceTabContextSummary? {
@@ -12982,15 +13138,14 @@ final class WorkspaceTabStore: ObservableObject {
     }
 
     /// Connection-class failures from the digest socket: file not present yet
-    /// (daemon still starting) or peer refused. UI retries once after a short
-    /// back-off; protocol/decode errors surface immediately.
+    /// (daemon still starting) or peer refused. Long-running commands should
+    /// not be retried because that stacks duplicate digest refreshes.
     private static func isTransientConnectionError(_ error: Error) -> Bool {
         guard let socketError = error as? CmuxSocketError else { return false }
         let message = socketError.message
         return message.contains("Socket not found")
             || message.contains("Failed to connect")
             || message.contains("Failed to create socket")
-            || message.contains("Command timed out")
             || message.contains("Socket read error")
             || message.contains("Socket closed")
             || message.contains("connection refused")
@@ -13012,6 +13167,15 @@ final class WorkspaceTabStore: ObservableObject {
 #if DEBUG
         cmuxDebugLog("summaryPriority.setSort.start gen=\(requestGeneration) sort=\(Self.debugSortDescription(sort))")
 #endif
+
+        // Goal-driven sort runs entirely client-side until the real scorer
+        // ships. Reorder cached items using max-of-dimension as a stable
+        // composite; native order is the tie-breaker. The backend never
+        // sees the goal_driven mode in the request payload.
+        if sort.isGoalDriven {
+            applyGoalDrivenSortLocally(sort)
+            return
+        }
 
         isLoading = true
         errorMessage = nil
@@ -13052,6 +13216,33 @@ final class WorkspaceTabStore: ObservableObject {
             "set_workspace_tab_mode",
             payload: ["displayMode": mode.rawValue]
         ) { _ in }
+    }
+
+    private func applyGoalDrivenSortLocally(_ sort: WorkspaceSidebarSummaryPrioritySort) {
+        guard let current = summaryPriority else { return }
+        let reordered = current.items.sorted { lhs, rhs in
+            let lScore = Self.goalDrivenComposite(lhs)
+            let rScore = Self.goalDrivenComposite(rhs)
+            if lScore != rScore { return lScore > rScore }
+            return lhs.nativeOrder < rhs.nativeOrder
+        }
+        summaryPriority = WorkspaceSidebarSummaryPriorityState(
+            profileId: current.profileId,
+            sort: sort,
+            items: reordered,
+            dimensions: current.dimensions,
+            stats: current.stats,
+            generatedAt: current.generatedAt
+        )
+        isLoading = false
+        errorMessage = nil
+    }
+
+    private static func goalDrivenComposite(_ item: WorkspaceSidebarSummaryPriorityItem) -> Double {
+        // Phase 1 stub: max raw score across known dimensions. Replace with
+        // the real LLM/heuristic scorer in the follow-up PR.
+        let raws = item.scores.dimensions.values.map(\.rawScore)
+        return raws.max() ?? 0
     }
 
     func refreshWorkspace(_ item: WorkspaceSidebarSummaryPriorityItem) {
@@ -13166,7 +13357,7 @@ final class WorkspaceTabStore: ObservableObject {
         item: WorkspaceSidebarSummaryPriorityItem,
         sort: WorkspaceSidebarSummaryPrioritySort
     ) -> Double {
-        guard sort.mode == "dimension" else { return 0 }
+        guard sort.isDimension else { return 0 }
         return item.scores.dimensions[sort.dimensionId ?? "urgency"]?.rawScore ?? 0
     }
 
@@ -13233,10 +13424,14 @@ final class WorkspaceTabStore: ObservableObject {
         Self.socketQueue.async {
             let result: Result<String, Error>
             do {
+                _ = Self.waitForDigestSocket(at: socketPath, timeout: Self.digestSocketStartupWaitSeconds)
                 let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [])
                 let payloadString = String(data: payloadData, encoding: .utf8) ?? "{}"
                 let line = "\(command) \(payloadString)"
-                let client = CmuxSocketClient(path: socketPath)
+                let client = CmuxSocketClient(
+                    path: socketPath,
+                    timeoutSeconds: Self.digestSocketTimeoutSeconds
+                )
                 try client.connect()
                 defer { client.close() }
                 let response = try client.send(command: line)
@@ -13257,6 +13452,19 @@ final class WorkspaceTabStore: ObservableObject {
                 completion(result)
             }
         }
+    }
+
+    private static func waitForDigestSocket(at path: String, timeout: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            var info = stat()
+            if stat(path, &info) == 0,
+               (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFSOCK) {
+                return true
+            }
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        return false
     }
 
 #if DEBUG
@@ -13594,7 +13802,7 @@ private struct SummaryPriorityPendingWorkspace: Identifiable {
     var id: UUID { tab.id }
 }
 
-private struct SummaryPriorityToolbar: View {
+struct SummaryPriorityToolbar: View {
     let sort: WorkspaceSidebarSummaryPrioritySort
     let dimensions: [WorkspaceSidebarDimensionDefinition]
     let isLoading: Bool
@@ -13626,11 +13834,7 @@ private struct SummaryPriorityToolbar: View {
                 ForEach(visibleDimensions) { dimension in
                     sortMenuItem(
                         title: title(for: dimension),
-                        sort: WorkspaceSidebarSummaryPrioritySort(
-                            mode: "dimension",
-                            dimensionId: dimension.id,
-                            direction: "desc"
-                        )
+                        sort: .dimension(id: dimension.id)
                     )
                 }
 
@@ -13732,7 +13936,7 @@ private struct SummaryPriorityWorkspaceRow: View {
     let onTogglePin: () -> Void
 
     private var activeDimensionId: String {
-        sort.mode == "dimension" ? (sort.dimensionId ?? "urgency") : "urgency"
+        sort.isDimension ? (sort.dimensionId ?? "urgency") : "urgency"
     }
 
     private var activeScore: Double {
@@ -14469,6 +14673,7 @@ private struct TabItemView: View, Equatable {
         lhs.accessibilityWorkspaceCount == rhs.accessibilityWorkspaceCount &&
         lhs.unreadCount == rhs.unreadCount &&
         lhs.latestNotificationText == rhs.latestNotificationText &&
+        lhs.summaryScoreBadge == rhs.summaryScoreBadge &&
         lhs.rowSpacing == rhs.rowSpacing &&
         lhs.showsModifierShortcutHints == rhs.showsModifierShortcutHints &&
         lhs.contextMenuWorkspaceIds == rhs.contextMenuWorkspaceIds &&
@@ -14494,6 +14699,7 @@ private struct TabItemView: View, Equatable {
     let accessibilityWorkspaceCount: Int
     let unreadCount: Int
     let latestNotificationText: String?
+    let summaryScoreBadge: WorkspaceSidebarScoreBadge?
     let rowSpacing: CGFloat
     let setSelectionToTabs: () -> Void
     @Binding var selectedTabIds: Set<UUID>
@@ -14746,6 +14952,28 @@ private struct TabItemView: View, Equatable {
         }
     }
 
+    private func summaryScoreBadgeView(_ badge: WorkspaceSidebarScoreBadge) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: badge.glyph)
+                .font(.system(size: 8.5, weight: .semibold))
+            Text("\(badge.score)")
+                .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
+                .monospacedDigit()
+        }
+        .foregroundColor(activeSecondaryColor(usesInvertedActiveForeground ? 0.95 : 0.78))
+        .padding(.horizontal, 5)
+        .frame(height: 16)
+        .background(
+            Capsule(style: .continuous)
+                .fill(usesInvertedActiveForeground ? Color.white.opacity(0.14) : Color.primary.opacity(0.07))
+        )
+        .overlay(
+            Capsule(style: .continuous)
+                .strokeBorder(usesInvertedActiveForeground ? Color.white.opacity(0.18) : Color.primary.opacity(0.08), lineWidth: 1)
+        )
+        .safeHelp(badge.helpText)
+    }
+
     private func copyTextToPasteboard(_ text: String) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -14809,6 +15037,10 @@ private struct TabItemView: View, Equatable {
                     .layoutPriority(1)
 
                 Spacer(minLength: 0)
+
+                if let summaryScoreBadge {
+                    summaryScoreBadgeView(summaryScoreBadge)
+                }
 
                 ZStack(alignment: .trailing) {
                     Button(action: {
@@ -18129,13 +18361,22 @@ private struct ExtensionColumnRowData: Identifiable, Equatable {
     var id: UUID { tabId }
 }
 
-private struct ExtensionColumnDimensionInfo {
+struct ExtensionColumnDimensionInfo {
     let id: String
     let label: String
     let glyph: String
 }
 
-private enum ExtensionColumnDimensions {
+enum ExtensionColumnDimensions {
+    static func availableInfos(
+        in summaryPriority: WorkspaceSidebarSummaryPriorityState?
+    ) -> [ExtensionColumnDimensionInfo] {
+        let dimensions = summaryPriority?.dimensions ?? WorkspaceSidebarDimensionDefinition.builtinDefaults
+        let visible = dimensions.filter { $0.enabled && $0.visible }
+        let source = visible.isEmpty ? WorkspaceSidebarDimensionDefinition.builtinDefaults : visible
+        return source.map { info(for: $0.id, fallbackLabel: $0.label) }
+    }
+
     static func info(for id: String, fallbackLabel: String? = nil) -> ExtensionColumnDimensionInfo {
         switch id {
         case "urgency":
@@ -18257,6 +18498,7 @@ struct ExtensionColumnOverlay: View {
     @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
     @StateObject private var summaryProfileStore = WorkspaceSummaryProfileSettingsStore()
     @State private var isConfiguring = false
+    @State private var quickPopoverOpen = false
     let isOpen: Bool
     let containerHeight: CGFloat
     let topInset: CGFloat
@@ -18291,10 +18533,7 @@ struct ExtensionColumnOverlay: View {
     }
 
     private var availableSortDimensions: [ExtensionColumnDimensionInfo] {
-        let dimensions = workspaceTabStore.summaryPriority?.dimensions ?? WorkspaceSidebarDimensionDefinition.builtinDefaults
-        let visible = dimensions.filter { $0.enabled && $0.visible }
-        let source = visible.isEmpty ? WorkspaceSidebarDimensionDefinition.builtinDefaults : visible
-        return source.map { ExtensionColumnDimensions.info(for: $0.id, fallbackLabel: $0.label) }
+        ExtensionColumnDimensions.availableInfos(in: workspaceTabStore.summaryPriority)
     }
 
     private func refreshSingle(workspace: Workspace) {
@@ -18504,7 +18743,7 @@ struct ExtensionColumnOverlay: View {
                 .foregroundColor(.secondary)
             Spacer(minLength: 0)
             if !isConfiguring {
-                sortMenu
+                sortMenuButton
                 refreshButton
             }
             Button(action: onClose) {
@@ -18527,8 +18766,9 @@ struct ExtensionColumnOverlay: View {
         Button {
             isConfiguring.toggle()
         } label: {
-            Text(isConfiguring ? "🔙" : "⚙️")
-                .font(.system(size: 12))
+            Text(isConfiguring ? "\u{2190}\u{FE0E}" : "\u{2699}\u{FE0E}")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.primary.opacity(0.75))
                 .frame(width: 20, height: 20)
                 .background(
                     RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -18541,6 +18781,104 @@ struct ExtensionColumnOverlay: View {
                 ? String(localized: "extensionColumn.configure.back.tooltip", defaultValue: "Back to summaries")
                 : String(localized: "extensionColumn.configure.tooltip", defaultValue: "Configure extension")
         )
+    }
+
+    private var sortMenuButton: some View {
+        Menu {
+            ForEach(availableSortDimensions, id: \.id) { dim in
+                Button {
+                    applyDimension(id: dim.id)
+                } label: {
+                    Label {
+                        Text(dim.label)
+                    } icon: {
+                        Image(systemName: isActiveDimension(dim.id) ? "checkmark" : dim.glyph)
+                    }
+                }
+            }
+
+            Divider()
+
+            if !workspaceTabStore.savedSorts.isEmpty {
+                Menu {
+                    ForEach(workspaceTabStore.savedSorts) { preset in
+                        Button {
+                            workspaceTabStore.applySavedSort(id: preset.id)
+                        } label: {
+                            Label(preset.name, systemImage: "pin.fill")
+                        }
+                    }
+                } label: {
+                    Label(
+                        String(localized: "extensionColumn.sort.savedSorts", defaultValue: "Saved sorts"),
+                        systemImage: "pin"
+                    )
+                }
+
+                Divider()
+            }
+
+            Button {
+                // Defer to next runloop so the enclosing Menu dismisses
+                // before the popover tries to anchor; otherwise SwiftUI
+                // closes the popover with the menu.
+                DispatchQueue.main.async {
+                    quickPopoverOpen = true
+                }
+            } label: {
+                Label(
+                    String(localized: "extensionColumn.sort.quick.menuItem", defaultValue: "Quick…"),
+                    systemImage: "sparkles"
+                )
+            }
+        } label: {
+            sortMenuLabel
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .safeHelp(String(localized: "extensionColumn.sort.tooltip", defaultValue: "Sort dimension"))
+        .popover(isPresented: $quickPopoverOpen, arrowEdge: .bottom) {
+            ExtensionColumnSortQuickPopover(
+                workspaceTabStore: workspaceTabStore,
+                onClose: { quickPopoverOpen = false }
+            )
+        }
+    }
+
+    private var sortMenuLabel: some View {
+        let isGoalDriven = workspaceTabStore.selectedSort.isGoalDriven
+        let info = ExtensionColumnDimensions.info(for: sortKey)
+        let glyph = isGoalDriven ? "sparkles" : info.glyph
+        let label = isGoalDriven
+            ? String(localized: "extensionColumn.sort.quick.label", defaultValue: "Quick")
+            : info.label
+        return HStack(spacing: 4) {
+            Image(systemName: glyph)
+                .font(.system(size: 9, weight: .semibold))
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .lineLimit(1)
+                .frame(maxWidth: 84)
+            Image(systemName: "chevron.down")
+                .font(.system(size: 8, weight: .semibold))
+                .opacity(0.7)
+        }
+        .foregroundColor(.primary)
+        .padding(.horizontal, 7)
+        .frame(height: 20)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(Color.primary.opacity(0.07))
+        )
+    }
+
+    private func isActiveDimension(_ id: String) -> Bool {
+        let sort = workspaceTabStore.selectedSort
+        return sort.isDimension && sort.dimensionId == id
+    }
+
+    private func applyDimension(id: String) {
+        workspaceTabStore.setSort(.dimension(id: id))
     }
 
     private var refreshButton: some View {
@@ -18568,51 +18906,6 @@ struct ExtensionColumnOverlay: View {
         .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
     }
 
-    private var sortMenu: some View {
-        let dimensions = availableSortDimensions
-        let current = dimensions.first(where: { $0.id == sortKey }) ?? ExtensionColumnDimensions.info(for: sortKey)
-        return Menu {
-            ForEach(dimensions, id: \.id) { dim in
-                Button {
-                    workspaceTabStore.setSort(
-                        WorkspaceSidebarSummaryPrioritySort(
-                            mode: "dimension",
-                            dimensionId: dim.id,
-                            direction: "desc"
-                        )
-                    )
-                } label: {
-                    Label {
-                        Text(dim.label)
-                    } icon: {
-                        Image(systemName: dim.id == sortKey ? "checkmark" : dim.glyph)
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: current.glyph)
-                    .font(.system(size: 9, weight: .semibold))
-                Text(current.label)
-                    .font(.system(size: 10, weight: .medium))
-                    .lineLimit(1)
-                    .frame(maxWidth: 74)
-                Image(systemName: "chevron.up.chevron.down")
-                    .font(.system(size: 8, weight: .semibold))
-                    .opacity(0.6)
-            }
-            .foregroundColor(.primary)
-            .padding(.horizontal, 7)
-            .frame(height: 20)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color.primary.opacity(0.07))
-            )
-        }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
-        .safeHelp(String(localized: "extensionColumn.sort.tooltip", defaultValue: "Sort dimension"))
-    }
 }
 
 private struct ExtensionColumnDisabledPanel: View {
@@ -18628,6 +18921,7 @@ private struct ExtensionColumnConfigurationPanel: View {
     @ObservedObject var summaryProfileStore: WorkspaceSummaryProfileSettingsStore
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var legacyDigestClaudeModel = ""
+    @AppStorage("digest.provider") private var digestProvider = "heuristic"
     @State private var newSummaryDimensionId = ""
     @State private var newSummaryDimensionLabel = ""
 
@@ -18652,10 +18946,21 @@ private struct ExtensionColumnConfigurationPanel: View {
 
     private var workspaceDigestSection: some View {
         ExtensionConfigurationGroup(title: String(localized: "settings.section.digest", defaultValue: "Workspace Digest")) {
-            ExtensionConfigurationValueRow(
-                title: String(localized: "settings.digest.provider", defaultValue: "Provider"),
-                value: String(localized: "extensionColumn.configure.provider.claude", defaultValue: "Claude Code")
-            )
+            HStack(spacing: 8) {
+                Text(String(localized: "settings.digest.provider", defaultValue: "Provider"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                Spacer(minLength: 6)
+                Picker("", selection: digestProviderSelection) {
+                    ForEach(DigestProviderOption.allCases) { option in
+                        Text(option.label).tag(option.rawValue)
+                    }
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
+            }
 
             ExtensionConfigurationDivider()
 
@@ -18669,6 +18974,13 @@ private struct ExtensionColumnConfigurationPanel: View {
                     .frame(maxWidth: .infinity)
             }
         }
+    }
+
+    private var digestProviderSelection: Binding<String> {
+        Binding(
+            get: { DigestProviderOption.normalizedRawValue(digestProvider) },
+            set: { digestProvider = DigestProviderOption.normalizedRawValue($0) }
+        )
     }
 
     private var digestModelBinding: Binding<String> {

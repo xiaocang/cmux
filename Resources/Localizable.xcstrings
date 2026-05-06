@@ -104806,6 +104806,385 @@
           }
         }
       }
+    },
+    "sortPanel.apply": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apply Sort"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "並び替えを適用"
+          }
+        }
+      }
+    },
+    "sortPanel.custom.heading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sort by dimension"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次元で並び替え"
+          }
+        }
+      }
+    },
+    "sortPanel.custom.help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a dimension. Sorting applies live."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次元を選択してください。並び替えはリアルタイムで適用されます。"
+          }
+        }
+      }
+    },
+    "sortPanel.goal.chip.blocked": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Blocked first"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "阻害優先"
+          }
+        }
+      }
+    },
+    "sortPanel.goal.chip.release": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Release first"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リリース優先"
+          }
+        }
+      }
+    },
+    "sortPanel.goal.chip.today": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Today first"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "今日優先"
+          }
+        }
+      }
+    },
+    "sortPanel.goal.default": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Surface what is most worth advancing today"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "今日最も進めるべきことを優先"
+          }
+        }
+      }
+    },
+    "sortPanel.goal.heading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Goal"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "目標"
+          }
+        }
+      }
+    },
+    "sortPanel.goal.placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Describe what to prioritize…"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "優先する内容を説明…"
+          }
+        }
+      }
+    },
+    "sortPanel.goal.suggestion.blocked": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Surface workspaces that are stuck or blocked"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停滞または阻害されたワークスペースを表示"
+          }
+        }
+      }
+    },
+    "sortPanel.goal.suggestion.release": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prioritize anything blocking the next release"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次のリリースを妨げる項目を優先"
+          }
+        }
+      }
+    },
+    "sortPanel.goal.suggestion.today": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Surface what is most worth advancing today"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "今日最も進めるべきことを優先"
+          }
+        }
+      }
+    },
+    "sortPanel.mode.custom": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Custom"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "カスタム"
+          }
+        }
+      }
+    },
+    "sortPanel.mode.quick": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quick"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "クイック"
+          }
+        }
+      }
+    },
+    "sortPanel.preview.empty": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No workspaces to rank yet."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "まだランク付けするワークスペースがありません。"
+          }
+        }
+      }
+    },
+    "sortPanel.preview.heading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preview"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プレビュー"
+          }
+        }
+      }
+    },
+    "sortPanel.toggle.tooltip": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open sort panel"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "並び替えパネルを開く"
+          }
+        }
+      }
+    },
+    "extensionColumn.sort.quick.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Quick" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "クイック" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "快速" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "快速" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "빠른" } }
+      }
+    },
+    "extensionColumn.sort.quick.menuItem": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Quick…" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "クイック…" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "快速…" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "快速…" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "빠른…" } }
+      }
+    },
+    "extensionColumn.sort.quick.save": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Save…" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "保存…" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "保存…" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "儲存…" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "저장…" } }
+      }
+    },
+    "extensionColumn.sort.quick.save.cancel": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cancel" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "キャンセル" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "取消" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "取消" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "취소" } }
+      }
+    },
+    "extensionColumn.sort.quick.save.confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Save" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "保存" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "保存" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "儲存" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "저장" } }
+      }
+    },
+    "extensionColumn.sort.quick.save.namePlaceholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Name this sort" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "この並びに名前を付ける" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "命名此排序" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "命名此排序" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "이 정렬에 이름 붙이기" } }
+      }
+    },
+    "extensionColumn.sort.savedSorts": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Saved sorts" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "保存した並び" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已保存的排序" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "已儲存的排序" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "저장된 정렬" } }
+      }
+    },
+    "extensionColumn.configure.provider.heuristic": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Heuristic" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ヒューリスティック" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "启发式" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "啟發式" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "휴리스틱" } }
+      }
+    },
+    "extensionColumn.configure.provider.openai": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "OpenAI" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "OpenAI" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "OpenAI" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "OpenAI" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "OpenAI" } }
+      }
     }
   }
 }
