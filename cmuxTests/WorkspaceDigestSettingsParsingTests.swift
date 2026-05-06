@@ -30,6 +30,10 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         "digest.includeDiffStat",
         "digest.sendFullDiffToLLM",
         "digest.writeSidebarMetadata",
+        "digest.ghpr.enabled",
+        "digest.ghpr.socketPath",
+        "digest.ghpr.displayItems",
+        "digest.ghpr.jiraBaseURL",
         "workspaceTab.displayMode",
         "workspaceTab.summaryPriority.enabled",
         "workspaceTab.summaryPriority.sortMode",
@@ -69,7 +73,13 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
             "screenLines": 200,
             "includeDiffStat": false,
             "sendFullDiffToLLM": true,
-            "writeSidebarMetadata": false
+            "writeSidebarMetadata": false,
+            "ghpr": {
+              "enabled": true,
+              "socketPath": "/tmp/custom-ghpr.sock",
+              "displayItems": ["ci", "review", "jira"],
+              "jiraBaseURL": "https://jira.example.com"
+            }
           }
         }
         """
@@ -93,6 +103,10 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.includeDiffStat"), false)
         XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.sendFullDiffToLLM"), true)
         XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.writeSidebarMetadata"), false)
+        XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.ghpr.enabled"), true)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.ghpr.socketPath"), "/tmp/custom-ghpr.sock")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.ghpr.displayItems"), "ci, review, jira")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.ghpr.jiraBaseURL"), "https://jira.example.com")
     }
 
     func testInvalidScreenLinesDoesNotDropLaterBooleans() throws {

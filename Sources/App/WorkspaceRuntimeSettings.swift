@@ -109,6 +109,25 @@ enum TerminalScrollBarSettings {
     }
 }
 
+enum DigestGHPRIntegrationSettings {
+    static let enabledKey = "digest.ghpr.enabled"
+    static let socketPathKey = "digest.ghpr.socketPath"
+    static let displayItemsKey = "digest.ghpr.displayItems"
+    static let jiraBaseURLKey = "digest.ghpr.jiraBaseURL"
+
+    static let defaultEnabled = false
+    static let defaultDisplayItems = ["ci", "review", "unresolved", "jira"]
+    static let defaultJiraBaseURL = ""
+
+    static var defaultSocketPath: String {
+        "/tmp/com.xiaocang.PRDashboard.\(getuid()).sock"
+    }
+
+    static var defaultDisplayItemsText: String {
+        defaultDisplayItems.joined(separator: ", ")
+    }
+}
+
 enum UITestLaunchManifest {
     static let argumentName = "-cmuxUITestLaunchManifest"
 

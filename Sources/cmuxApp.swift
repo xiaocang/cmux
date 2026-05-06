@@ -45,6 +45,12 @@ final class CmuxDigestDaemonSupervisor {
         startIfNeeded()
     }
 
+    func restartIfRunning() {
+        guard process?.isRunning == true else { return }
+        stop()
+        startIfNeeded()
+    }
+
     private func startIfNeeded() {
         guard process?.isRunning != true else { return }
         guard let resources = Bundle.main.resourceURL else { return }
@@ -149,6 +155,24 @@ final class CmuxDigestDaemonSupervisor {
 
         let writeSidebar = (defaults.object(forKey: "digest.writeSidebarMetadata") as? Bool) ?? digestEnabled
         environment["CMUX_DIGEST_WRITE_SIDEBAR"] = digestEnabled && writeSidebar ? "1" : "0"
+
+        let ghprEnabled = (defaults.object(forKey: DigestGHPRIntegrationSettings.enabledKey) as? Bool)
+            ?? DigestGHPRIntegrationSettings.defaultEnabled
+        environment["CMUX_DIGEST_GHPR_ENABLED"] = ghprEnabled ? "1" : "0"
+        let ghprSocketPath = defaults.string(forKey: DigestGHPRIntegrationSettings.socketPathKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let ghprSocketPath, !ghprSocketPath.isEmpty {
+            environment["CMUX_DIGEST_GHPR_SOCKET_PATH"] = ghprSocketPath
+        } else {
+            environment["CMUX_DIGEST_GHPR_SOCKET_PATH"] = DigestGHPRIntegrationSettings.defaultSocketPath
+        }
+        environment["CMUX_DIGEST_GHPR_DISPLAY_ITEMS"] = defaults.string(
+            forKey: DigestGHPRIntegrationSettings.displayItemsKey
+        ) ?? DigestGHPRIntegrationSettings.defaultDisplayItemsText
+        if let jiraBaseURL = defaults.string(forKey: DigestGHPRIntegrationSettings.jiraBaseURLKey),
+           !jiraBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            environment["CMUX_DIGEST_GHPR_JIRA_BASE_URL"] = jiraBaseURL
+        }
     }
 
 #if DEBUG
@@ -5894,6 +5918,14 @@ struct SettingsView: View {
     @AppStorage("digest.sendFullDiffToLLM") private var digestSendFullDiffToLLM = false
     @AppStorage("digest.writeSidebarMetadata") private var digestWriteSidebarMetadata = true
     @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
+    @AppStorage(DigestGHPRIntegrationSettings.enabledKey)
+    private var digestGHPRIntegrationEnabled = DigestGHPRIntegrationSettings.defaultEnabled
+    @AppStorage(DigestGHPRIntegrationSettings.socketPathKey)
+    private var digestGHPRSocketPath = DigestGHPRIntegrationSettings.defaultSocketPath
+    @AppStorage(DigestGHPRIntegrationSettings.displayItemsKey)
+    private var digestGHPRDisplayItems = DigestGHPRIntegrationSettings.defaultDisplayItemsText
+    @AppStorage(DigestGHPRIntegrationSettings.jiraBaseURLKey)
+    private var digestGHPRJiraBaseURL = DigestGHPRIntegrationSettings.defaultJiraBaseURL
     @AppStorage("sidebarTintHex") private var sidebarTintHex = SidebarTintDefaults.hex
     @AppStorage("sidebarTintHexLight") private var sidebarTintHexLight: String?
     @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
@@ -7374,6 +7406,60 @@ struct SettingsView: View {
                                 .labelsHidden()
                                 .controlSize(.small)
                         }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.ghpr.enabled"),
+                            String(localized: "settings.digest.ghpr.enabled", defaultValue: "Enable ghpr Integration"),
+                            subtitle: String(localized: "settings.digest.ghpr.enabled.subtitle", defaultValue: "Read PRDashboard's local socket for read-only PR context and feed it into Workspace Digest.")
+                        ) {
+                            Toggle("", isOn: $digestGHPRIntegrationEnabled)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.ghpr.socketPath"),
+                            String(localized: "settings.digest.ghpr.socketPath", defaultValue: "ghpr Socket Path"),
+                            subtitle: String(localized: "settings.digest.ghpr.socketPath.subtitle", defaultValue: "Unix socket used by PRDashboard. Leave the default unless you run a custom socket.")
+                        ) {
+                            TextField(DigestGHPRIntegrationSettings.defaultSocketPath, text: $digestGHPRSocketPath)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 260)
+                        }
+                        .disabled(!digestGHPRIntegrationEnabled)
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.ghpr.displayItems"),
+                            String(localized: "settings.digest.ghpr.displayItems", defaultValue: "ghpr Display Items"),
+                            subtitle: String(localized: "settings.digest.ghpr.displayItems.subtitle", defaultValue: "Comma-separated sidebar items, such as ci, review, unresolved, jira, title, draft, conflicts.")
+                        ) {
+                            TextField(DigestGHPRIntegrationSettings.defaultDisplayItemsText, text: $digestGHPRDisplayItems)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 220)
+                        }
+                        .disabled(!digestGHPRIntegrationEnabled)
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.ghpr.jiraBaseURL"),
+                            String(localized: "settings.digest.ghpr.jiraBaseURL", defaultValue: "Jira Base URL"),
+                            subtitle: String(localized: "settings.digest.ghpr.jiraBaseURL.subtitle", defaultValue: "Optional Jira base, for example https://jira.example.com. Use {ticket} for custom URL templates.")
+                        ) {
+                            TextField(
+                                String(localized: "settings.digest.ghpr.jiraBaseURL.placeholder", defaultValue: "https://jira.example.com"),
+                                text: $digestGHPRJiraBaseURL
+                            )
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 260)
+                        }
+                        .disabled(!digestGHPRIntegrationEnabled)
                     }
 
                     SettingsSectionHeader(title: String(localized: "settings.section.automation", defaultValue: "Automation"))
@@ -8035,6 +8121,9 @@ struct SettingsView: View {
             guard newValue <= 0 else { return }
             sidebarPullRequestShellDebounceDelaySeconds = SidebarPullRequestShellDebounceSettings.defaultDelaySeconds
         }
+        .onChange(of: digestGHPRIntegrationEnabled) { _, _ in
+            CmuxDigestDaemonSupervisor.shared.restartIfRunning()
+        }
         .onChange(of: browserInsecureHTTPAllowlist) { oldValue, newValue in
             // Keep draft in sync with external changes unless the user has local unsaved edits.
             if browserInsecureHTTPAllowlistDraft == oldValue {
@@ -8218,6 +8307,10 @@ struct SettingsView: View {
         digestSendFullDiffToLLM = false
         digestWriteSidebarMetadata = true
         summaryPriorityEnabled = true
+        digestGHPRIntegrationEnabled = DigestGHPRIntegrationSettings.defaultEnabled
+        digestGHPRSocketPath = DigestGHPRIntegrationSettings.defaultSocketPath
+        digestGHPRDisplayItems = DigestGHPRIntegrationSettings.defaultDisplayItemsText
+        digestGHPRJiraBaseURL = DigestGHPRIntegrationSettings.defaultJiraBaseURL
         summaryProfileStore.resetToDefaults()
         newSummaryDimensionId = ""
         newSummaryDimensionLabel = ""

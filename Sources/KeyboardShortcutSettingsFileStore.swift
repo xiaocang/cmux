@@ -93,6 +93,10 @@ final class CmuxSettingsFileStore {
         "digest.sendFullDiffToLLM",
         "digest.writeSidebarMetadata",
         "digest.maxConcurrentLLM",
+        "digest.ghpr.enabled",
+        "digest.ghpr.socketPath",
+        "digest.ghpr.displayItems",
+        "digest.ghpr.jiraBaseURL",
         "workspaceTab.displayMode",
         "workspaceTab.summaryPriority.enabled",
         "workspaceTab.summaryPriority.sortMode",
@@ -826,6 +830,35 @@ final class CmuxSettingsFileStore {
                 logInvalid("digest.maxConcurrentLLM", sourcePath: sourcePath)
             }
         }
+        if let ghprSection = section["ghpr"] as? [String: Any] {
+            parseDigestGHPRSection(ghprSection, sourcePath: sourcePath, snapshot: &snapshot)
+        }
+    }
+
+    private func parseDigestGHPRSection(
+        _ section: [String: Any],
+        sourcePath: String,
+        snapshot: inout ResolvedSettingsSnapshot
+    ) {
+        if let value = jsonBool(section["enabled"]) {
+            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.enabledKey] = .bool(value)
+        }
+        if let raw = jsonString(section["socketPath"]) {
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.socketPathKey] = .string(
+                value.isEmpty ? DigestGHPRIntegrationSettings.defaultSocketPath : value
+            )
+        }
+        if let values = jsonStringArray(section["displayItems"]) {
+            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.displayItemsKey] = .string(
+                values.joined(separator: ", ")
+            )
+        } else if section.keys.contains("displayItems") {
+            logInvalid("digest.ghpr.displayItems", sourcePath: sourcePath)
+        }
+        if let raw = jsonString(section["jiraBaseURL"]) {
+            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.jiraBaseURLKey] = .string(raw)
+        }
     }
 
     private func parseWorkspaceTabSection(
@@ -1442,6 +1475,12 @@ final class CmuxSettingsFileStore {
             [
                 "digest": [
                     "enabled": false,
+                    "ghpr": [
+                        "enabled": DigestGHPRIntegrationSettings.defaultEnabled,
+                        "socketPath": DigestGHPRIntegrationSettings.defaultSocketPath,
+                        "displayItems": DigestGHPRIntegrationSettings.defaultDisplayItems,
+                        "jiraBaseURL": DigestGHPRIntegrationSettings.defaultJiraBaseURL,
+                    ],
                 ],
             ],
             [

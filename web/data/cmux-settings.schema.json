@@ -432,6 +432,117 @@
         }
       }
     },
+    "digest": {
+      "title": "digest",
+      "description": "Workspace Digest settings from Settings > Workspace Digest.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow cmux-digest to summarize workspace state for sidebar and Radar views."
+        },
+        "daemonEnabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Run the local cmux-digest daemon for Summary workspace mode."
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["heuristic", "claude-code", "openai"],
+          "default": "heuristic",
+          "description": "Digest summarization provider."
+        },
+        "model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model name for provider-backed summaries."
+        },
+        "claudeCodeModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Claude Code model when provider is claude-code."
+        },
+        "currentWorkspaceMinIntervalSec": {
+          "type": "integer",
+          "minimum": 10,
+          "default": 45,
+          "description": "Minimum seconds between current workspace digest refreshes."
+        },
+        "backgroundMinIntervalSec": {
+          "type": "integer",
+          "minimum": 30,
+          "default": 300,
+          "description": "Minimum seconds between background workspace digest refreshes."
+        },
+        "screenLines": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 1000,
+          "default": 160,
+          "description": "Number of recent terminal lines read per surface."
+        },
+        "includeDiffStat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include git diff statistics as trusted local context."
+        },
+        "sendFullDiffToLLM": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send the full git diff to provider-backed summaries."
+        },
+        "writeSidebarMetadata": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let cmux-digest publish topic and summary through sidebar metadata."
+        },
+        "ghpr": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Optional PRDashboard socket integration for read-only PR context.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Read PRDashboard's local socket for the workspace pull request and feed the context into Workspace Digest."
+            },
+            "socketPath": {
+              "type": "string",
+              "default": "",
+              "description": "Unix socket path for PRDashboard. Leave empty to use /tmp/com.xiaocang.PRDashboard.<uid>.sock."
+            },
+            "displayItems": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "pr",
+                  "title",
+                  "ci",
+                  "review",
+                  "unresolved",
+                  "jira",
+                  "draft",
+                  "conflicts",
+                  "updated",
+                  "author",
+                  "pinned"
+                ]
+              },
+              "default": ["ci", "review", "unresolved", "jira"],
+              "description": "Sidebar metadata items to show for the linked PR."
+            },
+            "jiraBaseURL": {
+              "type": "string",
+              "default": "",
+              "description": "Optional Jira base URL for clickable tickets. Use {ticket} for custom URL templates."
+            }
+          }
+        }
+      }
+    },
     "browser": {
       "title": "browser",
       "description": "Embedded browser settings from Settings > Browser.",
