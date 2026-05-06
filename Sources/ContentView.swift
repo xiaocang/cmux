@@ -18136,26 +18136,34 @@ private struct ExtensionColumnDimensionInfo {
 }
 
 private enum ExtensionColumnDimensions {
-    static let all: [ExtensionColumnDimensionInfo] = [
-        ExtensionColumnDimensionInfo(
-            id: "urgency",
-            label: String(localized: "extensionColumn.sort.urgency", defaultValue: "Urgency"),
-            glyph: "bolt.fill"
-        ),
-        ExtensionColumnDimensionInfo(
-            id: "importance",
-            label: String(localized: "extensionColumn.sort.importance", defaultValue: "Importance"),
-            glyph: "star.fill"
-        ),
-        ExtensionColumnDimensionInfo(
-            id: "progress",
-            label: String(localized: "extensionColumn.sort.progress", defaultValue: "Progress"),
-            glyph: "circle.lefthalf.filled"
-        )
-    ]
-
-    static func info(for id: String) -> ExtensionColumnDimensionInfo {
-        all.first(where: { $0.id == id }) ?? all[0]
+    static func info(for id: String, fallbackLabel: String? = nil) -> ExtensionColumnDimensionInfo {
+        switch id {
+        case "urgency":
+            return ExtensionColumnDimensionInfo(
+                id: id,
+                label: String(localized: "extensionColumn.sort.urgency", defaultValue: "Urgency"),
+                glyph: "bolt.fill"
+            )
+        case "importance":
+            return ExtensionColumnDimensionInfo(
+                id: id,
+                label: String(localized: "extensionColumn.sort.importance", defaultValue: "Importance"),
+                glyph: "star.fill"
+            )
+        case "progress":
+            return ExtensionColumnDimensionInfo(
+                id: id,
+                label: String(localized: "extensionColumn.sort.progress", defaultValue: "Progress"),
+                glyph: "circle.lefthalf.filled"
+            )
+        default:
+            let label = fallbackLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return ExtensionColumnDimensionInfo(
+                id: id,
+                label: label.isEmpty ? id : label,
+                glyph: "slider.horizontal.3"
+            )
+        }
     }
 }
 
@@ -18246,6 +18254,9 @@ struct ExtensionColumnOverlay: View {
     @ObservedObject var workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
     @EnvironmentObject var tabManager: TabManager
     @Environment(\.colorScheme) private var colorScheme
+    @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
+    @StateObject private var summaryProfileStore = WorkspaceSummaryProfileSettingsStore()
+    @State private var isConfiguring = false
     let isOpen: Bool
     let containerHeight: CGFloat
     let topInset: CGFloat
@@ -18274,9 +18285,16 @@ struct ExtensionColumnOverlay: View {
     private var sortKey: String {
         let raw = workspaceTabStore.selectedSort.dimensionId
         let resolved = raw.flatMap { id -> String? in
-            ExtensionColumnSettings.dimensions.contains(id) ? id : nil
+            availableSortDimensions.contains(where: { $0.id == id }) ? id : nil
         }
-        return resolved ?? "urgency"
+        return resolved ?? availableSortDimensions.first?.id ?? "urgency"
+    }
+
+    private var availableSortDimensions: [ExtensionColumnDimensionInfo] {
+        let dimensions = workspaceTabStore.summaryPriority?.dimensions ?? WorkspaceSidebarDimensionDefinition.builtinDefaults
+        let visible = dimensions.filter { $0.enabled && $0.visible }
+        let source = visible.isEmpty ? WorkspaceSidebarDimensionDefinition.builtinDefaults : visible
+        return source.map { ExtensionColumnDimensions.info(for: $0.id, fallbackLabel: $0.label) }
     }
 
     private func refreshSingle(workspace: Workspace) {
@@ -18309,7 +18327,8 @@ struct ExtensionColumnOverlay: View {
                 .clipped()
                 .animation(.spring(response: 0.36, dampingFraction: 0.86), value: isOpen)
 
-            if isOpen, let hoveredId = workspaceSidebarLayoutMetricsStore.hoveredWorkspaceId,
+            if isOpen, !isConfiguring, summaryPriorityEnabled,
+               let hoveredId = workspaceSidebarLayoutMetricsStore.hoveredWorkspaceId,
                let row = rows.first(where: { $0.tabId == hoveredId }),
                let rowFrame = workspaceSidebarLayoutMetricsStore.rowFrame(for: hoveredId) {
                 HStack(spacing: 0) {
@@ -18338,14 +18357,29 @@ struct ExtensionColumnOverlay: View {
         )
         .allowsHitTesting(isOpen)
         .onAppear {
-            workspaceTabStore.extensionDidOpen(tabs: tabManager.tabs)
+            if summaryPriorityEnabled {
+                workspaceTabStore.extensionDidOpen(tabs: tabManager.tabs)
+            }
         }
         .onChange(of: tabManager.tabs.map(\.id)) { _ in
-            workspaceTabStore.extensionTabsDidChange(tabs: tabManager.tabs)
+            if summaryPriorityEnabled {
+                workspaceTabStore.extensionTabsDidChange(tabs: tabManager.tabs)
+            }
         }
         .onChange(of: isOpen) { isOpen in
             if !isOpen {
                 workspaceSidebarLayoutMetricsStore.clearHoveredWorkspaceId()
+            }
+        }
+        .onChange(of: isConfiguring) { isConfiguring in
+            if isConfiguring {
+                workspaceSidebarLayoutMetricsStore.clearHoveredWorkspaceId()
+            }
+        }
+        .onChange(of: summaryPriorityEnabled) { enabled in
+            workspaceSidebarLayoutMetricsStore.clearHoveredWorkspaceId()
+            if enabled {
+                workspaceTabStore.extensionDidOpen(tabs: tabManager.tabs)
             }
         }
         .onDisappear {
@@ -18385,10 +18419,23 @@ struct ExtensionColumnOverlay: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
 
+                if isConfiguring {
+                    ExtensionColumnConfigurationPanel(
+                        summaryProfileStore: summaryProfileStore,
+                        availableHeight: max(0, containerHeight - topInset - 30)
+                    )
+                } else if !summaryPriorityEnabled {
+                    ExtensionColumnDisabledPanel()
+                        .padding(.horizontal, 10)
+                        .padding(.top, 16)
+                }
+
                 Spacer(minLength: 0)
             }
 
-            rowsLayer(rows: rows)
+            if !isConfiguring && summaryPriorityEnabled {
+                rowsLayer(rows: rows)
+            }
         }
         .frame(width: ExtensionColumnSettings.columnWidth, alignment: .topLeading)
         .frame(height: containerHeight, alignment: .topLeading)
@@ -18450,15 +18497,16 @@ struct ExtensionColumnOverlay: View {
 
     private var extensionHeader: some View {
         HStack(spacing: 6) {
-            Text(String(localized: "extensionColumn.header.title", defaultValue: "Extension"))
+            Text(isConfiguring
+                 ? String(localized: "extensionColumn.configure.title", defaultValue: "Configure")
+                 : String(localized: "extensionColumn.header.title", defaultValue: "Extension"))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
             Spacer(minLength: 0)
-            Text(String(localized: "sidebar.workspaceSummary.sort.label", defaultValue: "Sort"))
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.secondary)
-            sortMenu
-            refreshButton
+            if !isConfiguring {
+                sortMenu
+                refreshButton
+            }
             Button(action: onClose) {
                 Image(systemName: "chevron.left")
                     .font(.system(size: 10, weight: .semibold))
@@ -18471,7 +18519,28 @@ struct ExtensionColumnOverlay: View {
             }
             .buttonStyle(.plain)
             .safeHelp(String(localized: "extensionColumn.toggle.tooltip", defaultValue: "Hide extension column"))
+            configureButton
         }
+    }
+
+    private var configureButton: some View {
+        Button {
+            isConfiguring.toggle()
+        } label: {
+            Text(isConfiguring ? "🔙" : "⚙️")
+                .font(.system(size: 12))
+                .frame(width: 20, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(0.07))
+                )
+        }
+        .buttonStyle(.plain)
+        .safeHelp(
+            isConfiguring
+                ? String(localized: "extensionColumn.configure.back.tooltip", defaultValue: "Back to summaries")
+                : String(localized: "extensionColumn.configure.tooltip", defaultValue: "Configure extension")
+        )
     }
 
     private var refreshButton: some View {
@@ -18495,14 +18564,15 @@ struct ExtensionColumnOverlay: View {
             )
         }
         .buttonStyle(.plain)
-        .disabled(workspaceTabStore.isLoading)
+        .disabled(workspaceTabStore.isLoading || !summaryPriorityEnabled)
         .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
     }
 
     private var sortMenu: some View {
-        let current = ExtensionColumnDimensions.info(for: sortKey)
+        let dimensions = availableSortDimensions
+        let current = dimensions.first(where: { $0.id == sortKey }) ?? ExtensionColumnDimensions.info(for: sortKey)
         return Menu {
-            ForEach(ExtensionColumnDimensions.all, id: \.id) { dim in
+            ForEach(dimensions, id: \.id) { dim in
                 Button {
                     workspaceTabStore.setSort(
                         WorkspaceSidebarSummaryPrioritySort(
@@ -18525,6 +18595,8 @@ struct ExtensionColumnOverlay: View {
                     .font(.system(size: 9, weight: .semibold))
                 Text(current.label)
                     .font(.system(size: 10, weight: .medium))
+                    .lineLimit(1)
+                    .frame(maxWidth: 74)
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 8, weight: .semibold))
                     .opacity(0.6)
@@ -18540,6 +18612,334 @@ struct ExtensionColumnOverlay: View {
         .menuStyle(.borderlessButton)
         .fixedSize()
         .safeHelp(String(localized: "extensionColumn.sort.tooltip", defaultValue: "Sort dimension"))
+    }
+}
+
+private struct ExtensionColumnDisabledPanel: View {
+    var body: some View {
+        Text(String(localized: "extensionColumn.summary.disabled", defaultValue: "Summary Priority is disabled in Settings."))
+            .font(.system(size: 11, weight: .medium))
+            .foregroundColor(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ExtensionColumnConfigurationPanel: View {
+    @ObservedObject var summaryProfileStore: WorkspaceSummaryProfileSettingsStore
+    @AppStorage("digest.model") private var digestModel = ""
+    @AppStorage("digest.claudeCodeModel") private var legacyDigestClaudeModel = ""
+    @State private var newSummaryDimensionId = ""
+    @State private var newSummaryDimensionLabel = ""
+
+    let availableHeight: CGFloat
+
+    private var canAddSummaryDimension: Bool {
+        summaryProfileStore.canAddDimension(id: newSummaryDimensionId)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                workspaceDigestSection
+                summaryPrioritySection
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+        }
+        .frame(width: ExtensionColumnSettings.columnWidth, height: availableHeight, alignment: .top)
+        .modifier(ClearScrollBackground())
+    }
+
+    private var workspaceDigestSection: some View {
+        ExtensionConfigurationGroup(title: String(localized: "settings.section.digest", defaultValue: "Workspace Digest")) {
+            ExtensionConfigurationValueRow(
+                title: String(localized: "settings.digest.provider", defaultValue: "Provider"),
+                value: String(localized: "extensionColumn.configure.provider.claude", defaultValue: "Claude Code")
+            )
+
+            ExtensionConfigurationDivider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(String(localized: "settings.digest.model", defaultValue: "Model"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.secondary)
+                TextField("haiku", text: digestModelBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    private var digestModelBinding: Binding<String> {
+        Binding(
+            get: {
+                let model = digestModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !model.isEmpty {
+                    return digestModel
+                }
+                return legacyDigestClaudeModel
+            },
+            set: { newValue in
+                digestModel = newValue
+                legacyDigestClaudeModel = ""
+            }
+        )
+    }
+
+    private var summaryPrioritySection: some View {
+        ExtensionConfigurationGroup(title: String(localized: "settings.section.summaryPriority", defaultValue: "Summary Priority")) {
+            ForEach(Array(summaryProfileStore.profile.dimensions.enumerated()), id: \.element.id) { index, dimension in
+                if index > 0 {
+                    ExtensionConfigurationDivider()
+                }
+                ExtensionSummaryDimensionConfigurationRow(
+                    dimension: dimension,
+                    selected: summaryDimensionSelectedBinding(for: dimension.id),
+                    label: summaryDimensionLabelBinding(for: dimension.id),
+                    onRemove: {
+                        summaryProfileStore.removeDimension(id: dimension.id)
+                    }
+                )
+            }
+
+            ExtensionConfigurationDivider()
+
+            ExtensionSummaryAddDimensionRow(
+                id: $newSummaryDimensionId,
+                label: $newSummaryDimensionLabel,
+                canAdd: canAddSummaryDimension,
+                onAdd: addSummaryDimension
+            )
+
+            ExtensionConfigurationDivider()
+
+            HStack(spacing: 8) {
+                Button(String(localized: "settings.summaryPriority.resetDimensions.button", defaultValue: "Reset")) {
+                    summaryProfileStore.resetToDefaults()
+                    newSummaryDimensionId = ""
+                    newSummaryDimensionLabel = ""
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+
+                if let statusText = summaryProfileStatusText {
+                    Text(statusText)
+                        .font(.system(size: 10))
+                        .foregroundColor(summaryProfileStatusIsError ? .red : .secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private func summaryDimensionSelectedBinding(for id: String) -> Binding<Bool> {
+        Binding(
+            get: {
+                guard let dimension = summaryProfileStore.profile.dimensions.first(where: { $0.id == id }) else {
+                    return false
+                }
+                return dimension.enabled && dimension.visible
+            },
+            set: { newValue in
+                summaryProfileStore.updateDimension(id: id, enabled: newValue, visible: newValue)
+            }
+        )
+    }
+
+    private func summaryDimensionLabelBinding(for id: String) -> Binding<String> {
+        Binding(
+            get: {
+                summaryProfileStore.profile.dimensions.first(where: { $0.id == id })?.label ?? ""
+            },
+            set: { newValue in
+                summaryProfileStore.updateDimension(id: id, label: newValue)
+            }
+        )
+    }
+
+    private func addSummaryDimension() {
+        let added = summaryProfileStore.addDimension(
+            id: newSummaryDimensionId,
+            label: newSummaryDimensionLabel
+        )
+        guard added else { return }
+        newSummaryDimensionId = ""
+        newSummaryDimensionLabel = ""
+    }
+
+    private var summaryProfileStatusText: String? {
+        guard let status = summaryProfileStore.status else { return nil }
+        switch status {
+        case .saved:
+            return String(localized: "settings.summaryPriority.status.saved", defaultValue: "Saved. Refresh Summary to use the updated dimensions.")
+        case .reset:
+            return String(localized: "settings.summaryPriority.status.reset", defaultValue: "Restored the built-in dimensions.")
+        case .invalidId:
+            return String(localized: "settings.summaryPriority.status.invalidId", defaultValue: "Dimension ID must start with a letter or underscore and use only letters, numbers, underscores, or hyphens.")
+        case .duplicateId:
+            return String(localized: "settings.summaryPriority.status.duplicateId", defaultValue: "A dimension with this ID already exists.")
+        case .saveFailed(let message):
+            return String(localized: "settings.summaryPriority.status.saveFailed", defaultValue: "Could not save dimensions: ") + message
+        case .loadFailed(let message):
+            return String(localized: "settings.summaryPriority.status.loadFailed", defaultValue: "Could not load dimensions: ") + message
+        }
+    }
+
+    private var summaryProfileStatusIsError: Bool {
+        switch summaryProfileStore.status {
+        case .invalidId, .duplicateId, .saveFailed, .loadFailed:
+            return true
+        case .saved, .reset, .none:
+            return false
+        }
+    }
+}
+
+private struct ExtensionConfigurationGroup<Content: View>: View {
+    let title: String
+    let content: Content
+
+    init(title: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                content
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(Color.primary.opacity(0.055))
+            )
+        }
+    }
+}
+
+private struct ExtensionConfigurationDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.primary.opacity(0.10))
+            .frame(height: 1)
+    }
+}
+
+private struct ExtensionConfigurationValueRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+            Spacer(minLength: 6)
+            Text(value)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(.primary.opacity(0.86))
+                .lineLimit(1)
+        }
+    }
+}
+
+private struct ExtensionSummaryDimensionConfigurationRow: View {
+    let dimension: WorkspaceSummarySettingsDimension
+    @Binding var selected: Bool
+    @Binding var label: String
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Toggle("", isOn: $selected)
+                .toggleStyle(.checkbox)
+                .labelsHidden()
+                .controlSize(.small)
+
+            if dimension.builtin {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(dimension.displayLabel)
+                        .font(.system(size: 11, weight: .medium))
+                        .lineLimit(1)
+                    Text(String(localized: "settings.summaryPriority.dimension.builtin", defaultValue: "Built-in"))
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                TextField(
+                    String(localized: "settings.summaryPriority.dimension.label.placeholder", defaultValue: "Label"),
+                    text: $label
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+                .frame(maxWidth: .infinity)
+
+                Button(action: onRemove) {
+                    Image(systemName: "minus.circle")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .help(String(localized: "settings.summaryPriority.dimension.remove.help", defaultValue: "Remove dimension"))
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct ExtensionSummaryAddDimensionRow: View {
+    @Binding var id: String
+    @Binding var label: String
+    let canAdd: Bool
+    let onAdd: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(String(localized: "settings.summaryPriority.addDimension", defaultValue: "Add Dimension"))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 6) {
+                TextField(
+                    String(localized: "settings.summaryPriority.dimension.id.placeholder", defaultValue: "id"),
+                    text: $id
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11, design: .monospaced))
+                .frame(width: 62)
+                .onSubmit {
+                    if canAdd { onAdd() }
+                }
+
+                TextField(
+                    String(localized: "settings.summaryPriority.dimension.label.placeholder", defaultValue: "Label"),
+                    text: $label
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 11))
+                .frame(maxWidth: .infinity)
+                .onSubmit {
+                    if canAdd { onAdd() }
+                }
+
+                Button(action: onAdd) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .disabled(!canAdd)
+                .help(String(localized: "settings.summaryPriority.dimension.add.help", defaultValue: "Add summary dimension"))
+            }
+        }
     }
 }
 

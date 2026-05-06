@@ -23,6 +23,7 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         "digest.daemonEnabled",
         "digest.provider",
         "digest.model",
+        "digest.claudeCodeModel",
         "digest.currentWorkspaceMinIntervalSec",
         "digest.backgroundMinIntervalSec",
         "digest.screenLines",
@@ -30,6 +31,7 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         "digest.sendFullDiffToLLM",
         "digest.writeSidebarMetadata",
         "workspaceTab.displayMode",
+        "workspaceTab.summaryPriority.enabled",
         "workspaceTab.summaryPriority.sortMode",
         "workspaceTab.summaryPriority.sortDimensionId",
         "workspaceTab.summaryPriority.sortDirection",
@@ -191,6 +193,7 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
             "daemonEnabled": true,
             "provider": "openai",
             "model": "gpt-test",
+            "claudeCodeModel": "haiku-test",
             "currentWorkspaceMinIntervalSec": 60,
             "backgroundMinIntervalSec": 360,
             "screenLines": 120,
@@ -212,12 +215,37 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.daemonEnabled"), true)
         XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.provider"), "openai")
         XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.model"), "gpt-test")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.claudeCodeModel"), "haiku-test")
         XCTAssertEqual(UserDefaults.standard.integer(forKey: "digest.currentWorkspaceMinIntervalSec"), 60)
         XCTAssertEqual(UserDefaults.standard.integer(forKey: "digest.backgroundMinIntervalSec"), 360)
         XCTAssertEqual(UserDefaults.standard.integer(forKey: "digest.screenLines"), 120)
         XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.includeDiffStat"), false)
         XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.sendFullDiffToLLM"), true)
         XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.writeSidebarMetadata"), false)
+    }
+
+    func testSummaryPriorityEnabledAppliesWithoutDefaultSort() throws {
+        let json = """
+        {
+          "workspaceTab": {
+            "summaryPriority": {
+              "enabled": false
+            }
+          }
+        }
+        """
+        try writeSettings(json)
+
+        _ = CmuxSettingsFileStore(
+            primaryPath: primaryPath,
+            fallbackPath: nil,
+            startWatching: false
+        )
+
+        XCTAssertEqual(UserDefaults.standard.object(forKey: "workspaceTab.summaryPriority.enabled") as? Bool, false)
+        XCTAssertNil(UserDefaults.standard.object(forKey: "workspaceTab.summaryPriority.sortMode"))
+        XCTAssertNil(UserDefaults.standard.object(forKey: "workspaceTab.summaryPriority.sortDimensionId"))
+        XCTAssertNil(UserDefaults.standard.object(forKey: "workspaceTab.summaryPriority.sortDirection"))
     }
 
     private func writeSettings(_ json: String) throws {

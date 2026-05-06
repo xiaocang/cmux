@@ -36,6 +36,15 @@ final class CmuxDigestDaemonSupervisor {
         }
     }
 
+    func reload(enabled: Bool) {
+        guard enabled else {
+            stop()
+            return
+        }
+        stop(waitUntilExit: true)
+        startIfNeeded()
+    }
+
     private func startIfNeeded() {
         guard process?.isRunning != true else { return }
         guard let resources = Bundle.main.resourceURL else { return }
@@ -60,6 +69,7 @@ final class CmuxDigestDaemonSupervisor {
         if FileManager.default.isExecutableFile(atPath: cmuxURL.path) {
             environment["CMUX_DIGEST_CMUX"] = cmuxURL.path
         }
+        Self.applyDigestPreferences(to: &environment)
         let socketPath = SocketControlSettings.socketPath()
         environment["CMUX_SOCKET_PATH"] = socketPath
         environment["CMUX_SOCKET"] = socketPath
@@ -100,6 +110,54 @@ final class CmuxDigestDaemonSupervisor {
         }
     }
 
+    private static func applyDigestPreferences(to environment: inout [String: String]) {
+        let defaults = UserDefaults.standard
+        let digestEnabled = defaults.bool(forKey: "digest.enabled")
+        let summaryPriorityEnabled = (defaults.object(forKey: "workspaceTab.summaryPriority.enabled") as? Bool) ?? true
+        let usesProviderBackedSummaries = digestEnabled || summaryPriorityEnabled
+        environment["CMUX_DIGEST_ENABLED"] = digestEnabled ? "1" : "0"
+
+        let rawProvider = defaults.string(forKey: "digest.provider")?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if usesProviderBackedSummaries {
+            let normalized = rawProvider?.lowercased()
+            environment["CMUX_DIGEST_PROVIDER"] = (normalized == nil || normalized == "" || normalized == "heuristic")
+                ? "claude-code"
+                : rawProvider
+        } else if let rawProvider, !rawProvider.isEmpty {
+            environment["CMUX_DIGEST_PROVIDER"] = rawProvider
+        }
+
+        if let model = defaults.string(forKey: "digest.model")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !model.isEmpty {
+            environment["CMUX_DIGEST_MODEL"] = model
+        } else if let legacyModel = defaults.string(forKey: "digest.claudeCodeModel")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !legacyModel.isEmpty {
+            environment["CMUX_DIGEST_CLAUDE_MODEL"] = legacyModel
+        }
+
+        if let value = defaults.object(forKey: "digest.currentWorkspaceMinIntervalSec") as? Int {
+            environment["CMUX_DIGEST_CURRENT_INTERVAL"] = "\(value)"
+        }
+        if let value = defaults.object(forKey: "digest.backgroundMinIntervalSec") as? Int {
+            environment["CMUX_DIGEST_BACKGROUND_INTERVAL"] = "\(value)"
+        }
+        if let value = defaults.object(forKey: "digest.screenLines") as? Int {
+            environment["CMUX_DIGEST_SCREEN_LINES"] = "\(value)"
+        }
+        if let value = defaults.object(forKey: "digest.includeDiffStat") as? Bool {
+            environment["CMUX_DIGEST_INCLUDE_DIFF_STAT"] = value ? "1" : "0"
+        }
+        if let value = defaults.object(forKey: "digest.maxConcurrentLLM") as? Int {
+            environment["CMUX_DIGEST_MAX_CONCURRENT_LLM"] = "\(value)"
+        }
+
+        let writeSidebar = (defaults.object(forKey: "digest.writeSidebarMetadata") as? Bool) ?? digestEnabled
+        environment["CMUX_DIGEST_WRITE_SIDEBAR"] = digestEnabled && writeSidebar ? "1" : "0"
+    }
+
 #if DEBUG
     private static func daemonLogURL(environment: [String: String], socketPath: String) -> URL {
         let tag = environment["CMUX_TAG"] ?? URL(fileURLWithPath: socketPath)
@@ -131,10 +189,13 @@ final class CmuxDigestDaemonSupervisor {
     }
 #endif
 
-    private func stop() {
+    private func stop(waitUntilExit: Bool = false) {
         guard let process else { return }
         if process.isRunning {
             process.terminate()
+            if waitUntilExit {
+                process.waitUntilExit()
+            }
         }
         self.process = nil
 #if DEBUG
@@ -156,8 +217,13 @@ struct cmuxApp: App {
     @AppStorage(DevBuildBannerDebugSettings.sidebarBannerVisibleKey)
     private var showSidebarDevBuildBanner = DevBuildBannerDebugSettings.defaultShowSidebarBanner
     @AppStorage(SocketControlSettings.appStorageKey) private var socketControlMode = SocketControlSettings.defaultMode.rawValue
+    @AppStorage("digest.enabled") private var digestEnabled = false
     @AppStorage("digest.daemonEnabled") private var digestDaemonEnabled = false
+    @AppStorage("digest.provider") private var digestProvider = "heuristic"
+    @AppStorage("digest.model") private var digestModel = ""
+    @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
     @AppStorage("workspaceTab.displayMode") private var workspaceTabDisplayMode = "native"
+    @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen = ExtensionColumnSettings.defaultOpen
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
@@ -168,7 +234,9 @@ struct cmuxApp: App {
     }
 
     private var shouldRunDigestDaemon: Bool {
-        digestDaemonEnabled || workspaceTabDisplayMode == "summary_priority" || extensionColumnOpen
+        digestDaemonEnabled
+            || digestEnabled
+            || (summaryPriorityEnabled && (workspaceTabDisplayMode == "summary_priority" || extensionColumnOpen))
     }
 
     init() {
@@ -354,8 +422,23 @@ struct cmuxApp: App {
                 .onChange(of: digestDaemonEnabled) { _ in
                     CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
                 }
+                .onChange(of: digestEnabled) { _ in
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                }
+                .onChange(of: digestProvider) { _ in
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                }
+                .onChange(of: digestModel) { _ in
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                }
+                .onChange(of: digestClaudeCodeModel) { _ in
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                }
                 .onChange(of: workspaceTabDisplayMode) { _ in
                     CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
+                }
+                .onChange(of: summaryPriorityEnabled) { _ in
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
                 }
                 .onChange(of: extensionColumnOpen) { _ in
                     CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
@@ -5449,7 +5532,7 @@ private func openCmuxSettingsFileInTextEdit() {
     #endif
 }
 
-private struct WorkspaceSummarySettingsDimension: Codable, Identifiable, Equatable {
+struct WorkspaceSummarySettingsDimension: Codable, Identifiable, Equatable {
     var id: String
     var label: String
     var enabled: Bool
@@ -5473,6 +5556,14 @@ private struct WorkspaceSummarySettingsDimension: Codable, Identifiable, Equatab
             orientation: "higher_is_more_priority",
             builtin: true,
             visible: true
+        ),
+        WorkspaceSummarySettingsDimension(
+            id: "progress",
+            label: "Progress",
+            enabled: true,
+            orientation: "higher_is_more_priority",
+            builtin: true,
+            visible: true
         )
     ]
 
@@ -5482,6 +5573,8 @@ private struct WorkspaceSummarySettingsDimension: Codable, Identifiable, Equatab
             return String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency")
         case "importance":
             return String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance")
+        case "progress":
+            return String(localized: "sidebar.workspaceSummary.sort.progress", defaultValue: "Progress")
         default:
             let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? id : trimmed
@@ -5489,7 +5582,7 @@ private struct WorkspaceSummarySettingsDimension: Codable, Identifiable, Equatab
     }
 }
 
-private struct WorkspaceSummarySettingsProfile: Codable, Equatable {
+struct WorkspaceSummarySettingsProfile: Codable, Equatable {
     var id: String
     var label: String
     var dimensions: [WorkspaceSummarySettingsDimension]
@@ -5514,7 +5607,7 @@ private enum DigestProviderOption: String, CaseIterable, Identifiable {
     }
 }
 
-private enum WorkspaceSummaryProfileStatus: Equatable {
+enum WorkspaceSummaryProfileStatus: Equatable {
     case saved
     case reset
     case invalidId
@@ -5524,7 +5617,7 @@ private enum WorkspaceSummaryProfileStatus: Equatable {
 }
 
 @MainActor
-private final class WorkspaceSummaryProfileSettingsStore: ObservableObject {
+final class WorkspaceSummaryProfileSettingsStore: ObservableObject {
     @Published private(set) var profile: WorkspaceSummarySettingsProfile
     @Published var status: WorkspaceSummaryProfileStatus?
 
@@ -5787,6 +5880,7 @@ struct SettingsView: View {
     @AppStorage("digest.includeDiffStat") private var digestIncludeDiffStat = true
     @AppStorage("digest.sendFullDiffToLLM") private var digestSendFullDiffToLLM = false
     @AppStorage("digest.writeSidebarMetadata") private var digestWriteSidebarMetadata = true
+    @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
     @AppStorage("sidebarTintHex") private var sidebarTintHex = SidebarTintDefaults.hex
     @AppStorage("sidebarTintHexLight") private var sidebarTintHexLight: String?
     @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
@@ -7259,183 +7353,13 @@ struct SettingsView: View {
                         SettingsCardDivider()
 
                         SettingsCardRow(
-                            configurationReview: .json("digest.daemonEnabled"),
-                            String(localized: "settings.digest.daemonEnabled", defaultValue: "Use Digest Daemon"),
-                            subtitle: String(localized: "settings.digest.daemonEnabled.subtitle", defaultValue: "Summary workspace mode reads from the local cmux-digest daemon on localhost.")
+                            configurationReview: .json("workspaceTab.summaryPriority.enabled"),
+                            String(localized: "settings.summaryPriority.enabled", defaultValue: "Enable Summary Priority"),
+                            subtitle: String(localized: "settings.summaryPriority.enabled.subtitle", defaultValue: "Rank workspace summaries in the extension column.")
                         ) {
-                            Toggle("", isOn: $digestDaemonEnabled)
+                            Toggle("", isOn: $summaryPriorityEnabled)
                                 .labelsHidden()
                                 .controlSize(.small)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsPickerRow(
-                            configurationReview: .json("digest.provider"),
-                            String(localized: "settings.digest.provider", defaultValue: "Provider"),
-                            subtitle: String(localized: "settings.digest.provider.subtitle", defaultValue: "heuristic, claude-code (local CLI), or openai. claude-code uses your installed `claude` binary; no API key needed."),
-                            controlWidth: pickerColumnWidth,
-                            selection: digestProviderSelection,
-                            accessibilityId: "SettingsDigestProviderPicker"
-                        ) {
-                            ForEach(DigestProviderOption.allCases) { option in
-                                Text(verbatim: option.rawValue).tag(option.rawValue)
-                            }
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .json("digest.model"),
-                            String(localized: "settings.digest.model", defaultValue: "Model"),
-                            subtitle: String(localized: "settings.digest.model.subtitle", defaultValue: "Optional model name for provider-backed summaries.")
-                        ) {
-                            TextField("", text: $digestModel)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 160)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .json("digest.claudeCodeModel"),
-                            String(localized: "settings.digest.claudeCodeModel", defaultValue: "Claude Code Model"),
-                            subtitle: String(localized: "settings.digest.claudeCodeModel.subtitle", defaultValue: "Used only when Provider is claude-code. Defaults to haiku for fast, cheap summaries; e.g. haiku, sonnet, opus, or a full ID.")
-                        ) {
-                            TextField("haiku", text: $digestClaudeCodeModel)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(width: 160)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .json("digest.screenLines"),
-                            String(localized: "settings.digest.screenLines", defaultValue: "Screen Lines"),
-                            subtitle: String(localized: "settings.digest.screenLines.subtitle", defaultValue: "Number of recent terminal lines read per surface.")
-                        ) {
-                            TextField("", value: $digestScreenLines, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 72)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .json("digest.currentWorkspaceMinIntervalSec"),
-                            String(localized: "settings.digest.currentInterval", defaultValue: "Current Workspace Interval"),
-                            subtitle: String(localized: "settings.digest.currentInterval.subtitle", defaultValue: "Minimum seconds between current workspace refreshes.")
-                        ) {
-                            TextField("", value: $digestCurrentWorkspaceMinIntervalSec, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 72)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .json("digest.backgroundMinIntervalSec"),
-                            String(localized: "settings.digest.backgroundInterval", defaultValue: "Background Interval"),
-                            subtitle: String(localized: "settings.digest.backgroundInterval.subtitle", defaultValue: "Minimum seconds between background workspace refreshes.")
-                        ) {
-                            TextField("", value: $digestBackgroundMinIntervalSec, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .multilineTextAlignment(.trailing)
-                                .frame(width: 72)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .json("digest.includeDiffStat"),
-                            String(localized: "settings.digest.includeDiffStat", defaultValue: "Include Diff Stat"),
-                            subtitle: String(localized: "settings.digest.includeDiffStat.subtitle", defaultValue: "Include git diff statistics as trusted local context.")
-                        ) {
-                            Toggle("", isOn: $digestIncludeDiffStat)
-                                .labelsHidden()
-                                .controlSize(.small)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .json("digest.sendFullDiffToLLM"),
-                            String(localized: "settings.digest.sendFullDiff", defaultValue: "Send Full Diff to LLM"),
-                            subtitle: String(localized: "settings.digest.sendFullDiff.subtitle", defaultValue: "Off by default. Workspace Digest does not need full code diffs for topic summaries.")
-                        ) {
-                            Toggle("", isOn: $digestSendFullDiffToLLM)
-                                .labelsHidden()
-                                .controlSize(.small)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .json("digest.writeSidebarMetadata"),
-                            String(localized: "settings.digest.writeSidebarMetadata", defaultValue: "Write Sidebar Metadata"),
-                            subtitle: String(localized: "settings.digest.writeSidebarMetadata.subtitle", defaultValue: "Let cmux-digest publish topic and summary through sidebar metadata.")
-                        ) {
-                            Toggle("", isOn: $digestWriteSidebarMetadata)
-                                .labelsHidden()
-                                .controlSize(.small)
-                        }
-                    }
-
-                    SettingsSectionHeader(title: String(localized: "settings.section.summaryPriority", defaultValue: "Summary Priority"))
-                    SettingsCard {
-                        SettingsCardNote(
-                            String(
-                                localized: "settings.summaryPriority.dimensions.note",
-                                defaultValue: "Configure independent dimensions shown in Summary mode. Each enabled visible dimension appears in the Summary sort menu."
-                            )
-                        )
-
-                        ForEach(Array(summaryProfileStore.profile.dimensions.enumerated()), id: \.element.id) { index, dimension in
-                            if index > 0 {
-                                SettingsCardDivider()
-                            }
-                            WorkspaceSummaryDimensionSettingsRow(
-                                dimension: dimension,
-                                label: summaryDimensionLabelBinding(for: dimension.id),
-                                isEnabled: summaryDimensionEnabledBinding(for: dimension.id),
-                                isVisible: summaryDimensionVisibleBinding(for: dimension.id),
-                                onRemove: {
-                                    summaryProfileStore.removeDimension(id: dimension.id)
-                                }
-                            )
-                        }
-
-                        SettingsCardDivider()
-
-                        WorkspaceSummaryAddDimensionSettingsRow(
-                            id: $newSummaryDimensionId,
-                            label: $newSummaryDimensionLabel,
-                            canAdd: canAddSummaryDimension,
-                            onAdd: addSummaryDimension
-                        )
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .action,
-                            String(localized: "settings.summaryPriority.resetDimensions", defaultValue: "Reset Dimensions"),
-                            subtitle: String(localized: "settings.summaryPriority.resetDimensions.subtitle", defaultValue: "Restore Urgency and Importance as the built-in Summary sort dimensions.")
-                        ) {
-                            Button(String(localized: "settings.summaryPriority.resetDimensions.button", defaultValue: "Reset")) {
-                                summaryProfileStore.resetToDefaults()
-                                newSummaryDimensionId = ""
-                                newSummaryDimensionLabel = ""
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                        }
-
-                        if let summaryProfileStatusText {
-                            SettingsCardDivider()
-                            SettingsCardNote(summaryProfileStatusText)
-                                .foregroundStyle(summaryProfileStatusIsError ? Color.red : Color.secondary)
                         }
                     }
 
@@ -8280,6 +8204,7 @@ struct SettingsView: View {
         digestIncludeDiffStat = true
         digestSendFullDiffToLLM = false
         digestWriteSidebarMetadata = true
+        summaryPriorityEnabled = true
         summaryProfileStore.resetToDefaults()
         newSummaryDimensionId = ""
         newSummaryDimensionLabel = ""

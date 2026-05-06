@@ -94,6 +94,7 @@ final class CmuxSettingsFileStore {
         "digest.writeSidebarMetadata",
         "digest.maxConcurrentLLM",
         "workspaceTab.displayMode",
+        "workspaceTab.summaryPriority.enabled",
         "workspaceTab.summaryPriority.sortMode",
         "workspaceTab.summaryPriority.sortDimensionId",
         "workspaceTab.summaryPriority.sortDirection",
@@ -840,7 +841,13 @@ final class CmuxSettingsFileStore {
             }
         }
         guard let summaryPriority = section["summaryPriority"] as? [String: Any],
-              let sort = summaryPriority["defaultSort"] as? [String: Any] else {
+              !summaryPriority.isEmpty else {
+            return
+        }
+        if let value = jsonBool(summaryPriority["enabled"]) {
+            snapshot.managedUserDefaults["workspaceTab.summaryPriority.enabled"] = .bool(value)
+        }
+        guard let sort = summaryPriority["defaultSort"] as? [String: Any] else {
             return
         }
         if let raw = jsonString(sort["mode"]) {
@@ -1435,32 +1442,12 @@ final class CmuxSettingsFileStore {
             [
                 "digest": [
                     "enabled": false,
-                    "daemonEnabled": false,
-                    "provider": "heuristic",
-                    "model": "",
-                    "claudeCodeModel": "",
-                    "currentWorkspaceMinIntervalSec": 45,
-                    "backgroundMinIntervalSec": 300,
-                    "screenLines": 160,
-                    "includeDiffStat": true,
-                    "sendFullDiffToLLM": false,
-                    "writeSidebarMetadata": true,
                 ],
             ],
             [
                 "workspaceTab": [
-                    "defaultDisplayMode": "native",
-                    "native": [
-                        "showBadges": true,
-                        "preserveCmuxOrder": true,
-                    ],
                     "summaryPriority": [
                         "enabled": true,
-                        "defaultSort": [
-                            "mode": "dimension",
-                            "dimensionId": "urgency",
-                            "direction": "desc",
-                        ],
                     ],
                 ],
             ],
