@@ -467,6 +467,7 @@ private struct SidebarWorkspaceTabState: Codable, Hashable {
 private struct DigestConfig {
     var appSupportDirectory: URL
     var cmuxPath: String
+    var enabled: Bool
     var provider: String
     var model: String?
     var apiKey: String?
@@ -491,10 +492,14 @@ private struct DigestConfig {
         let appSupport = URL(fileURLWithPath: env["CMUX_DIGEST_HOME"] ?? home
             .appendingPathComponent("Library/Application Support/cmux/digest").path)
         let settings = DigestSettingsFile.load()
+        let enabled = env["CMUX_DIGEST_ENABLED"].map(DigestConfig.bool) ?? settings.bool("enabled") ?? false
+        let rawProvider = env["CMUX_DIGEST_PROVIDER"] ?? settings.string("provider")
+        let provider = Self.resolvedProvider(rawProvider, enabled: enabled)
         return DigestConfig(
             appSupportDirectory: appSupport,
             cmuxPath: env["CMUX_DIGEST_CMUX"] ?? settings.string("cmuxPath") ?? CmuxBinaryLocator.find(),
-            provider: env["CMUX_DIGEST_PROVIDER"] ?? settings.string("provider") ?? "heuristic",
+            enabled: enabled,
+            provider: provider,
             model: env["CMUX_DIGEST_MODEL"] ?? settings.string("model"),
             apiKey: env["CMUX_DIGEST_API_KEY"] ?? settings.string("apiKey") ?? env["OPENAI_API_KEY"],
             apiBaseURL: env["CMUX_DIGEST_API_BASE"] ?? settings.string("apiBaseURL"),
@@ -506,12 +511,22 @@ private struct DigestConfig {
             backgroundMinIntervalSec: Int(env["CMUX_DIGEST_BACKGROUND_INTERVAL"] ?? "") ?? settings.int("backgroundMinIntervalSec") ?? 300,
             screenLines: Int(env["CMUX_DIGEST_SCREEN_LINES"] ?? "") ?? settings.int("screenLines") ?? 160,
             includeDiffStat: env["CMUX_DIGEST_INCLUDE_DIFF_STAT"].map(DigestConfig.bool) ?? settings.bool("includeDiffStat") ?? true,
-            sendFullDiffToLLM: env["CMUX_DIGEST_SEND_FULL_DIFF"].map(DigestConfig.bool) ?? settings.bool("sendFullDiffToLLM") ?? false,
-            writeSidebarMetadata: env["CMUX_DIGEST_WRITE_SIDEBAR"].map(DigestConfig.bool) ?? settings.bool("writeSidebarMetadata") ?? true,
+            sendFullDiffToLLM: false,
+            writeSidebarMetadata: env["CMUX_DIGEST_WRITE_SIDEBAR"].map(DigestConfig.bool) ?? settings.bool("writeSidebarMetadata") ?? enabled,
             agentSessionsEnabled: env["CMUX_DIGEST_AGENT_SESSIONS"].map(DigestConfig.bool) ?? settings.bool("agentSessionsEnabled") ?? true,
             agentSessionMaxTranscriptBytes: Int(env["CMUX_DIGEST_AGENT_SESSION_MAX_BYTES"] ?? "") ?? settings.int("agentSessionMaxTranscriptBytes") ?? 200_000,
             agentSessionAllowLinkedLocalSessionDiscovery: env["CMUX_DIGEST_ALLOW_LOCAL_SESSION_DISCOVERY"].map(DigestConfig.bool) ?? settings.bool("agentSessionAllowLinkedLocalSessionDiscovery") ?? false
         )
+    }
+
+    private static func resolvedProvider(_ rawProvider: String?, enabled: Bool) -> String {
+        let normalized = rawProvider?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if enabled && (normalized == nil || normalized == "" || normalized == "heuristic") {
+            return "claude-code"
+        }
+        return normalized?.isEmpty == false ? normalized! : "heuristic"
     }
 
     private static func bool(_ raw: String) -> Bool {
