@@ -2260,7 +2260,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     private nonisolated static func removeLegacyPersistedWindowGeometry(
         defaults: UserDefaults = .standard
     ) {
-        legacyPersistedWindowGeometryDefaultsKeys.forEach { defaults.removeObject(forKey: $0) }
+        // `removeObject` posts NSUserDefaultsDidChangeNotification even when the key is absent,
+        // which wakes every SwiftUI @AppStorage observer and contends the SwiftUI update lock.
+        // Only touch defaults if a legacy key is actually present.
+        for key in legacyPersistedWindowGeometryDefaultsKeys where defaults.object(forKey: key) != nil {
+            defaults.removeObject(forKey: key)
+        }
     }
 
     private func persistWindowGeometry(from window: NSWindow?) {
