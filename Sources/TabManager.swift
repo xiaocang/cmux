@@ -1717,6 +1717,7 @@ class TabManager: ObservableObject {
                     branch: resolvedPullRequest.branch,
                     isStale: false
                 )
+                CmuxDigestDaemonSupervisor.requestRefresh(workspaceId: workspace.id.uuidString)
             case .notFound, .unsupportedRepository:
                 workspacePullRequestTransientFailureCountByKey[key] = 0
                 workspacePullRequestLastTerminalStateRefreshAtByKey.removeValue(forKey: key)
@@ -2083,6 +2084,21 @@ class TabManager: ObservableObject {
 
         let lastTerminalRefreshAt = lastTerminalStateRefreshAt ?? .distantPast
         return now.timeIntervalSince(lastTerminalRefreshAt) >= Self.workspacePullRequestTerminalStateSweepInterval
+    }
+
+    /// User-triggered force refresh of all tracked workspace pull requests.
+    /// Bypasses the per-key cooldown and repo-level cache so the next poll
+    /// fetches fresh data from GitHub. Triggered by the sidebar refresh button.
+    func forceRefreshAllWorkspacePullRequests() {
+        guard !workspacePullRequestNextPollAtByKey.isEmpty else { return }
+        for key in workspacePullRequestNextPollAtByKey.keys {
+            workspacePullRequestNextPollAtByKey[key] = .distantPast
+        }
+        workspacePullRequestFollowUpShouldBypassRepoCache = true
+        refreshTrackedWorkspacePullRequestsIfNeeded(
+            reason: "userForce",
+            allowCachedResultsOverride: false
+        )
     }
 
     func refreshTrackedWorkspaceGitMetadataForTesting() {

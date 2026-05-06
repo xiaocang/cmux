@@ -220,6 +220,58 @@ final class CmuxDigestDaemonSupervisor {
         logHandle = nil
 #endif
     }
+
+    private static let ghprRefreshDebounceQueue = DispatchQueue(
+        label: "com.cmux.digest-ghpr-refresh-debounce"
+    )
+    private static var ghprRefreshPending: Set<String> = []
+    private static let ghprRefreshDebounceInterval: TimeInterval = 1.5
+    private static let ghprRefreshSocketTimeoutSeconds: TimeInterval = 5
+
+    /// Coalesced ghpr-only refresh nudge sent to the digest daemon when a PR
+    /// shell refresh resolves. Hits the lightweight `refresh_ghpr_metadata`
+    /// command (no LLM, diff-only sidebar writes) instead of forcing a full
+    /// digest refresh, and dedupes bursts within the debounce window so a
+    /// single workspace can't fan out N concurrent force-refreshes.
+    /// Daemon-down / ghpr-disabled cases are silent by design.
+    static func requestRefresh(workspaceId: String) {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: "digest.enabled"),
+              defaults.bool(forKey: DigestGHPRIntegrationSettings.enabledKey) else {
+            return
+        }
+        ghprRefreshDebounceQueue.async {
+            if ghprRefreshPending.contains(workspaceId) { return }
+            ghprRefreshPending.insert(workspaceId)
+            ghprRefreshDebounceQueue.asyncAfter(
+                deadline: .now() + ghprRefreshDebounceInterval
+            ) {
+                ghprRefreshPending.remove(workspaceId)
+                Self.dispatchGHPRMetadataRefresh(workspaceId: workspaceId)
+            }
+        }
+    }
+
+    private static func dispatchGHPRMetadataRefresh(workspaceId: String) {
+        let socketPath = digestSocketPath()
+        let escaped = workspaceId
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        DispatchQueue.global(qos: .utility).async {
+            let client = CmuxSocketClient(
+                path: socketPath,
+                timeoutSeconds: ghprRefreshSocketTimeoutSeconds
+            )
+            do {
+                try client.connect()
+                _ = try client.send(
+                    command: "refresh_ghpr_metadata {\"workspaceId\":\"\(escaped)\"}"
+                )
+            } catch {
+                // Daemon may not be running or socket may have just been recreated.
+            }
+        }
+    }
 }
 
 @main

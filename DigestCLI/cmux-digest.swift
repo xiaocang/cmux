@@ -332,6 +332,7 @@ private struct CmuxSurfaceRef: Codable, Hashable {
     var type: String
     var title: String
     var focused: Bool
+    var cwd: String?
 
     init(json: [String: Any]) {
         ref = json["ref"] as? String ?? json["surface_ref"] as? String
@@ -342,6 +343,8 @@ private struct CmuxSurfaceRef: Codable, Hashable {
         type = json["type"] as? String ?? "unknown"
         title = json["title"] as? String ?? ""
         focused = (json["focused"] as? Bool) == true
+        cwd = (json["cwd"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cwd?.isEmpty == true { cwd = nil }
     }
 }
 
@@ -839,6 +842,15 @@ private final class CmuxAdapter {
     private let runner: CommandRunner
     private let cmuxSocketPath: String
 
+    private struct AppliedGHPREntry: Equatable {
+        let value: String
+        let icon: String
+        let color: String?
+        let url: String?
+    }
+    private let ghprMetadataLock = NSLock()
+    private var lastAppliedGHPREntries: [String: [String: AppliedGHPREntry]] = [:]
+
     init(config: DigestConfig, runner: CommandRunner) {
         self.config = config
         self.runner = runner
@@ -921,20 +933,47 @@ private final class CmuxAdapter {
         setGHPRMetadata(digest.workspaceFacts.pullRequest, workspaceId: digest.workspaceId)
     }
 
+    func applyGHPRMetadata(_ context: GHPRPullRequestContext?, workspaceId: String) {
+        setGHPRMetadata(context, workspaceId: workspaceId)
+    }
+
+    /// Diff against the last applied snapshot per workspace so a steady-state
+    /// refresh emits zero v1 round-trips, and a single field change emits one.
     private func setGHPRMetadata(_ context: GHPRPullRequestContext?, workspaceId: String) {
-        for key in GHPRDisplayFormatter.metadataKeys {
+        var newEntries: [String: AppliedGHPREntry] = [:]
+        var newCommands: [String: String] = [:]
+        if config.ghprEnabled, let context {
+            for entry in GHPRDisplayFormatter.sidebarEntries(for: context, displayItems: config.ghprDisplayItems) {
+                newEntries[entry.key] = AppliedGHPREntry(
+                    value: entry.value,
+                    icon: entry.icon,
+                    color: entry.color,
+                    url: entry.url
+                )
+                var command = "set_status \(entry.key) \(quoteV1Arg(entry.value)) --tab=\(workspaceId) --priority=880 --icon=\(quoteV1Arg(entry.icon))"
+                if let color = entry.color?.trimmedNonEmpty {
+                    command += " --color=\(quoteV1Arg(color))"
+                }
+                if let url = entry.url?.trimmedNonEmpty {
+                    command += " --url=\(quoteV1Arg(url))"
+                }
+                newCommands[entry.key] = command
+            }
+        }
+
+        ghprMetadataLock.lock()
+        let previous = lastAppliedGHPREntries[workspaceId] ?? [:]
+        lastAppliedGHPREntries[workspaceId] = newEntries
+        ghprMetadataLock.unlock()
+
+        for key in previous.keys where newEntries[key] == nil {
             _ = try? sendV1("clear_status \(key) --tab=\(workspaceId)")
         }
-        guard config.ghprEnabled, let context else { return }
-        for entry in GHPRDisplayFormatter.sidebarEntries(for: context, displayItems: config.ghprDisplayItems) {
-            var command = "set_status \(entry.key) \(quoteV1Arg(entry.value)) --tab=\(workspaceId) --priority=880 --icon=\(quoteV1Arg(entry.icon))"
-            if let color = entry.color?.trimmedNonEmpty {
-                command += " --color=\(quoteV1Arg(color))"
+        for (key, entry) in newEntries {
+            if previous[key] == entry { continue }
+            if let command = newCommands[key] {
+                _ = try? sendV1(command)
             }
-            if let url = entry.url?.trimmedNonEmpty {
-                command += " --url=\(quoteV1Arg(url))"
-            }
-            _ = try? sendV1(command)
         }
     }
 
@@ -1338,7 +1377,7 @@ private enum GHPRDisplayFormatter {
                 return SidebarEntry(
                     key: "ghpr.pr",
                     value: "\(context.repository)#\(context.number)",
-                    icon: "sf:link",
+                    icon: "emoji:🔗",
                     color: nil,
                     url: context.url
                 )
@@ -1347,12 +1386,12 @@ private enum GHPRDisplayFormatter {
                 return SidebarEntry(
                     key: "ghpr.title",
                     value: context.title.truncated(140),
-                    icon: "sf:text.quote",
+                    icon: "emoji:📝",
                     color: nil,
                     url: context.url.trimmedNonEmpty
                 )
             case .ci:
-                guard let value = ciSummary(context) else { return nil }
+                guard let value = ciBadgeValue(context) else { return nil }
                 return SidebarEntry(
                     key: "ghpr.ci",
                     value: value,
@@ -1361,11 +1400,11 @@ private enum GHPRDisplayFormatter {
                     url: context.url.trimmedNonEmpty
                 )
             case .review:
-                guard let value = reviewSummary(context) else { return nil }
+                guard let value = reviewBadgeValue(context) else { return nil }
                 return SidebarEntry(
                     key: "ghpr.review",
                     value: value,
-                    icon: "sf:person.2",
+                    icon: reviewIcon(context),
                     color: reviewColor(context),
                     url: context.url.trimmedNonEmpty
                 )
@@ -1373,8 +1412,8 @@ private enum GHPRDisplayFormatter {
                 guard context.unresolvedCount > 0 else { return nil }
                 return SidebarEntry(
                     key: "ghpr.unresolved",
-                    value: "\(context.unresolvedCount) unresolved",
-                    icon: "sf:bubble.left.and.bubble.right",
+                    value: "\(context.unresolvedCount)",
+                    icon: "emoji:💬",
                     color: "#ff9500",
                     url: context.url.trimmedNonEmpty
                 )
@@ -1382,8 +1421,8 @@ private enum GHPRDisplayFormatter {
                 guard let ticket = context.jiraTicket else { return nil }
                 return SidebarEntry(
                     key: "ghpr.jira",
-                    value: "Jira \(ticket)",
-                    icon: "sf:ticket",
+                    value: ticket,
+                    icon: "text:§",
                     color: "#5e5ce6",
                     url: context.jiraURL
                 )
@@ -1391,8 +1430,8 @@ private enum GHPRDisplayFormatter {
                 guard context.isDraft else { return nil }
                 return SidebarEntry(
                     key: "ghpr.draft",
-                    value: "Draft PR",
-                    icon: "sf:pencil",
+                    value: "draft",
+                    icon: "emoji:📋",
                     color: "#8e8e93",
                     url: context.url.trimmedNonEmpty
                 )
@@ -1400,8 +1439,8 @@ private enum GHPRDisplayFormatter {
                 guard context.hasBaseConflicts else { return nil }
                 return SidebarEntry(
                     key: "ghpr.conflicts",
-                    value: "Base conflicts",
-                    icon: "sf:exclamationmark.triangle",
+                    value: "conflict",
+                    icon: "emoji:⚠️",
                     color: "#ff3b30",
                     url: context.url.trimmedNonEmpty
                 )
@@ -1409,8 +1448,8 @@ private enum GHPRDisplayFormatter {
                 guard !context.updatedAt.isEmpty else { return nil }
                 return SidebarEntry(
                     key: "ghpr.updated",
-                    value: "Updated \(context.updatedAt)",
-                    icon: "sf:clock",
+                    value: context.updatedAt,
+                    icon: "emoji:🕐",
                     color: nil,
                     url: context.url.trimmedNonEmpty
                 )
@@ -1418,8 +1457,8 @@ private enum GHPRDisplayFormatter {
                 guard context.author != "unknown" else { return nil }
                 return SidebarEntry(
                     key: "ghpr.author",
-                    value: "PR by \(context.author)",
-                    icon: "sf:person",
+                    value: context.author,
+                    icon: "emoji:👤",
                     color: nil,
                     url: context.url.trimmedNonEmpty
                 )
@@ -1427,8 +1466,8 @@ private enum GHPRDisplayFormatter {
                 guard context.isPinned else { return nil }
                 return SidebarEntry(
                     key: "ghpr.pinned",
-                    value: "Pinned in ghpr",
-                    icon: "sf:pin",
+                    value: "pinned",
+                    icon: "emoji:📌",
                     color: nil,
                     url: context.url.trimmedNonEmpty
                 )
@@ -1470,21 +1509,60 @@ private enum GHPRDisplayFormatter {
         return nil
     }
 
+    private static func ciBadgeValue(_ context: GHPRPullRequestContext) -> String? {
+        let status = context.ciStatus?.lowercased()
+        if context.checkFailureCount > 0 || status == "failure" {
+            return "\(context.checkFailureCount)"
+        }
+        if context.ciIsRunning || context.checkPendingCount > 0 || status == "pending" {
+            return "\(context.checkPendingCount)"
+        }
+        if context.checkSuccessCount > 0 {
+            return "ok"
+        }
+        return status?.trimmedNonEmpty
+    }
+
+    private static func reviewBadgeValue(_ context: GHPRPullRequestContext) -> String? {
+        if let changesRequestedCount = context.changesRequestedCount, changesRequestedCount > 0 {
+            return "\(changesRequestedCount)"
+        }
+        if context.approvalCount > 0 {
+            return "\(context.approvalCount)"
+        }
+        if let myReviewStatus = context.myReviewStatus?.trimmedNonEmpty {
+            return myReviewStatus.lowercased()
+        }
+        return nil
+    }
+
     private static func ciIcon(_ context: GHPRPullRequestContext) -> String {
-        if context.checkFailureCount > 0 || context.ciStatus?.lowercased() == "failure" {
-            return "sf:xmark.circle"
+        let status = context.ciStatus?.lowercased()
+        if context.checkFailureCount > 0 || status == "failure" {
+            return "emoji:❌"
         }
-        if context.ciIsRunning || context.checkPendingCount > 0 || context.ciStatus?.lowercased() == "pending" {
-            return "sf:clock"
+        if context.ciIsRunning || context.checkPendingCount > 0 || status == "pending" {
+            return "emoji:⏳"
         }
-        return "sf:checkmark.circle"
+        return "emoji:✅"
+    }
+
+    private static func reviewIcon(_ context: GHPRPullRequestContext) -> String {
+        if let changesRequestedCount = context.changesRequestedCount, changesRequestedCount > 0 {
+            return "emoji:🟥"
+        }
+        if context.approvalCount > 0 {
+            return "emoji:✔"
+        }
+        return "emoji:👀"
     }
 
     private static func ciColor(_ context: GHPRPullRequestContext) -> String? {
-        if context.checkFailureCount > 0 || context.ciStatus?.lowercased() == "failure" {
+        let status = context.ciStatus?.lowercased()
+        if context.checkFailureCount > 0 || status == "failure" {
             return "#ff3b30"
         }
-        if context.ciIsRunning || context.checkPendingCount > 0 || context.ciStatus?.lowercased() == "pending" {
+        if context.ciIsRunning || context.checkPendingCount > 0 || status == "pending" {
             return "#ff9500"
         }
         return "#34c759"
@@ -1493,6 +1571,9 @@ private enum GHPRDisplayFormatter {
     private static func reviewColor(_ context: GHPRPullRequestContext) -> String? {
         if let changesRequestedCount = context.changesRequestedCount, changesRequestedCount > 0 {
             return "#ff3b30"
+        }
+        if context.approvalCount > 0 {
+            return "#34c759"
         }
         return nil
     }
@@ -2436,7 +2517,8 @@ private final class DigestLLMClient {
         workspaceId: String,
         surface: CmuxSurfaceRef,
         screen: String,
-        fallback: SurfaceDigest
+        fallback: SurfaceDigest,
+        workspaceCwd: String?
     ) -> SurfaceDigest? {
         requestJSON(
             system: surfaceSystemPrompt,
@@ -2445,7 +2527,8 @@ private final class DigestLLMClient {
                 surface: surface,
                 screen: screen,
                 fallback: fallback
-            )
+            ),
+            cwd: surface.cwd ?? workspaceCwd
         ) { content in
             let data = try Self.jsonData(from: content)
             let output = try decoder.decode(SurfaceDigestLLMOutput.self, from: data)
@@ -2464,7 +2547,8 @@ private final class DigestLLMClient {
         statusText: String,
         logText: String,
         previous: WorkspaceDigest?,
-        fallback: WorkspaceDigest
+        fallback: WorkspaceDigest,
+        workspaceCwd: String?
     ) -> WorkspaceDigest? {
         requestJSON(
             system: workspaceSystemPrompt,
@@ -2479,7 +2563,8 @@ private final class DigestLLMClient {
                 logText: logText,
                 previous: previous,
                 fallback: fallback
-            )
+            ),
+            cwd: workspaceCwd
         ) { content in
             let data = try Self.jsonData(from: content)
             let output = try decoder.decode(WorkspaceDigestLLMOutput.self, from: data)
@@ -2495,7 +2580,8 @@ private final class DigestLLMClient {
     ) -> [String: DimensionScore]? {
         requestJSON(
             system: dimensionSystemPrompt,
-            user: dimensionUserPrompt(digest: digest, profile: profile, fallback: fallback)
+            user: dimensionUserPrompt(digest: digest, profile: profile, fallback: fallback),
+            cwd: digest.workspaceFacts.cwd
         ) { content in
             let data = try Self.jsonData(from: content)
             let output = try decoder.decode(DimensionAssessmentLLMOutput.self, from: data)
@@ -2511,6 +2597,7 @@ private final class DigestLLMClient {
     private func requestJSON<T>(
         system: String,
         user: String,
+        cwd: String?,
         decode: (String) throws -> T
     ) -> T? {
         guard let requestTemplate = requestTemplate() else { return nil }
@@ -2520,7 +2607,8 @@ private final class DigestLLMClient {
                 let content = try performRequest(
                     requestTemplate,
                     system: system,
-                    user: retryUserPrompt(user, attempt: attempt, lastError: lastError)
+                    user: retryUserPrompt(user, attempt: attempt, lastError: lastError),
+                    cwd: cwd
                 )
                 return try decode(content)
             } catch {
@@ -2583,14 +2671,14 @@ private final class DigestLLMClient {
         return .http(endpoint: endpoint, apiKey: apiKey, model: model)
     }
 
-    private func performRequest(_ template: RequestTemplate, system: String, user: String) throws -> String {
+    private func performRequest(_ template: RequestTemplate, system: String, user: String, cwd: String?) throws -> String {
         throttle.wait()
         defer { throttle.signal() }
         switch template {
         case let .http(endpoint, apiKey, model):
             return try performHTTPRequest(endpoint: endpoint, apiKey: apiKey, model: model, system: system, user: user)
         case let .claudeCode(executable, model, timeoutSec):
-            return try performClaudeCodeRequest(executable: executable, model: model, timeoutSec: timeoutSec, system: system, user: user)
+            return try performClaudeCodeRequest(executable: executable, model: model, timeoutSec: timeoutSec, system: system, user: user, cwd: cwd)
         }
     }
 
@@ -2647,7 +2735,8 @@ private final class DigestLLMClient {
         model: String,
         timeoutSec: Int,
         system: String,
-        user: String
+        user: String,
+        cwd: String?
     ) throws -> String {
         let arguments = [
             "-p", user,
@@ -2665,6 +2754,18 @@ private final class DigestLLMClient {
         } else {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
             process.arguments = [executable] + arguments
+        }
+
+        // Run claude-code in the workspace's dominant pane cwd so its tooling
+        // (git context, project config files, etc.) resolves the right repo.
+        // If the path is missing or not a directory, leave Process to inherit
+        // the daemon's cwd rather than crashing the whole digest pipeline.
+        if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                process.currentDirectoryURL = URL(fileURLWithPath: cwd, isDirectory: true)
+            }
         }
 
         let stdout = Pipe()
@@ -3630,6 +3731,22 @@ private final class DigestController {
         return output.sorted(by: DigestSort.precedes)
     }
 
+    /// Lightweight ghpr-only refresh: query the ghpr socket for the current
+    /// PR context and diff-apply sidebar badges. Skips all LLM work and the
+    /// cmux v1/v2 chatter that a full digest refresh does.
+    func refreshGHPRMetadata(workspaceId: String) throws -> [String: String] {
+        guard config.ghprEnabled else {
+            return ["status": "ghpr disabled"]
+        }
+        guard config.writeSidebarMetadata else {
+            return ["status": "sidebar metadata disabled"]
+        }
+        let sidebarState = cmux.sidebarState(workspaceId: workspaceId)
+        let context = ghpr.context(fromSidebarState: sidebarState)
+        cmux.applyGHPRMetadata(context, workspaceId: workspaceId)
+        return ["status": "ok"]
+    }
+
     func refresh(workspaceId: String, force: Bool = false) throws -> WorkspaceDigest {
         guard let workspace = try cmux.listWorkspaces().first(where: { $0.id == workspaceId || $0.ref == workspaceId }) else {
             throw DigestError(description: "Workspace not found: \(workspaceId)")
@@ -3971,6 +4088,7 @@ private final class DigestController {
         let sessionDigests = terminalSurfaces.flatMap { surface in
             agentSessions.digests(workspaceId: workspace.id, surfaceId: surface.id, cwd: cwd, now: now)
         }
+        let workspaceLLMCwd = Self.dominantCwd(among: terminalSurfaces) ?? cwd
 
         var surfaceDigests: [SurfaceDigest] = []
         for surface in terminalSurfaces {
@@ -4009,7 +4127,8 @@ private final class DigestController {
                 workspaceId: workspace.id,
                 surface: surface,
                 screen: redacted,
-                fallback: fallback
+                fallback: fallback,
+                workspaceCwd: workspaceLLMCwd
             ) ?? fallback
             try store.putSurfaceDigest(digest)
             surfaceDigests.append(digest)
@@ -4069,7 +4188,8 @@ private final class DigestController {
             statusText: statusText,
             logText: logText,
             previous: previous,
-            fallback: fallback
+            fallback: fallback,
+            workspaceCwd: workspaceLLMCwd
         ) ?? fallback
         next = stabilizeTopic(previous: previous, next: next)
         try store.putWorkspaceDigest(next)
@@ -4083,6 +4203,23 @@ private final class DigestController {
             let value = String(line.dropFirst(key.count + 1)).trimmingCharacters(in: .whitespacesAndNewlines)
             return value == "unknown" || value == "none" || value.isEmpty ? nil : value
         }.first
+    }
+
+    /// Most common cwd across the workspace's terminal panes. Ties are broken
+    /// by preferring the focused pane's cwd, then by lexicographic order so
+    /// the choice is stable across refreshes.
+    private static func dominantCwd(among surfaces: [CmuxSurfaceRef]) -> String? {
+        var counts: [String: Int] = [:]
+        var focusedCwd: String?
+        for surface in surfaces {
+            guard let cwd = surface.cwd, !cwd.isEmpty else { continue }
+            counts[cwd, default: 0] += 1
+            if surface.focused { focusedCwd = cwd }
+        }
+        guard let maxCount = counts.values.max() else { return nil }
+        let leaders = counts.filter { $0.value == maxCount }.keys
+        if let focusedCwd, leaders.contains(focusedCwd) { return focusedCwd }
+        return leaders.sorted().first
     }
 
     private func stabilizeTopic(previous: WorkspaceDigest?, next: WorkspaceDigest) -> WorkspaceDigest {
@@ -5133,7 +5270,15 @@ private final class DigestSocketDaemon {
                     writeError(client, "missing workspaceId")
                     return
                 }
-                writeOK(client, encoded: try controller.refresh(workspaceId: id, force: true))
+                let force = (body["force"] as? Bool) ?? true
+                writeOK(client, encoded: try controller.refresh(workspaceId: id, force: force))
+
+            case "refresh_ghpr_metadata":
+                guard let id = (body["workspaceId"] as? String), !id.isEmpty else {
+                    writeError(client, "missing workspaceId")
+                    return
+                }
+                writeOK(client, encoded: try controller.refreshGHPRMetadata(workspaceId: id))
 
             case "handoff_workspace":
                 guard let id = (body["workspaceId"] as? String), !id.isEmpty else {

@@ -13486,6 +13486,7 @@ private struct WorkspaceSidebarModeHeader: View {
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
     @EnvironmentObject private var workspaceTabStore: WorkspaceTabStore
+    @EnvironmentObject private var tabManager: TabManager
 
     var body: some View {
         HStack(spacing: 6) {
@@ -13495,27 +13496,24 @@ private struct WorkspaceSidebarModeHeader: View {
             Spacer(minLength: 0)
 
             Button {
-                workspaceTabStore.refreshSummaryPriority(force: true)
-            } label: {
-                ZStack {
-                    if workspaceTabStore.isLoading {
-                        ProgressView()
-                            .controlSize(.mini)
-                    } else {
-                        Image(systemName: "arrow.clockwise")
-                            .font(.system(size: 9, weight: .semibold))
-                    }
+                tabManager.forceRefreshAllWorkspacePullRequests()
+                for workspace in tabManager.tabs {
+                    CmuxDigestDaemonSupervisor.requestRefresh(
+                        workspaceId: workspace.id.uuidString
+                    )
                 }
-                .foregroundColor(.primary.opacity(0.7))
-                .frame(width: 22, height: 20)
-                .background(
-                    RoundedRectangle(cornerRadius: 5, style: .continuous)
-                        .fill(Color.primary.opacity(0.07))
-                )
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.primary.opacity(0.7))
+                    .frame(width: 22, height: 20)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(Color.primary.opacity(0.07))
+                    )
             }
             .buttonStyle(.plain)
-            .disabled(workspaceTabStore.isLoading)
-            .safeHelp(String(localized: "sidebar.workspaceSummary.refresh", defaultValue: "Refresh summaries"))
+            .safeHelp(String(localized: "sidebar.workspaceTab.refreshPRs", defaultValue: "Refresh pull requests"))
 
             Button {
                 extensionColumnOpen.toggle()
@@ -14640,6 +14638,8 @@ struct SidebarWorkspaceSnapshotBuilder {
         let copyableSidebarSSHError: String?
         let metadataEntries: [SidebarStatusEntry]
         let metadataBlocks: [SidebarMetadataBlock]
+        let ghprBadges: [SidebarStatusEntry]
+        let ghprJiraEntry: SidebarStatusEntry?
         let latestLog: SidebarLogEntry?
         let progress: SidebarProgressState?
         let compactGitBranchSummaryText: String?
@@ -14649,6 +14649,22 @@ struct SidebarWorkspaceSnapshotBuilder {
         let pullRequestRows: [PullRequestDisplay]
         let listeningPorts: [Int]
     }
+
+    static let ghprStatusKeyPrefix = "ghpr."
+    static let ghprJiraStatusKey = "ghpr.jira"
+
+    static let ghprBadgeOrder: [String] = [
+        "ghpr.ci",
+        "ghpr.review",
+        "ghpr.unresolved",
+        "ghpr.conflicts",
+        "ghpr.draft",
+        "ghpr.pinned",
+        "ghpr.author",
+        "ghpr.updated",
+        "ghpr.title",
+        "ghpr.pr",
+    ]
 }
 
 private final class SidebarTabItemContextMenuState: ObservableObject {
@@ -15209,7 +15225,7 @@ private struct TabItemView: View, Equatable {
 
             // Pull request rows
             if detailVisibility.showsPullRequests, !workspaceSnapshot.pullRequestRows.isEmpty {
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: 2) {
                     ForEach(workspaceSnapshot.pullRequestRows) { pullRequest in
                         Button(action: {
                             openPullRequestLink(pullRequest.url)
@@ -15233,6 +15249,25 @@ private struct TabItemView: View, Equatable {
                         }
                         .buttonStyle(.plain)
                         .safeHelp(String(localized: "sidebar.pullRequest.openTooltip", defaultValue: "Open \(pullRequest.label) #\(pullRequest.number)"))
+                    }
+
+                    if !workspaceSnapshot.ghprBadges.isEmpty {
+                        SidebarGHPRBadgesRow(
+                            entries: workspaceSnapshot.ghprBadges,
+                            isActive: usesInvertedActiveForeground,
+                            onFocus: { updateSelection() },
+                            openURL: { url in openPullRequestLink(url) }
+                        )
+                    }
+
+                    if let jira = workspaceSnapshot.ghprJiraEntry {
+                        SidebarGHPRBadge(
+                            entry: jira,
+                            isActive: usesInvertedActiveForeground,
+                            underlinesLinkText: true,
+                            onFocus: { updateSelection() },
+                            openURL: { url in openPullRequestLink(url) }
+                        )
                     }
                 }
             }
@@ -16006,6 +16041,32 @@ private struct TabItemView: View, Equatable {
             return pullRequestDisplays(orderedPanelIds: orderedPanelIds)
         }()
 
+        let allStatusEntries = detailVisibility.showsMetadata ? tab.sidebarStatusEntriesInDisplayOrder() : []
+        let prefix = SidebarWorkspaceSnapshotBuilder.ghprStatusKeyPrefix
+        let jiraKey = SidebarWorkspaceSnapshotBuilder.ghprJiraStatusKey
+        let showGHPR = detailVisibility.showsPullRequests && !pullRequestRows.isEmpty
+        var metadataEntries: [SidebarStatusEntry] = []
+        var ghprBadges: [SidebarStatusEntry] = []
+        var ghprJiraEntry: SidebarStatusEntry?
+        for entry in allStatusEntries {
+            if !entry.key.hasPrefix(prefix) {
+                metadataEntries.append(entry)
+            } else if showGHPR {
+                if entry.key == jiraKey {
+                    ghprJiraEntry = entry
+                } else {
+                    ghprBadges.append(entry)
+                }
+            }
+        }
+        let order = SidebarWorkspaceSnapshotBuilder.ghprBadgeOrder
+        ghprBadges.sort { lhs, rhs in
+            let li = order.firstIndex(of: lhs.key) ?? Int.max
+            let ri = order.firstIndex(of: rhs.key) ?? Int.max
+            if li != ri { return li < ri }
+            return lhs.key < rhs.key
+        }
+
         return SidebarWorkspaceSnapshotBuilder.Snapshot(
             title: tab.displayTitle,
             customDescription: sidebarVisibleCustomDescription,
@@ -16015,8 +16076,10 @@ private struct TabItemView: View, Equatable {
             remoteConnectionStatusText: remoteConnectionStatusText,
             remoteStateHelpText: remoteStateHelpText,
             copyableSidebarSSHError: copyableSidebarSSHError,
-            metadataEntries: detailVisibility.showsMetadata ? tab.sidebarStatusEntriesInDisplayOrder() : [],
+            metadataEntries: metadataEntries,
             metadataBlocks: detailVisibility.showsMetadata ? tab.sidebarMetadataBlocksInDisplayOrder() : [],
+            ghprBadges: ghprBadges,
+            ghprJiraEntry: ghprJiraEntry,
             latestLog: detailVisibility.showsLog ? tab.logEntries.last : nil,
             progress: detailVisibility.showsProgress ? tab.progress : nil,
             compactGitBranchSummaryText: compactGitBranchSummaryText,
@@ -16731,6 +16794,102 @@ private struct SidebarMetadataEntryRow: View {
                 .underline(underlined)
                 .foregroundColor(foregroundColor)
         }
+    }
+}
+
+private struct SidebarGHPRBadgesRow: View {
+    let entries: [SidebarStatusEntry]
+    let isActive: Bool
+    let onFocus: () -> Void
+    let openURL: (URL) -> Void
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(entries, id: \.key) { entry in
+                SidebarGHPRBadge(
+                    entry: entry,
+                    isActive: isActive,
+                    onFocus: onFocus,
+                    openURL: openURL
+                )
+            }
+            Spacer(minLength: 0)
+        }
+        .lineLimit(1)
+    }
+}
+
+private struct SidebarGHPRBadge: View {
+    let entry: SidebarStatusEntry
+    let isActive: Bool
+    var underlinesLinkText: Bool = false
+    let onFocus: () -> Void
+    let openURL: (URL) -> Void
+
+    var body: some View {
+        Group {
+            if let url = entry.url {
+                Button {
+                    openURL(url)
+                } label: {
+                    badgeContent(linked: true)
+                }
+                .buttonStyle(.plain)
+                .safeHelp(tooltip)
+            } else {
+                badgeContent(linked: false)
+                    .contentShape(Rectangle())
+                    .onTapGesture { onFocus() }
+                    .safeHelp(tooltip)
+            }
+        }
+    }
+
+    private func badgeContent(linked: Bool) -> some View {
+        HStack(spacing: 2) {
+            iconView
+            let text = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                Text(text)
+                    .font(.system(size: 10, weight: .medium))
+                    .underline(linked && underlinesLinkText)
+                    .foregroundColor(foregroundColor)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var iconView: some View {
+        switch SidebarWorkspaceDigestIcon(rawSpec: entry.icon) {
+        case .emoji(let value):
+            Text(value).font(.system(size: 11))
+        case .text(let value):
+            Text(value)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundColor(foregroundColor)
+        case .symbol(let name):
+            Image(systemName: name)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundColor(foregroundColor)
+        case .none:
+            EmptyView()
+        }
+    }
+
+    private var foregroundColor: Color {
+        if let raw = entry.color, let explicit = Color(hex: raw) {
+            return isActive ? explicit.opacity(0.95) : explicit
+        }
+        return isActive ? .white.opacity(0.85) : .secondary
+    }
+
+    private var tooltip: String {
+        let value = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let label = entry.key.hasPrefix("ghpr.")
+            ? String(entry.key.dropFirst("ghpr.".count))
+            : entry.key
+        if value.isEmpty { return label }
+        return "\(label): \(value)"
     }
 }
 
