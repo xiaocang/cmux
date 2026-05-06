@@ -105095,6 +105095,96 @@
           }
         }
       }
+    },
+    "extensionColumn.sort.quick.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Quick" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "クイック" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "快速" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "快速" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "빠른" } }
+      }
+    },
+    "extensionColumn.sort.quick.menuItem": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Quick…" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "クイック…" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "快速…" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "快速…" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "빠른…" } }
+      }
+    },
+    "extensionColumn.sort.quick.save": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Save…" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "保存…" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "保存…" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "儲存…" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "저장…" } }
+      }
+    },
+    "extensionColumn.sort.quick.save.cancel": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cancel" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "キャンセル" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "取消" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "取消" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "취소" } }
+      }
+    },
+    "extensionColumn.sort.quick.save.confirm": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Save" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "保存" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "保存" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "儲存" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "저장" } }
+      }
+    },
+    "extensionColumn.sort.quick.save.namePlaceholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Name this sort" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "この並びに名前を付ける" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "命名此排序" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "命名此排序" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "이 정렬에 이름 붙이기" } }
+      }
+    },
+    "extensionColumn.sort.savedSorts": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Saved sorts" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "保存した並び" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已保存的排序" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "已儲存的排序" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "저장된 정렬" } }
+      }
+    },
+    "extensionColumn.configure.provider.heuristic": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Heuristic" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ヒューリスティック" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "启发式" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "啟發式" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "휴리스틱" } }
+      }
+    },
+    "extensionColumn.configure.provider.openai": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "OpenAI" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "OpenAI" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "OpenAI" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "OpenAI" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "OpenAI" } }
+      }
     }
   }
 }

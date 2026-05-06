@@ -10,12 +10,14 @@ struct CmuxSocketError: Error, CustomStringConvertible, LocalizedError {
 
 final class CmuxSocketClient {
     private let path: String
+    private let timeoutSeconds: TimeInterval
     private var fd: Int32 = -1
     private static let defaultTimeoutSeconds: TimeInterval = 15.0
     private static let multilineIdleTimeoutSeconds: TimeInterval = 0.12
 
-    init(path: String) {
+    init(path: String, timeoutSeconds: TimeInterval = CmuxSocketClient.defaultTimeoutSeconds) {
         self.path = path
+        self.timeoutSeconds = timeoutSeconds
     }
 
     deinit {
@@ -47,7 +49,7 @@ final class CmuxSocketClient {
         fd = newFD
 
         do {
-            try configureSendTimeout(Self.defaultTimeoutSeconds)
+            try configureSendTimeout(timeoutSeconds)
             try disableSigPipe()
         } catch {
             close()
@@ -101,7 +103,7 @@ final class CmuxSocketClient {
         var sawNewline = false
         var buffer = [UInt8](repeating: 0, count: 8192)
         while true {
-            let timeout = sawNewline ? Self.multilineIdleTimeoutSeconds : Self.defaultTimeoutSeconds
+            let timeout = sawNewline ? Self.multilineIdleTimeoutSeconds : timeoutSeconds
             guard try waitForReadable(timeout) else {
                 if sawNewline { break }
                 throw CmuxSocketError(message: "Command timed out")

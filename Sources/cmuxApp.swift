@@ -113,18 +113,11 @@ final class CmuxDigestDaemonSupervisor {
     private static func applyDigestPreferences(to environment: inout [String: String]) {
         let defaults = UserDefaults.standard
         let digestEnabled = defaults.bool(forKey: "digest.enabled")
-        let summaryPriorityEnabled = (defaults.object(forKey: "workspaceTab.summaryPriority.enabled") as? Bool) ?? true
-        let usesProviderBackedSummaries = digestEnabled || summaryPriorityEnabled
         environment["CMUX_DIGEST_ENABLED"] = digestEnabled ? "1" : "0"
 
         let rawProvider = defaults.string(forKey: "digest.provider")?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        if usesProviderBackedSummaries {
-            let normalized = rawProvider?.lowercased()
-            environment["CMUX_DIGEST_PROVIDER"] = (normalized == nil || normalized == "" || normalized == "heuristic")
-                ? "claude-code"
-                : rawProvider
-        } else if let rawProvider, !rawProvider.isEmpty {
+        if let rawProvider, !rawProvider.isEmpty {
             environment["CMUX_DIGEST_PROVIDER"] = rawProvider
         }
 
@@ -5594,12 +5587,32 @@ struct WorkspaceSummarySettingsProfile: Codable, Equatable {
     )
 }
 
-private enum DigestProviderOption: String, CaseIterable, Identifiable {
+enum DigestProviderOption: String, CaseIterable, Identifiable {
     case heuristic
     case claudeCode = "claude-code"
     case openai
 
     var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .heuristic:
+            return String(
+                localized: "extensionColumn.configure.provider.heuristic",
+                defaultValue: "Heuristic"
+            )
+        case .claudeCode:
+            return String(
+                localized: "extensionColumn.configure.provider.claude",
+                defaultValue: "Claude Code"
+            )
+        case .openai:
+            return String(
+                localized: "extensionColumn.configure.provider.openai",
+                defaultValue: "OpenAI"
+            )
+        }
+    }
 
     static func normalizedRawValue(_ rawValue: String) -> String {
         let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
