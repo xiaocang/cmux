@@ -16885,8 +16885,9 @@ private struct SidebarGHPRBadge: View {
 
     private var tooltip: String {
         let value = entry.value.trimmingCharacters(in: .whitespacesAndNewlines)
-        let label = entry.key.hasPrefix("ghpr.")
-            ? String(entry.key.dropFirst("ghpr.".count))
+        let prefix = SidebarWorkspaceSnapshotBuilder.ghprStatusKeyPrefix
+        let label = entry.key.hasPrefix(prefix)
+            ? String(entry.key.dropFirst(prefix.count))
             : entry.key
         if value.isEmpty { return label }
         return "\(label): \(value)"
