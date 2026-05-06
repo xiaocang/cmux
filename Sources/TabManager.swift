@@ -3585,10 +3585,11 @@ class TabManager: ObservableObject {
             }
 
             if let currentBest = pullRequestsByBranch[branch] {
-                pullRequestsByBranch[branch] = preferredPullRequest(
-                    from: [currentBest, pullRequest],
-                    now: now
-                ) ?? currentBest
+                // Both `currentBest` and `pullRequest` already passed `isSidebarPullRequestCandidate`,
+                // so skip re-filtering and directly compare. Saves an O(N²) candidate check on duplicates.
+                if isPreferredCandidate(candidate: pullRequest, over: currentBest) {
+                    pullRequestsByBranch[branch] = pullRequest
+                }
             } else {
                 pullRequestsByBranch[branch] = pullRequest
             }
@@ -3601,41 +3602,6 @@ class TabManager: ObservableObject {
         from pullRequests: [GitHubPullRequestProbeItem],
         now: Date = Date()
     ) -> GitHubPullRequestProbeItem? {
-        func statusPriority(_ status: SidebarPullRequestStatus) -> Int {
-            switch status {
-            case .open:
-                return 3
-            case .merged:
-                return 2
-            case .closed:
-                return 1
-            }
-        }
-
-        func isPreferred(
-            candidate: GitHubPullRequestProbeItem,
-            over current: GitHubPullRequestProbeItem
-        ) -> Bool {
-            guard let candidateStatus = pullRequestStatus(from: candidate.state),
-                  let currentStatus = pullRequestStatus(from: current.state) else {
-                return false
-            }
-
-            let candidatePriority = statusPriority(candidateStatus)
-            let currentPriority = statusPriority(currentStatus)
-            if candidatePriority != currentPriority {
-                return candidatePriority > currentPriority
-            }
-
-            let candidateUpdatedAt = candidate.updatedAt ?? ""
-            let currentUpdatedAt = current.updatedAt ?? ""
-            if candidateUpdatedAt != currentUpdatedAt {
-                return candidateUpdatedAt > currentUpdatedAt
-            }
-
-            return candidate.number > current.number
-        }
-
         var best: GitHubPullRequestProbeItem?
         for pullRequest in pullRequests {
             guard isSidebarPullRequestCandidate(pullRequest, now: now) else {
@@ -3645,11 +3611,43 @@ class TabManager: ObservableObject {
                 best = pullRequest
                 continue
             }
-            if isPreferred(candidate: pullRequest, over: currentBest) {
+            if isPreferredCandidate(candidate: pullRequest, over: currentBest) {
                 best = pullRequest
             }
         }
         return best
+    }
+
+    private nonisolated static func pullRequestStatusPriority(_ status: SidebarPullRequestStatus) -> Int {
+        switch status {
+        case .open: return 3
+        case .merged: return 2
+        case .closed: return 1
+        }
+    }
+
+    private nonisolated static func isPreferredCandidate(
+        candidate: GitHubPullRequestProbeItem,
+        over current: GitHubPullRequestProbeItem
+    ) -> Bool {
+        guard let candidateStatus = pullRequestStatus(from: candidate.state),
+              let currentStatus = pullRequestStatus(from: current.state) else {
+            return false
+        }
+
+        let candidatePriority = pullRequestStatusPriority(candidateStatus)
+        let currentPriority = pullRequestStatusPriority(currentStatus)
+        if candidatePriority != currentPriority {
+            return candidatePriority > currentPriority
+        }
+
+        let candidateUpdatedAt = candidate.updatedAt ?? ""
+        let currentUpdatedAt = current.updatedAt ?? ""
+        if candidateUpdatedAt != currentUpdatedAt {
+            return candidateUpdatedAt > currentUpdatedAt
+        }
+
+        return candidate.number > current.number
     }
 
     private nonisolated static func isSidebarPullRequestCandidate(
@@ -3657,10 +3655,15 @@ class TabManager: ObservableObject {
         now: Date
     ) -> Bool {
         guard pullRequestStatus(from: pullRequest.state) != nil,
-              URL(string: pullRequest.url) != nil else {
+              isValidPullRequestURL(pullRequest.url) else {
             return false
         }
         return !isStaleMergedPullRequest(pullRequest, now: now)
+    }
+
+    private nonisolated static func isValidPullRequestURL(_ raw: String) -> Bool {
+        // GitHub PR URLs always start with https://. Cheaper than full RFC 3986 parse.
+        return raw.hasPrefix("https://") || raw.hasPrefix("http://")
     }
 
     private nonisolated static func isStaleMergedPullRequest(
@@ -3675,16 +3678,98 @@ class TabManager: ObservableObject {
     }
 
     private nonisolated static func githubTimestampDate(from rawTimestamp: String?) -> Date? {
-        let timestamp = rawTimestamp?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !timestamp.isEmpty else { return nil }
+        guard let raw = rawTimestamp else { return nil }
+        return parseGitHubISO8601(raw)
+    }
 
-        let formatter = ISO8601DateFormatter()
-        if let date = formatter.date(from: timestamp) {
-            return date
+    // GitHub returns timestamps like `2024-12-30T15:04:05Z` or `2024-12-30T15:04:05.123Z`.
+    // Hand-rolled parser avoids ICU/SimpleDateFormat allocation+clone per call.
+    private nonisolated static func parseGitHubISO8601(_ raw: String) -> Date? {
+        let bytes = Array(raw.utf8)
+        var i = 0
+        let n = bytes.count
+
+        func skipWhitespace() {
+            while i < n {
+                switch bytes[i] {
+                case 0x20, 0x09, 0x0A, 0x0D: i += 1
+                default: return
+                }
+            }
+        }
+        func digit(_ b: UInt8) -> Int? { (b >= 0x30 && b <= 0x39) ? Int(b - 0x30) : nil }
+        func readInt(_ count: Int) -> Int? {
+            guard i + count <= n else { return nil }
+            var v = 0
+            for _ in 0..<count {
+                guard let d = digit(bytes[i]) else { return nil }
+                v = v * 10 + d
+                i += 1
+            }
+            return v
         }
 
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.date(from: timestamp)
+        skipWhitespace()
+        guard let year = readInt(4) else { return nil }
+        guard i < n, bytes[i] == 0x2D else { return nil }; i += 1
+        guard let month = readInt(2) else { return nil }
+        guard i < n, bytes[i] == 0x2D else { return nil }; i += 1
+        guard let day = readInt(2) else { return nil }
+        guard i < n, (bytes[i] == 0x54 || bytes[i] == 0x74 || bytes[i] == 0x20) else { return nil }
+        i += 1
+        guard let hour = readInt(2) else { return nil }
+        guard i < n, bytes[i] == 0x3A else { return nil }; i += 1
+        guard let minute = readInt(2) else { return nil }
+        guard i < n, bytes[i] == 0x3A else { return nil }; i += 1
+        guard let second = readInt(2) else { return nil }
+
+        var fractional: Double = 0
+        if i < n, bytes[i] == 0x2E {
+            i += 1
+            var scale = 0.1
+            var consumed = 0
+            while i < n, let d = digit(bytes[i]) {
+                fractional += Double(d) * scale
+                scale *= 0.1
+                i += 1
+                consumed += 1
+            }
+            if consumed == 0 { return nil }
+        }
+
+        // Timezone: Z or ±HH:MM / ±HHMM
+        var tzOffsetSeconds = 0
+        guard i < n else { return nil }
+        switch bytes[i] {
+        case 0x5A, 0x7A: // 'Z' or 'z'
+            i += 1
+        case 0x2B, 0x2D: // '+' or '-'
+            let sign = bytes[i] == 0x2B ? 1 : -1
+            i += 1
+            guard let offHour = readInt(2) else { return nil }
+            if i < n, bytes[i] == 0x3A { i += 1 }
+            guard let offMin = readInt(2) else { return nil }
+            tzOffsetSeconds = sign * (offHour * 3600 + offMin * 60)
+        default:
+            return nil
+        }
+
+        skipWhitespace()
+        guard i == n else { return nil }
+
+        var components = DateComponents()
+        components.year = year
+        components.month = month
+        components.day = day
+        components.hour = hour
+        components.minute = minute
+        components.second = second
+        components.timeZone = TimeZone(secondsFromGMT: 0)
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0) ?? .current
+        guard let base = calendar.date(from: components) else { return nil }
+        return base.addingTimeInterval(fractional - Double(tzOffsetSeconds))
     }
 
     private nonisolated static func pullRequestStatus(
