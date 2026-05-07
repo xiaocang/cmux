@@ -399,6 +399,78 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         body()
     }
 
+    func testGHPRMetadataRefreshRequestsWorkspacesWithSidebarPullRequests() throws {
+        var requestedWorkspaceIds: [String] = []
+        let manager = TabManager(
+            requestGHPRMetadataRefresh: { requestedWorkspaceIds.append($0) }
+        )
+        guard let workspace = manager.selectedWorkspace,
+              let panelId = workspace.focusedPanelId,
+              let url = URL(string: "https://github.com/manaflow-ai/cmux/pull/1888") else {
+            XCTFail("Expected selected workspace with focused panel")
+            return
+        }
+        let emptyWorkspace = manager.addWorkspace(select: false)
+
+        workspace.updatePanelPullRequest(
+            panelId: panelId,
+            number: 1888,
+            label: "PR",
+            url: url,
+            status: .open
+        )
+
+        XCTAssertEqual(
+            manager.refreshGHPRMetadataForSidebarPullRequests(),
+            [workspace.id]
+        )
+        XCTAssertEqual(requestedWorkspaceIds, [workspace.id.uuidString])
+        XCTAssertFalse(requestedWorkspaceIds.contains(emptyWorkspace.id.uuidString))
+    }
+
+    func testGHPRMetadataRefreshSkipsWorkspacesWithoutSidebarPullRequests() {
+        var requestedWorkspaceIds: [String] = []
+        let manager = TabManager(
+            requestGHPRMetadataRefresh: { requestedWorkspaceIds.append($0) }
+        )
+
+        XCTAssertTrue(manager.refreshGHPRMetadataForSidebarPullRequests().isEmpty)
+        XCTAssertTrue(requestedWorkspaceIds.isEmpty)
+    }
+
+    func testGHPRMetadataRefreshCanRunWithoutFullWorkspaceDigest() throws {
+        let suiteName = "cmux-ghpr-refresh-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(false, forKey: "digest.enabled")
+        defaults.set(true, forKey: DigestGHPRIntegrationSettings.enabledKey)
+
+        XCTAssertTrue(CmuxDigestDaemonSupervisor.ghprMetadataRefreshEnabled(defaults: defaults))
+        XCTAssertTrue(CmuxDigestDaemonSupervisor.writesSidebarMetadata(
+            digestEnabled: false,
+            ghprEnabled: true,
+            defaults: defaults
+        ))
+    }
+
+    func testWritesSidebarMetadataHonorsExplicitDisableEvenWhenGHPREnabled() throws {
+        let suiteName = "cmux-ghpr-sidebar-disabled-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set(true, forKey: DigestGHPRIntegrationSettings.enabledKey)
+        defaults.set(false, forKey: "digest.writeSidebarMetadata")
+
+        XCTAssertFalse(CmuxDigestDaemonSupervisor.writesSidebarMetadata(
+            digestEnabled: false,
+            ghprEnabled: true,
+            defaults: defaults
+        ))
+    }
+
     func testGitHubRepositorySlugsPrioritizeUpstreamThenOriginAndDeduplicate() {
         let output = """
         origin https://github.com/austinwang/cmux.git (fetch)

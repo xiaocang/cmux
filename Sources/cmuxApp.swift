@@ -120,6 +120,7 @@ final class CmuxDigestDaemonSupervisor {
         let defaults = UserDefaults.standard
         let digestEnabled = defaults.bool(forKey: "digest.enabled")
         environment["CMUX_DIGEST_ENABLED"] = digestEnabled ? "1" : "0"
+        let ghprEnabled = ghprMetadataRefreshEnabled(defaults: defaults)
 
         let rawProvider = defaults.string(forKey: "digest.provider")?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -153,11 +154,12 @@ final class CmuxDigestDaemonSupervisor {
             environment["CMUX_DIGEST_MAX_CONCURRENT_LLM"] = "\(value)"
         }
 
-        let writeSidebar = (defaults.object(forKey: "digest.writeSidebarMetadata") as? Bool) ?? digestEnabled
-        environment["CMUX_DIGEST_WRITE_SIDEBAR"] = digestEnabled && writeSidebar ? "1" : "0"
+        environment["CMUX_DIGEST_WRITE_SIDEBAR"] = writesSidebarMetadata(
+            digestEnabled: digestEnabled,
+            ghprEnabled: ghprEnabled,
+            defaults: defaults
+        ) ? "1" : "0"
 
-        let ghprEnabled = (defaults.object(forKey: DigestGHPRIntegrationSettings.enabledKey) as? Bool)
-            ?? DigestGHPRIntegrationSettings.defaultEnabled
         environment["CMUX_DIGEST_GHPR_ENABLED"] = ghprEnabled ? "1" : "0"
         let ghprSocketPath = defaults.string(forKey: DigestGHPRIntegrationSettings.socketPathKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -233,13 +235,18 @@ final class CmuxDigestDaemonSupervisor {
     /// command (no LLM, diff-only sidebar writes) instead of forcing a full
     /// digest refresh, and dedupes bursts within the debounce window so a
     /// single workspace can't fan out N concurrent force-refreshes.
-    /// Daemon-down / ghpr-disabled cases are silent by design.
     static func requestRefresh(workspaceId: String) {
         let defaults = UserDefaults.standard
-        guard defaults.bool(forKey: "digest.enabled"),
-              defaults.bool(forKey: DigestGHPRIntegrationSettings.enabledKey) else {
+        guard ghprMetadataRefreshEnabled(defaults: defaults) else {
+#if DEBUG
+            cmuxDebugLog("digest.ghpr.refresh.skip workspace=\(workspaceId) reason=ghprDisabled")
+#endif
             return
         }
+        shared.update(enabled: true)
+#if DEBUG
+        cmuxDebugLog("digest.ghpr.refresh.request workspace=\(workspaceId)")
+#endif
         ghprRefreshDebounceQueue.async {
             if ghprRefreshPending.contains(workspaceId) { return }
             ghprRefreshPending.insert(workspaceId)
@@ -250,6 +257,23 @@ final class CmuxDigestDaemonSupervisor {
                 Self.dispatchGHPRMetadataRefresh(workspaceId: workspaceId)
             }
         }
+    }
+
+    static func ghprMetadataRefreshEnabled(defaults: UserDefaults = .standard) -> Bool {
+        (defaults.object(forKey: DigestGHPRIntegrationSettings.enabledKey) as? Bool)
+            ?? DigestGHPRIntegrationSettings.defaultEnabled
+    }
+
+    static func writesSidebarMetadata(
+        digestEnabled: Bool,
+        ghprEnabled: Bool,
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        let defaultValue = digestEnabled || ghprEnabled
+        guard let storedValue = defaults.object(forKey: "digest.writeSidebarMetadata") as? Bool else {
+            return defaultValue
+        }
+        return storedValue && defaultValue
     }
 
     private static func dispatchGHPRMetadataRefresh(workspaceId: String) {
@@ -268,7 +292,11 @@ final class CmuxDigestDaemonSupervisor {
                     command: "refresh_ghpr_metadata {\"workspaceId\":\"\(escaped)\"}"
                 )
             } catch {
-                // Daemon may not be running or socket may have just been recreated.
+#if DEBUG
+                cmuxDebugLog(
+                    "digest.ghpr.refresh.failed workspace=\(workspaceId) error=\(error.localizedDescription)"
+                )
+#endif
             }
         }
     }

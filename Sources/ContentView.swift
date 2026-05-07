@@ -10876,7 +10876,10 @@ struct VerticalTabsSidebar: View {
     ) -> some View {
         VStack(spacing: 0) {
             WorkspaceSidebarModeHeader(
-                workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore
+                workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore,
+                onRefreshSidebarStatus: {
+                    tabManager.refreshGHPRMetadataForSidebarPullRequests()
+                }
             )
 
             workspaceRows(renderContext: renderContext)
@@ -14408,6 +14411,7 @@ final class WorkspaceTabStore: ObservableObject {
 
 private struct WorkspaceSidebarModeHeader: View {
     let workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
+    let onRefreshSidebarStatus: () -> Void
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
 
@@ -14420,6 +14424,7 @@ private struct WorkspaceSidebarModeHeader: View {
 
             Button {
                 workspaceSidebarLayoutMetricsStore.requestLayoutRefresh()
+                onRefreshSidebarStatus()
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 9, weight: .semibold))
@@ -14431,7 +14436,7 @@ private struct WorkspaceSidebarModeHeader: View {
                     )
             }
             .buttonStyle(.plain)
-            .safeHelp(String(localized: "sidebar.workspaceTab.refreshLayout", defaultValue: "Refresh layout"))
+            .safeHelp(String(localized: "sidebar.workspaceTab.refreshStatus", defaultValue: "Refresh sidebar status"))
 
             Button {
                 extensionColumnOpen.toggle()

@@ -108925,6 +108925,41 @@
         }
       }
     },
+    "sidebar.workspaceTab.refreshStatus": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh sidebar status"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイドバーの状態を更新"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新侧边栏状态"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新整理側邊欄狀態"
+          }
+        },
+        "ko": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "사이드바 상태 새로 고침"
+          }
+        }
+      }
+    },
     "sidebar.workspaceTab.title": {
       "extractionState": "manual",
       "localizations": {

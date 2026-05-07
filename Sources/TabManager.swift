@@ -947,6 +947,7 @@ class TabManager: ObservableObject {
     private nonisolated static let backgroundPollInterval: TimeInterval = 60
     private nonisolated static let selectedPollInterval: TimeInterval = 10
     private nonisolated static let workspacePullRequestRepoCacheLifetime: TimeInterval = 15
+    private nonisolated static let workspaceGHPRMetadataRefreshInterval: TimeInterval = 60
     private nonisolated static let workspacePullRequestRepoCachePruneLifetime: TimeInterval = 60
     private nonisolated static let workspacePullRequestRepoPageSize = 100
     private nonisolated static let workspacePullRequestRepoPageLimit = 2
@@ -1076,6 +1077,8 @@ class TabManager: ObservableObject {
     private var agentPIDSweepTimer: DispatchSourceTimer?
     private var workspaceGitMetadataPollTimer: DispatchSourceTimer?
     private var selectedWorkspaceGitMetadataPollTimer: DispatchSourceTimer?
+    private var workspaceGHPRMetadataRefreshTimer: DispatchSourceTimer?
+    private let requestGHPRMetadataRefresh: (String) -> Void
 #if DEBUG
     private var debugWorkspaceSwitchCounter: UInt64 = 0
     private var debugWorkspaceSwitchId: UInt64 = 0
@@ -1093,7 +1096,13 @@ class TabManager: ObservableObject {
     private var uiTestCancellables = Set<AnyCancellable>()
 #endif
 
-    init(initialWorkingDirectory: String? = nil) {
+    init(
+        initialWorkingDirectory: String? = nil,
+        requestGHPRMetadataRefresh: @escaping (String) -> Void = { workspaceId in
+            CmuxDigestDaemonSupervisor.requestRefresh(workspaceId: workspaceId)
+        }
+    ) {
+        self.requestGHPRMetadataRefresh = requestGHPRMetadataRefresh
         addWorkspace(workingDirectory: initialWorkingDirectory)
         observers.append(NotificationCenter.default.addObserver(
             forName: .ghosttyDidSetTitle,
@@ -1138,6 +1147,7 @@ class TabManager: ObservableObject {
         startAgentPIDSweepTimer()
         startWorkspaceGitMetadataPollTimer()
         startSelectedWorkspaceGitMetadataPollTimer()
+        startWorkspaceGHPRMetadataRefreshTimer()
         updateWorkspacePullRequestPollTimer()
 #if DEBUG
         setupUITestFocusShortcutsIfNeeded()
@@ -1152,6 +1162,7 @@ class TabManager: ObservableObject {
         agentPIDSweepTimer?.cancel()
         workspaceGitMetadataPollTimer?.cancel()
         selectedWorkspaceGitMetadataPollTimer?.cancel()
+        workspaceGHPRMetadataRefreshTimer?.cancel()
         workspacePullRequestPollTimer?.cancel()
         workspacePullRequestRefreshTask?.cancel()
     }
@@ -1209,6 +1220,31 @@ class TabManager: ObservableObject {
         }
         timer.resume()
         selectedWorkspaceGitMetadataPollTimer = timer
+    }
+
+    private func startWorkspaceGHPRMetadataRefreshTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        let interval = Self.workspaceGHPRMetadataRefreshInterval
+        timer.schedule(deadline: .now() + interval, repeating: interval, leeway: .seconds(5))
+        timer.setEventHandler { [weak self] in
+            guard let self else { return }
+            DispatchQueue.main.async { [weak self] in
+                self?.refreshGHPRMetadataForSidebarPullRequests()
+            }
+        }
+        timer.resume()
+        workspaceGHPRMetadataRefreshTimer = timer
+    }
+
+    @discardableResult
+    func refreshGHPRMetadataForSidebarPullRequests() -> [UUID] {
+        let workspaceIds = tabs.compactMap { workspace -> UUID? in
+            workspace.sidebarPullRequestsInDisplayOrder().isEmpty ? nil : workspace.id
+        }
+        for workspaceId in workspaceIds {
+            requestGHPRMetadataRefresh(workspaceId.uuidString)
+        }
+        return workspaceIds
     }
 
     private func updateWorkspacePullRequestPollTimer() {
