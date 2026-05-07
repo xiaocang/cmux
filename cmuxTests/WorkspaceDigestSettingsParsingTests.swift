@@ -206,7 +206,7 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         {
           "digest": {
             "enabled": true,
-            "provider": "openai",
+            "provider": "codex",
             "model": "gpt-test",
             "claudeCodeModel": "haiku-test",
             "currentWorkspaceMinIntervalSec": 60,
@@ -227,7 +227,7 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         )
 
         XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.enabled"), true)
-        XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.provider"), "openai")
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.provider"), "codex")
         XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.model"), "gpt-test")
         XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.claudeCodeModel"), "haiku-test")
         XCTAssertEqual(UserDefaults.standard.integer(forKey: "digest.currentWorkspaceMinIntervalSec"), 60)
