@@ -80,8 +80,52 @@ def _daemon_call(socket_path: str, command: str, payload: dict) -> dict:
     return json.loads(raw[3:])
 
 
+def _daemon_refresh_summary_priority(digest: str, env: dict[str, str]) -> dict:
+    socket_path = env["CMUX_DIGEST_SOCKET_PATH"]
+    daemon = subprocess.Popen(
+        [digest, "daemon"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=env,
+    )
+    try:
+        _wait_for_socket(socket_path, daemon)
+        return _daemon_call(
+            socket_path,
+            "refresh_summary_priority",
+            {
+                "force": False,
+                "sort": {"mode": "dimension", "dimensionId": "urgency", "direction": "desc"},
+            },
+        )
+    finally:
+        daemon.terminate()
+        try:
+            daemon.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            daemon.kill()
+            daemon.wait(timeout=2)
+
+
 def _workspace_ids(state: dict) -> list[str]:
     return [str(item.get("workspaceId") or "") for item in state.get("items", [])]
+
+
+def _max_overlap(rows: list[dict], call_kind: str) -> int:
+    events = [
+        row for row in rows
+        if row.get("callKind") == call_kind and row.get("event") in ("start", "end")
+    ]
+    active = 0
+    max_active = 0
+    for row in sorted(events, key=lambda item: (float(item.get("time") or 0), 0 if item.get("event") == "start" else 1)):
+        if row.get("event") == "start":
+            active += 1
+            max_active = max(max_active, active)
+        else:
+            active = max(0, active - 1)
+    return max_active
 
 
 def _read_jsonl(path: pathlib.Path) -> list[dict]:
@@ -103,9 +147,12 @@ def _write_fake_cli(path: pathlib.Path, log_path: pathlib.Path, kind: str) -> No
             f"""\
             #!/usr/bin/env python3
             import json
+            import atexit
+            import fcntl
             import os
             import pathlib
             import sys
+            import time
 
             KIND = {kind!r}
             log_path = pathlib.Path({str(log_path)!r})
@@ -125,8 +172,43 @@ def _write_fake_cli(path: pathlib.Path, log_path: pathlib.Path, kind: str) -> No
                     idx = argv.index("--output-last-message")
                     if idx + 1 < len(argv):
                         output_path = pathlib.Path(argv[idx + 1])
-            with log_path.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({{"argv": argv, "prompt": prompt, "is_resume": is_resume}}, sort_keys=True) + "\\n")
+            timing_log_raw = os.environ.get("FAKE_CLI_TIMING_LOG")
+            timing_log_path = pathlib.Path(timing_log_raw) if timing_log_raw else None
+
+            def call_kind(value):
+                if '"mode":"incremental_update"' in value or '"mode": "incremental_update"' in value:
+                    return "incremental"
+                if '"mode":"quick_cold_start"' in value or '"mode": "quick_cold_start"' in value:
+                    return "quick"
+                if '"redactedScreen"' in value:
+                    return "surface"
+                if '"dimensions"' in value and '"digest"' in value:
+                    return "dimension"
+                return "workspace"
+
+            def append_jsonl(path, row):
+                with path.open("a", encoding="utf-8") as f:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+                    f.write(json.dumps(row, sort_keys=True) + "\\n")
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+            def write_timing(event):
+                if timing_log_path is None:
+                    return
+                append_jsonl(timing_log_path, {{
+                    "event": event,
+                    "pid": os.getpid(),
+                    "kind": KIND,
+                    "callKind": call_kind(prompt),
+                    "time": time.monotonic(),
+                }})
+
+            append_jsonl(log_path, {{"argv": argv, "prompt": prompt, "is_resume": is_resume}})
+            write_timing("start")
+            atexit.register(lambda: write_timing("end"))
+            sleep_sec = float(os.environ.get("FAKE_CLI_SLEEP", "0") or "0")
+            if sleep_sec > 0:
+                time.sleep(sleep_sec)
             if KIND == "claude" and is_resume and os.environ.get("FAKE_CLAUDE_FAIL_RESUME") == "1":
                 print("resume failed", file=sys.stderr)
                 raise SystemExit(42)
@@ -184,6 +266,8 @@ def _write_fake_cli(path: pathlib.Path, log_path: pathlib.Path, kind: str) -> No
             label_prefix = "Claude" if KIND == "claude" else "Codex"
             if '"mode":"incremental_update"' in prompt or '"mode": "incremental_update"' in prompt:
                 result = workspace(label_prefix + " Incremental")
+            elif '"mode":"quick_cold_start"' in prompt or '"mode": "quick_cold_start"' in prompt:
+                result = workspace(label_prefix + " Quick")
             elif '"redactedScreen"' in prompt:
                 result = surface()
             elif '"dimensions"' in prompt and '"digest"' in prompt:
@@ -499,6 +583,40 @@ def main() -> int:
                 except subprocess.TimeoutExpired:
                     daemon.kill()
                     daemon.wait(timeout=2)
+
+            def run_summary_priority_concurrency_case(name: str, max_concurrent: Optional[int]) -> list[dict]:
+                timing_log = root / f"{name}-timing.jsonl"
+                if timing_log.exists():
+                    timing_log.unlink()
+                case_env = env.copy()
+                case_env["CMUX_DIGEST_HOME"] = str(root / f"{name}-digest-home")
+                case_env["CMUX_DIGEST_SOCKET_PATH"] = str(root / f"{name}.sock")
+                case_env["FAKE_CLI_SLEEP"] = "0.25"
+                case_env["FAKE_CLI_TIMING_LOG"] = str(timing_log)
+                if max_concurrent is None:
+                    case_env.pop("CMUX_DIGEST_MAX_CONCURRENT_LLM", None)
+                else:
+                    case_env["CMUX_DIGEST_MAX_CONCURRENT_LLM"] = str(max_concurrent)
+                state = _daemon_refresh_summary_priority(digest, case_env)
+                _must(len(_workspace_ids(state)) == 3, json.dumps(state, sort_keys=True))
+                return _read_jsonl(timing_log)
+
+            default_timing = run_summary_priority_concurrency_case("default-concurrency", None)
+            _must(
+                _max_overlap(default_timing, "quick") >= 3,
+                f"default Summary Priority quick refresh should reach 3 concurrent LLM calls: {default_timing!r}",
+            )
+            _must(
+                not any(row.get("callKind") == "dimension" for row in default_timing),
+                f"quick cold start should not call the dimension scorer before refinement: {default_timing!r}",
+            )
+
+            capped_timing = run_summary_priority_concurrency_case("cap-two-concurrency", 2)
+            capped_overlap = _max_overlap(capped_timing, "quick")
+            _must(
+                capped_overlap == 2,
+                f"CMUX_DIGEST_MAX_CONCURRENT_LLM=2 should cap quick refresh overlap at 2, got {capped_overlap}: {capped_timing!r}",
+            )
 
             transcript = root / "claude-session.jsonl"
             transcript.write_text(

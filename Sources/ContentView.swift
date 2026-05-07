@@ -652,15 +652,32 @@ private final class ExtensionColumnOverlayContainerView: NSView {
     var capturesMouseEvents = false
     var sidebarWidth: CGFloat = 0
     var overlayHitWidth: CGFloat = 0
+    weak var scrollForwardingTarget: NSScrollView?
 
     override var isOpaque: Bool { false }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
-        guard capturesMouseEvents, bounds.contains(point) else { return nil }
+        guard isInsideOverlayHitBand(point) else { return nil }
+        if let hit = super.hitTest(point) {
+            return hit
+        }
+        if NSApp.currentEvent?.type == .scrollWheel {
+            return self
+        }
+        return nil
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard isInsideOverlayHitBand(point) else { return }
+        scrollForwardingTarget?.scrollWheel(with: event)
+    }
+
+    private func isInsideOverlayHitBand(_ point: NSPoint) -> Bool {
+        guard capturesMouseEvents, bounds.contains(point) else { return false }
         let hitMinX = max(0, sidebarWidth)
         let hitMaxX = hitMinX + max(0, overlayHitWidth)
-        guard point.x >= hitMinX, point.x <= hitMaxX else { return nil }
-        return super.hitTest(point)
+        return point.x >= hitMinX && point.x <= hitMaxX
     }
 }
 #if DEBUG
@@ -1392,11 +1409,18 @@ private final class WindowExtensionColumnOverlayController: NSObject {
         themeFrame.addSubview(containerView, positioned: .above, relativeTo: nil)
     }
 
-    func update(rootView: AnyView, isVisible: Bool, sidebarWidth: CGFloat, hitWidth: CGFloat) {
+    func update(
+        rootView: AnyView,
+        isVisible: Bool,
+        sidebarWidth: CGFloat,
+        hitWidth: CGFloat,
+        scrollForwardingTarget: NSScrollView?
+    ) {
         guard ensureInstalled() else { return }
 
         containerView.sidebarWidth = sidebarWidth
         containerView.overlayHitWidth = hitWidth
+        containerView.scrollForwardingTarget = scrollForwardingTarget
 
         if isVisible {
             hostingView.rootView = rootView
@@ -3730,8 +3754,10 @@ struct ContentView: View {
             presentFeedbackComposer()
         })
 
+        let scrollForwardingGeneration = workspaceSidebarLayoutMetricsStore.scrollForwardingGeneration
         view = AnyView(view.background(WindowAccessor(dedupeByWindow: false) { window in
             MainActor.assumeIsolated {
+                _ = scrollForwardingGeneration
                 let tmuxOverlayState = tmuxWorkspacePaneWindowOverlayState(for: window)
                 tmuxWorkspacePaneWindowOverlayController(for: window, createIfNeeded: tmuxOverlayState != nil)?.update(state: tmuxOverlayState)
                 let extensionOverlayController = extensionColumnWindowOverlayController(for: window)
@@ -3749,7 +3775,8 @@ struct ContentView: View {
                     ),
                     isVisible: isExtensionColumnVisible,
                     sidebarWidth: sidebarWidth,
-                    hitWidth: ExtensionColumnSettings.overlayHitWidth
+                    hitWidth: ExtensionColumnSettings.overlayHitWidth,
+                    scrollForwardingTarget: workspaceSidebarLayoutMetricsStore.scrollViewForExtensionColumn
                 )
                 let overlayController = commandPaletteWindowOverlayController(for: window)
                 overlayController.update(isVisible: isCommandPalettePresented) { AnyView(commandPaletteOverlay) }
@@ -9871,10 +9898,37 @@ private struct SidebarTabItemPresentationSnapshot: Equatable {
 final class WorkspaceSidebarLayoutMetricsStore: ObservableObject {
     @Published private(set) var rowFrames: [UUID: CGRect] = [:]
     @Published private(set) var hoveredWorkspaceId: UUID?
+    @Published private(set) var layoutRefreshGeneration: UInt64 = 0
+    @Published private(set) var scrollForwardingGeneration: UInt64 = 0
     private var pendingHoverClearWorkItem: DispatchWorkItem?
+    private weak var sidebarScrollView: NSScrollView?
 
     func rowFrame(for workspaceId: UUID) -> CGRect? {
         rowFrames[workspaceId]
+    }
+
+    var scrollViewForExtensionColumn: NSScrollView? {
+        guard let sidebarScrollView, sidebarScrollView.window != nil else { return nil }
+        return sidebarScrollView
+    }
+
+    func attachScrollView(_ scrollView: NSScrollView?) {
+        guard sidebarScrollView !== scrollView else { return }
+        sidebarScrollView = scrollView
+        scrollForwardingGeneration &+= 1
+    }
+
+    func requestLayoutRefresh() {
+        pendingHoverClearWorkItem?.cancel()
+        pendingHoverClearWorkItem = nil
+        if hoveredWorkspaceId != nil {
+            hoveredWorkspaceId = nil
+        }
+        if !rowFrames.isEmpty {
+            rowFrames = [:]
+        }
+        layoutRefreshGeneration &+= 1
+        invalidateSidebarScrollLayout()
     }
 
     func setRowFrame(_ frame: CGRect?, for workspaceId: UUID) {
@@ -9960,20 +10014,38 @@ final class WorkspaceSidebarLayoutMetricsStore: ObservableObject {
     private static func normalized(_ value: CGFloat) -> CGFloat {
         (value * 2).rounded(.toNearestOrAwayFromZero) / 2
     }
+
+    private func invalidateSidebarScrollLayout() {
+        guard let scrollView = scrollViewForExtensionColumn else { return }
+        scrollView.needsLayout = true
+        scrollView.contentView.needsLayout = true
+        scrollView.documentView?.needsLayout = true
+        scrollView.layoutSubtreeIfNeeded()
+        scrollView.documentView?.layoutSubtreeIfNeeded()
+    }
 }
 
 private struct WorkspaceSidebarRowFrameReporter: NSViewRepresentable {
     let workspaceId: UUID
+    let refreshGeneration: UInt64
     let onFrameChange: (UUID, CGRect?) -> Void
 
     func makeNSView(context: Context) -> WorkspaceSidebarRowFrameReporterView {
         let view = WorkspaceSidebarRowFrameReporterView(frame: .zero)
-        view.configure(workspaceId: workspaceId, onFrameChange: onFrameChange)
+        view.configure(
+            workspaceId: workspaceId,
+            refreshGeneration: refreshGeneration,
+            onFrameChange: onFrameChange
+        )
         return view
     }
 
     func updateNSView(_ nsView: WorkspaceSidebarRowFrameReporterView, context: Context) {
-        nsView.configure(workspaceId: workspaceId, onFrameChange: onFrameChange)
+        nsView.configure(
+            workspaceId: workspaceId,
+            refreshGeneration: refreshGeneration,
+            onFrameChange: onFrameChange
+        )
     }
 
     static func dismantleNSView(_ nsView: WorkspaceSidebarRowFrameReporterView, coordinator: ()) {
@@ -9984,6 +10056,7 @@ private struct WorkspaceSidebarRowFrameReporter: NSViewRepresentable {
 @MainActor
 private final class WorkspaceSidebarRowFrameReporterView: NSView {
     private var workspaceId: UUID?
+    private var refreshGeneration: UInt64 = 0
     private var onFrameChange: ((UUID, CGRect?) -> Void)?
     private var lastReportedFrame: CGRect?
     private var isReportScheduled = false
@@ -9996,9 +10069,17 @@ private final class WorkspaceSidebarRowFrameReporterView: NSView {
         nil
     }
 
-    func configure(workspaceId: UUID, onFrameChange: @escaping (UUID, CGRect?) -> Void) {
+    func configure(
+        workspaceId: UUID,
+        refreshGeneration: UInt64,
+        onFrameChange: @escaping (UUID, CGRect?) -> Void
+    ) {
         if self.workspaceId != workspaceId {
             clearReportedFrame()
+        }
+        if self.refreshGeneration != refreshGeneration {
+            self.refreshGeneration = refreshGeneration
+            lastReportedFrame = nil
         }
         self.workspaceId = workspaceId
         self.onFrameChange = onFrameChange
@@ -10410,6 +10491,7 @@ struct VerticalTabsSidebar: View {
                 .background(
                     SidebarScrollViewResolver { scrollView in
                         dragAutoScrollController.attach(scrollView: scrollView)
+                        workspaceSidebarLayoutMetricsStore.attachScrollView(scrollView)
                     }
                     .frame(width: 0, height: 0)
                 )
@@ -10498,7 +10580,9 @@ struct VerticalTabsSidebar: View {
         minHeight: CGFloat
     ) -> some View {
         VStack(spacing: 0) {
-            WorkspaceSidebarModeHeader()
+            WorkspaceSidebarModeHeader(
+                workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore
+            )
 
             workspaceRows(renderContext: renderContext)
 
@@ -10652,6 +10736,7 @@ struct VerticalTabsSidebar: View {
             latestNotificationText: frozenPresentation?.latestNotificationText ?? liveLatestNotificationText,
             summaryScoreBadge: renderContext.summaryScoreBadgeById[tab.id],
             rowSpacing: tabRowSpacing,
+            layoutRefreshGeneration: workspaceSidebarLayoutMetricsStore.layoutRefreshGeneration,
             setSelectionToTabs: { selection = .tabs },
             selectedTabIds: $selectedTabIds,
             lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
@@ -13563,6 +13648,10 @@ final class WorkspaceTabStore: ObservableObject {
             return String(localized: "extensionColumn.refreshStage.sorting", defaultValue: "Sorting")
         case "saving":
             return String(localized: "extensionColumn.refreshStage.saving", defaultValue: "Saving")
+        case "updating":
+            return String(localized: "extensionColumn.refreshStage.updating", defaultValue: "Updating")
+        case "done":
+            return String(localized: "extensionColumn.refreshStage.done", defaultValue: "Done")
         case "retrying":
             return String(localized: "extensionColumn.refreshStage.retrying", defaultValue: "Retrying")
         default:
@@ -14023,10 +14112,9 @@ final class WorkspaceTabStore: ObservableObject {
 }
 
 private struct WorkspaceSidebarModeHeader: View {
+    let workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
-    @EnvironmentObject private var workspaceTabStore: WorkspaceTabStore
-    @EnvironmentObject private var tabManager: TabManager
 
     var body: some View {
         HStack(spacing: 6) {
@@ -14036,12 +14124,7 @@ private struct WorkspaceSidebarModeHeader: View {
             Spacer(minLength: 0)
 
             Button {
-                tabManager.forceRefreshAllWorkspacePullRequests()
-                for workspace in tabManager.tabs {
-                    CmuxDigestDaemonSupervisor.requestRefresh(
-                        workspaceId: workspace.id.uuidString
-                    )
-                }
+                workspaceSidebarLayoutMetricsStore.requestLayoutRefresh()
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .font(.system(size: 9, weight: .semibold))
@@ -14053,7 +14136,7 @@ private struct WorkspaceSidebarModeHeader: View {
                     )
             }
             .buttonStyle(.plain)
-            .safeHelp(String(localized: "sidebar.workspaceTab.refreshPRs", defaultValue: "Refresh pull requests"))
+            .safeHelp(String(localized: "sidebar.workspaceTab.refreshLayout", defaultValue: "Refresh layout"))
 
             Button {
                 extensionColumnOpen.toggle()
@@ -15237,6 +15320,7 @@ private struct TabItemView: View, Equatable {
         lhs.latestNotificationText == rhs.latestNotificationText &&
         lhs.summaryScoreBadge == rhs.summaryScoreBadge &&
         lhs.rowSpacing == rhs.rowSpacing &&
+        lhs.layoutRefreshGeneration == rhs.layoutRefreshGeneration &&
         lhs.showsModifierShortcutHints == rhs.showsModifierShortcutHints &&
         lhs.contextMenuWorkspaceIds == rhs.contextMenuWorkspaceIds &&
         lhs.remoteContextMenuWorkspaceIds == rhs.remoteContextMenuWorkspaceIds &&
@@ -15264,6 +15348,7 @@ private struct TabItemView: View, Equatable {
     let latestNotificationText: String?
     let summaryScoreBadge: WorkspaceSidebarScoreBadge?
     let rowSpacing: CGFloat
+    let layoutRefreshGeneration: UInt64
     let setSelectionToTabs: () -> Void
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
@@ -16048,6 +16133,7 @@ private struct TabItemView: View, Equatable {
         .background {
             WorkspaceSidebarRowFrameReporter(
                 workspaceId: tab.id,
+                refreshGeneration: layoutRefreshGeneration,
                 onFrameChange: reportLayoutFrame
             )
         }
@@ -19204,6 +19290,7 @@ private struct ExtensionColumnWindowOverlayRoot: View {
                         onClose: onClose
                     )
                     .environmentObject(tabManager)
+                    .id(workspaceSidebarLayoutMetricsStore.layoutRefreshGeneration)
                     .frame(
                         width: ExtensionColumnSettings.overlayHitWidth,
                         height: proxy.size.height,

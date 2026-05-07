@@ -628,6 +628,54 @@ private enum WorkspaceDigestRefreshLevel: String {
     var usesSurfaceLLM: Bool {
         self == .full
     }
+
+    var llmMode: String {
+        switch self {
+        case .quickColdStart:
+            return "quick_cold_start"
+        case .seed:
+            return "seed"
+        case .full:
+            return "full"
+        }
+    }
+
+    var workspaceSummaryStage: String {
+        switch self {
+        case .quickColdStart:
+            return "quick"
+        case .seed:
+            return "seed"
+        case .full:
+            return "summary"
+        }
+    }
+
+    var persistsSummarySession: Bool {
+        self != .quickColdStart
+    }
+
+    var statusLogPromptBudget: Int {
+        switch self {
+        case .quickColdStart:
+            return 1_500
+        case .seed:
+            return 4_000
+        case .full:
+            return 12_000
+        }
+    }
+
+    var workspacePromptSurfaceLimit: Int? {
+        switch self {
+        case .quickColdStart:
+            return 3
+        case .seed:
+            return 6
+        case .full:
+            return nil
+        }
+    }
 }
 
 private struct DigestProgressSnapshot: Codable, Hashable {
@@ -640,6 +688,7 @@ private struct DigestProgressSnapshot: Codable, Hashable {
 private struct DigestProgressItem: Codable, Hashable {
     var stage: String
     var updatedAt: String
+    var owner: String?
 }
 
 private struct DigestConfig {
@@ -1848,6 +1897,7 @@ private final class AgentSessionRepository {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let runner = CommandRunner()
+    private let lock = NSLock()
     private var cachedAllLinks: [AgentSessionLinkRecord]?
 
     init(root: URL) {
@@ -1864,6 +1914,8 @@ private final class AgentSessionRepository {
     }
 
     func putDigest(_ digest: AgentSessionDigest) {
+        lock.lock()
+        defer { lock.unlock() }
         do {
             try FileManager.default.createDirectory(at: digestsURL, withIntermediateDirectories: true)
             let url = digestsURL.appendingPathComponent("\(safeName(digest.provider))-\(safeName(digest.sessionId)).json")
@@ -1875,10 +1927,14 @@ private final class AgentSessionRepository {
     }
 
     func invalidateLinksCache() {
+        lock.lock()
         cachedAllLinks = nil
+        lock.unlock()
     }
 
     private func allLinks() -> [AgentSessionLinkRecord] {
+        lock.lock()
+        defer { lock.unlock() }
         if let cached = cachedAllLinks { return cached }
         guard let urls = try? FileManager.default.contentsOfDirectory(
             at: linksURL,
@@ -2699,29 +2755,47 @@ private final class DigestProgressTracker {
     private var summaryPriority: DigestProgressItem?
     private var workspaces: [String: DigestProgressItem] = [:]
 
-    func setSummaryPriority(_ stage: String) {
-        let item = DigestProgressItem(stage: stage, updatedAt: Self.now())
+    func makeOwner() -> String {
+        UUID().uuidString
+    }
+
+    func setSummaryPriority(_ stage: String, owner: String? = nil) {
+        let item = DigestProgressItem(stage: stage, updatedAt: Self.now(), owner: owner)
         lock.lock()
         summaryPriority = item
         lock.unlock()
     }
 
-    func clearSummaryPriority() {
+    func clearSummaryPriority(owner: String? = nil) {
         lock.lock()
-        summaryPriority = nil
+        if owner == nil || summaryPriority?.owner == owner {
+            summaryPriority = nil
+        }
         lock.unlock()
     }
 
-    func setWorkspace(_ workspaceId: String, stage: String) {
-        let item = DigestProgressItem(stage: stage, updatedAt: Self.now())
+    func setWorkspace(_ workspaceId: String, stage: String, owner: String? = nil) {
+        let item = DigestProgressItem(stage: stage, updatedAt: Self.now(), owner: owner)
         lock.lock()
         workspaces[workspaceId] = item
         lock.unlock()
     }
 
-    func clearWorkspace(_ workspaceId: String) {
+    func clearWorkspace(_ workspaceId: String, owner: String? = nil) {
         lock.lock()
-        workspaces.removeValue(forKey: workspaceId)
+        if owner == nil || workspaces[workspaceId]?.owner == owner {
+            workspaces.removeValue(forKey: workspaceId)
+        }
+        lock.unlock()
+    }
+
+    func clearWorkspaces(_ workspaceIds: [String], owner: String? = nil) {
+        lock.lock()
+        for workspaceId in workspaceIds {
+            if owner == nil || workspaces[workspaceId]?.owner == owner {
+                workspaces.removeValue(forKey: workspaceId)
+            }
+        }
         lock.unlock()
     }
 
@@ -2751,8 +2825,6 @@ private final class DigestProgressTracker {
 
 private final class DigestLLMClient {
     private let config: DigestConfig
-    private let decoder = JSONDecoder()
-    private let encoder = JSONEncoder()
     private static let timeoutCooldownSeconds: TimeInterval = 90
     private static let surfaceBatchPromptBudget = 64_000
     private static let workspacePromptVersion = "cmux-digest.llm.v1"
@@ -2767,7 +2839,6 @@ private final class DigestLLMClient {
     init(config: DigestConfig) {
         self.config = config
         self.throttle = DispatchSemaphore(value: max(1, config.maxConcurrentLLM))
-        encoder.outputFormatting = [.sortedKeys]
     }
 
     func surfaceDigest(
@@ -2788,7 +2859,7 @@ private final class DigestLLMClient {
             cwd: surface.cwd ?? workspaceCwd
         ) { content in
             let data = try Self.jsonData(from: content)
-            let output = try decoder.decode(SurfaceDigestLLMOutput.self, from: data)
+            let output = try JSONDecoder().decode(SurfaceDigestLLMOutput.self, from: data)
             try DigestSchemaValidator.validate(output)
             return Self.merge(output, into: fallback)
         }
@@ -2813,7 +2884,7 @@ private final class DigestLLMClient {
                 cwd: workspaceCwd ?? batch.entries.first?.request.surface.cwd
             ) { content in
                 let data = try Self.jsonData(from: content)
-                let decoded = try decoder.decode(SurfaceDigestBatchLLMOutput.self, from: data)
+                let decoded = try JSONDecoder().decode(SurfaceDigestBatchLLMOutput.self, from: data)
                 var merged: [String: SurfaceDigest] = [:]
                 for entry in batch.entries {
                     let request = entry.request
@@ -2847,14 +2918,16 @@ private final class DigestLLMClient {
         fallback: WorkspaceDigest,
         inputSnapshot: WorkspaceDigestInputSnapshot,
         force: Bool,
-        workspaceCwd: String?
+        workspaceCwd: String?,
+        level: WorkspaceDigestRefreshLevel
     ) -> WorkspaceDigest? {
         guard let cliTemplate = requestTemplate() else { return nil }
         if let reason = llmSuspendedReason() {
             fputs("cmux-digest: CLI summary skipped during cooldown: \(reason)\n", stderr)
             return nil
         }
-        if canResumeWorkspaceSummary(
+        if level.persistsSummarySession,
+           canResumeWorkspaceSummary(
             cliTemplate: cliTemplate,
             previous: previous,
             inputSnapshot: inputSnapshot,
@@ -2917,7 +2990,8 @@ private final class DigestLLMClient {
             previous: previous,
             fallback: fallback,
             inputSnapshot: inputSnapshot,
-            workspaceCwd: workspaceCwd
+            workspaceCwd: workspaceCwd,
+            level: level
         )
     }
 
@@ -2934,7 +3008,8 @@ private final class DigestLLMClient {
         previous: WorkspaceDigest?,
         fallback: WorkspaceDigest,
         inputSnapshot: WorkspaceDigestInputSnapshot,
-        workspaceCwd: String?
+        workspaceCwd: String?,
+        level: WorkspaceDigestRefreshLevel
     ) -> WorkspaceDigest? {
         var lastError: Error?
         let user = workspaceUserPrompt(
@@ -2947,7 +3022,8 @@ private final class DigestLLMClient {
             statusText: statusText,
             logText: logText,
             previous: previous,
-            fallback: fallback
+            fallback: fallback,
+            level: level
         )
         for attempt in 0..<2 {
             do {
@@ -2956,13 +3032,15 @@ private final class DigestLLMClient {
                     system: workspaceSystemPrompt,
                     user: retryUserPrompt(user, attempt: attempt, lastError: lastError),
                     cwd: workspaceCwd,
-                    cliMode: .start(persistSession: config.incrementalSummaryEnabled)
+                    cliMode: .start(persistSession: config.incrementalSummaryEnabled && level.persistsSummarySession)
                 )
-                let summarySession = newSummarySession(
-                    response: response,
-                    cliTemplate: cliTemplate,
-                    inputSnapshot: inputSnapshot
-                )
+                let summarySession = level.persistsSummarySession
+                    ? newSummarySession(
+                        response: response,
+                        cliTemplate: cliTemplate,
+                        inputSnapshot: inputSnapshot
+                    )
+                    : nil
                 return try decodeWorkspaceDigest(
                     response,
                     fallback: fallback,
@@ -2992,7 +3070,7 @@ private final class DigestLLMClient {
         inputSnapshot: WorkspaceDigestInputSnapshot
     ) throws -> WorkspaceDigest {
         let data = try Self.jsonData(from: response.content)
-        let output = try decoder.decode(WorkspaceDigestLLMOutput.self, from: data)
+        let output = try JSONDecoder().decode(WorkspaceDigestLLMOutput.self, from: data)
         try DigestSchemaValidator.validate(output)
         return Self.merge(
             output,
@@ -3088,7 +3166,7 @@ private final class DigestLLMClient {
             cwd: digest.workspaceFacts.cwd
         ) { content in
             let data = try Self.jsonData(from: content)
-            let output = try decoder.decode(DimensionAssessmentLLMOutput.self, from: data)
+            let output = try JSONDecoder().decode(DimensionAssessmentLLMOutput.self, from: data)
             try DigestSchemaValidator.validate(output, profile: singleDimensionProfile)
             let dimensions = SummaryPriorityScoringEngine.normalizedDimensions(
                 output.dimensions,
@@ -3749,17 +3827,20 @@ private final class DigestLLMClient {
         statusText: String,
         logText: String,
         previous: WorkspaceDigest?,
-        fallback: WorkspaceDigest
+        fallback: WorkspaceDigest,
+        level: WorkspaceDigestRefreshLevel
     ) -> String {
+        let budget = level.statusLogPromptBudget
         let input = WorkspaceLLMInput(
+            mode: level.llmMode,
             workspace: workspace,
             surfaceDigests: surfaceDigests,
             sessionDigests: sessionDigests,
             gitFacts: gitFacts,
             ghprContext: ghprContext,
             notifications: notifications,
-            statusText: statusText.truncated(12_000),
-            logText: logText.truncated(12_000),
+            statusText: statusText.truncated(budget),
+            logText: logText.truncated(budget),
             previousDigest: previous,
             localDraft: fallback
         )
@@ -3867,6 +3948,8 @@ private final class DigestLLMClient {
     }
 
     private func encodedPrompt<T: Encodable>(_ value: T) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(value),
               let string = String(data: data, encoding: .utf8) else {
             return "{}"
@@ -4019,6 +4102,7 @@ private final class DigestLLMClient {
     }
 
     private struct WorkspaceLLMInput: Encodable {
+        var mode: String
         var workspace: CmuxWorkspaceRef
         var surfaceDigests: [SurfaceDigest]
         var sessionDigests: [AgentSessionDigest]
@@ -4340,6 +4424,7 @@ private final class DigestStore {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private let runner = CommandRunner()
+    private let lock = NSRecursiveLock()
 
     init(root: URL) throws {
         self.root = root
@@ -4357,137 +4442,173 @@ private final class DigestStore {
     }
 
     func getWorkspaceDigest(workspaceId: String) -> WorkspaceDigest? {
-        let url = workspacesURL.appendingPathComponent("\(safeName(workspaceId)).json")
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? decoder.decode(WorkspaceDigest.self, from: data)
-    }
-
-    func putWorkspaceDigest(_ digest: WorkspaceDigest) throws {
-        let data = try encoder.encode(digest)
-        let url = workspacesURL.appendingPathComponent("\(safeName(digest.workspaceId)).json")
-        try data.write(to: url, options: .atomic)
-        updateSQLiteIndex(digest)
-    }
-
-    func listWorkspaceDigests() -> [WorkspaceDigest] {
-        guard let urls = try? FileManager.default.contentsOfDirectory(
-            at: workspacesURL,
-            includingPropertiesForKeys: nil
-        ) else { return [] }
-        return urls.compactMap { url in
+        locked {
+            let url = workspacesURL.appendingPathComponent("\(safeName(workspaceId)).json")
             guard let data = try? Data(contentsOf: url) else { return nil }
             return try? decoder.decode(WorkspaceDigest.self, from: data)
         }
     }
 
+    func putWorkspaceDigest(_ digest: WorkspaceDigest) throws {
+        try locked {
+            let data = try encoder.encode(digest)
+            let url = workspacesURL.appendingPathComponent("\(safeName(digest.workspaceId)).json")
+            try data.write(to: url, options: .atomic)
+            updateSQLiteIndex(digest)
+        }
+    }
+
+    func listWorkspaceDigests() -> [WorkspaceDigest] {
+        locked {
+            guard let urls = try? FileManager.default.contentsOfDirectory(
+                at: workspacesURL,
+                includingPropertiesForKeys: nil
+            ) else { return [] }
+            return urls.compactMap { url in
+                guard let data = try? Data(contentsOf: url) else { return nil }
+                return try? decoder.decode(WorkspaceDigest.self, from: data)
+            }
+        }
+    }
+
     func getSurfaceDigest(workspaceId: String, surfaceId: String, inputHash: String) -> SurfaceDigest? {
-        let url = surfacesURL.appendingPathComponent("\(safeName(workspaceId))-\(safeName(surfaceId))-\(inputHash).json")
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        return try? decoder.decode(SurfaceDigest.self, from: data)
+        locked {
+            let url = surfacesURL.appendingPathComponent("\(safeName(workspaceId))-\(safeName(surfaceId))-\(inputHash).json")
+            guard let data = try? Data(contentsOf: url) else { return nil }
+            return try? decoder.decode(SurfaceDigest.self, from: data)
+        }
     }
 
     func putSurfaceDigest(_ digest: SurfaceDigest) throws {
-        let data = try encoder.encode(digest)
-        let url = surfacesURL.appendingPathComponent("\(safeName(digest.workspaceId))-\(safeName(digest.surfaceId))-\(digest.inputHash).json")
-        try data.write(to: url, options: .atomic)
+        try locked {
+            let data = try encoder.encode(digest)
+            let url = surfacesURL.appendingPathComponent("\(safeName(digest.workspaceId))-\(safeName(digest.surfaceId))-\(digest.inputHash).json")
+            try data.write(to: url, options: .atomic)
+        }
     }
 
     func appendRawEvent(source: String, eventType: String, data: Data) throws {
-        let now = ISO8601DateFormatter().string(from: Date())
-        let event: [String: Any] = [
-            "id": UUID().uuidString,
-            "observed_at": now,
-            "source": source,
-            "event_type": eventType,
-            "json": String(data: data, encoding: .utf8) ?? ""
-        ]
-        let encoded = try JSONSerialization.data(withJSONObject: event)
-        let day = String(now.prefix(10))
-        let url = eventsURL.appendingPathComponent("\(day).ndjson")
-        let line = encoded + Data([0x0a])
-        if FileManager.default.fileExists(atPath: url.path) {
-            let handle = try FileHandle(forWritingTo: url)
-            try handle.seekToEnd()
-            try handle.write(contentsOf: line)
-            try handle.close()
-        } else {
-            try line.write(to: url, options: .atomic)
+        try locked {
+            let now = ISO8601DateFormatter().string(from: Date())
+            let event: [String: Any] = [
+                "id": UUID().uuidString,
+                "observed_at": now,
+                "source": source,
+                "event_type": eventType,
+                "json": String(data: data, encoding: .utf8) ?? ""
+            ]
+            let encoded = try JSONSerialization.data(withJSONObject: event)
+            let day = String(now.prefix(10))
+            let url = eventsURL.appendingPathComponent("\(day).ndjson")
+            let line = encoded + Data([0x0a])
+            if FileManager.default.fileExists(atPath: url.path) {
+                let handle = try FileHandle(forWritingTo: url)
+                try handle.seekToEnd()
+                try handle.write(contentsOf: line)
+                try handle.close()
+            } else {
+                try line.write(to: url, options: .atomic)
+            }
         }
     }
 
     func getScoringProfile(id: String?) -> ScoringProfile {
-        let profileId = id?.trimmedNonEmpty ?? "default"
-        let url = profilesURL.appendingPathComponent("\(safeName(profileId)).json")
-        guard let data = try? Data(contentsOf: url),
-              let profile = try? decoder.decode(ScoringProfile.self, from: data) else {
-            return ScoringProfile.defaultProfile
+        locked {
+            let profileId = id?.trimmedNonEmpty ?? "default"
+            let url = profilesURL.appendingPathComponent("\(safeName(profileId)).json")
+            guard let data = try? Data(contentsOf: url),
+                  let profile = try? decoder.decode(ScoringProfile.self, from: data) else {
+                return ScoringProfile.defaultProfile
+            }
+            return profile
         }
-        return profile
     }
 
     func putScoringProfile(_ profile: ScoringProfile) throws {
-        let data = try encoder.encode(profile)
-        try data.write(
-            to: profilesURL.appendingPathComponent("\(safeName(profile.id)).json"),
-            options: .atomic
-        )
+        try locked {
+            let data = try encoder.encode(profile)
+            try data.write(
+                to: profilesURL.appendingPathComponent("\(safeName(profile.id)).json"),
+                options: .atomic
+            )
+        }
     }
 
     func getWorkspaceTabDisplayMode() -> WorkspaceTabDisplayMode {
-        let prefs = workspaceTabPreferences()
-        guard let raw = prefs["displayMode"] as? String,
-              let mode = WorkspaceTabDisplayMode(rawValue: raw) else {
-            return .native
+        locked {
+            let prefs = workspaceTabPreferences()
+            guard let raw = prefs["displayMode"] as? String,
+                  let mode = WorkspaceTabDisplayMode(rawValue: raw) else {
+                return .native
+            }
+            return mode
         }
-        return mode
     }
 
     func setWorkspaceTabDisplayMode(_ mode: WorkspaceTabDisplayMode) throws {
-        var prefs = workspaceTabPreferences()
-        prefs["displayMode"] = mode.rawValue
-        try putWorkspaceTabPreferences(prefs)
+        try locked {
+            var prefs = workspaceTabPreferences()
+            prefs["displayMode"] = mode.rawValue
+            try putWorkspaceTabPreferences(prefs)
+        }
     }
 
     func getSummaryPrioritySort() -> SummaryPrioritySort {
-        let prefs = workspaceTabPreferences()
-        guard let raw = prefs["summaryPrioritySort"] as? [String: Any],
-              let data = try? JSONSerialization.data(withJSONObject: raw),
-              let sort = try? decoder.decode(SummaryPrioritySort.self, from: data) else {
-            return .defaultSort
+        locked {
+            let prefs = workspaceTabPreferences()
+            guard let raw = prefs["summaryPrioritySort"] as? [String: Any],
+                  let data = try? JSONSerialization.data(withJSONObject: raw),
+                  let sort = try? decoder.decode(SummaryPrioritySort.self, from: data) else {
+                return .defaultSort
+            }
+            return normalizedSort(sort)
         }
-        return normalizedSort(sort)
     }
 
     func setSummaryPrioritySort(_ sort: SummaryPrioritySort) throws {
-        var prefs = workspaceTabPreferences()
-        let data = try encoder.encode(normalizedSort(sort))
-        prefs["summaryPrioritySort"] = (try? JSONSerialization.jsonObject(with: data)) ?? [:]
-        try putWorkspaceTabPreferences(prefs)
+        try locked {
+            var prefs = workspaceTabPreferences()
+            let data = try encoder.encode(normalizedSort(sort))
+            prefs["summaryPrioritySort"] = (try? JSONSerialization.jsonObject(with: data)) ?? [:]
+            try putWorkspaceTabPreferences(prefs)
+        }
     }
 
     func getOverride(workspaceId: String) -> RankingOverride {
-        let url = overridesURL.appendingPathComponent("\(safeName(workspaceId)).json")
-        guard let data = try? Data(contentsOf: url),
-              let override = try? decoder.decode(RankingOverride.self, from: data) else {
-            return .empty
+        locked {
+            let url = overridesURL.appendingPathComponent("\(safeName(workspaceId)).json")
+            guard let data = try? Data(contentsOf: url),
+                  let override = try? decoder.decode(RankingOverride.self, from: data) else {
+                return .empty
+            }
+            return override
         }
-        return override
     }
 
     func putOverride(_ override: RankingOverride, workspaceId: String) throws {
-        let data = try encoder.encode(override)
-        try data.write(
-            to: overridesURL.appendingPathComponent("\(safeName(workspaceId)).json"),
-            options: .atomic
-        )
-        updateOverrideIndex(override, workspaceId: workspaceId)
+        try locked {
+            let data = try encoder.encode(override)
+            try data.write(
+                to: overridesURL.appendingPathComponent("\(safeName(workspaceId)).json"),
+                options: .atomic
+            )
+            updateOverrideIndex(override, workspaceId: workspaceId)
+        }
     }
 
     func putSummaryPriorityItem(_ item: SummaryPriorityWorkspaceItem, profileId: String, sort: SummaryPrioritySort) throws {
-        let data = try encoder.encode(item)
-        let url = summaryItemsURL.appendingPathComponent("\(safeName(profileId))-\(safeName(item.workspaceId)).json")
-        try data.write(to: url, options: .atomic)
-        updateSummaryPriorityIndex(item, profileId: profileId, sort: sort, jsonPath: url.path)
+        try locked {
+            let data = try encoder.encode(item)
+            let url = summaryItemsURL.appendingPathComponent("\(safeName(profileId))-\(safeName(item.workspaceId)).json")
+            try data.write(to: url, options: .atomic)
+            updateSummaryPriorityIndex(item, profileId: profileId, sort: sort, jsonPath: url.path)
+        }
+    }
+
+    private func locked<T>(_ body: () throws -> T) rethrows -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return try body()
     }
 
     private var workspacesURL: URL { root.appendingPathComponent("digests/workspaces", isDirectory: true) }
@@ -4709,6 +4830,12 @@ private final class DigestController {
     private let ghpr: GHPRContextService
     private let progress = DigestProgressTracker()
 
+    private struct SummaryPriorityCandidate {
+        var nativeWorkspace: NativeWorkspaceItem
+        var workspace: CmuxWorkspaceRef?
+        var coldStart: Bool
+    }
+
     init(config: DigestConfig, cmux: CmuxAdapter, git: GitAdapter, store: DigestStore) {
         self.config = config
         self.cmux = cmux
@@ -4726,10 +4853,68 @@ private final class DigestController {
         progress.snapshot()
     }
 
+    private func runLimited<Input, Output>(
+        _ inputs: [Input],
+        _ work: @escaping (Input) throws -> Output
+    ) throws -> [Output] {
+        guard !inputs.isEmpty else { return [] }
+
+        let throttle = DispatchSemaphore(value: max(1, config.maxConcurrentLLM))
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var results = Array<Output?>(repeating: nil, count: inputs.count)
+        var firstError: Error?
+
+        for (index, input) in inputs.enumerated() {
+            throttle.wait()
+            group.enter()
+            DispatchQueue.global(qos: .utility).async {
+                defer {
+                    throttle.signal()
+                    group.leave()
+                }
+
+                do {
+                    let result = try work(input)
+                    lock.lock()
+                    results[index] = result
+                    lock.unlock()
+                } catch {
+                    lock.lock()
+                    if firstError == nil {
+                        firstError = error
+                    }
+                    lock.unlock()
+                }
+            }
+        }
+
+        group.wait()
+        lock.lock()
+        let error = firstError
+        let output = results
+        lock.unlock()
+
+        if let error {
+            throw error
+        }
+        let compacted = output.compactMap { $0 }
+        guard compacted.count == inputs.count else {
+            throw DigestError(description: "Parallel digest refresh produced an incomplete result set")
+        }
+        return compacted
+    }
+
     func refreshAll(force: Bool = false) throws -> [WorkspaceDigest] {
-        var output: [WorkspaceDigest] = []
-        for workspace in try cmux.listWorkspaces() {
-            output.append(try refresh(workspace: workspace, force: force, level: .full))
+        let workspaces = try cmux.listWorkspaces()
+        let workspaceIds = workspaces.map(\.id)
+        let progressOwner = progress.makeOwner()
+        for workspaceId in workspaceIds {
+            progress.setWorkspace(workspaceId, stage: "queue", owner: progressOwner)
+        }
+        defer { progress.clearWorkspaces(workspaceIds, owner: progressOwner) }
+        let output = try runLimited(workspaces) { workspace in
+            try self.refresh(workspace: workspace, force: force, level: .full, progressOwner: progressOwner)
         }
         return output.sorted(by: DigestSort.precedes)
     }
@@ -4750,11 +4935,11 @@ private final class DigestController {
         return ["status": "ok"]
     }
 
-    func refresh(workspaceId: String, force: Bool = false) throws -> WorkspaceDigest {
+    func refresh(workspaceId: String, force: Bool = false, progressOwner: String? = nil) throws -> WorkspaceDigest {
         guard let workspace = try cmux.listWorkspaces().first(where: { $0.id == workspaceId || $0.ref == workspaceId }) else {
             throw DigestError(description: "Workspace not found: \(workspaceId)")
         }
-        return try refresh(workspace: workspace, force: force, level: .full)
+        return try refresh(workspace: workspace, force: force, level: .full, progressOwner: progressOwner)
     }
 
     func show(workspaceId: String?) throws -> WorkspaceDigest? {
@@ -4851,7 +5036,8 @@ private final class DigestController {
         force: Bool = true,
         level: WorkspaceDigestRefreshLevel = .full
     ) throws -> SummaryPriorityWorkspaceItem {
-        defer { progress.clearWorkspace(workspaceId) }
+        let progressOwner = progress.makeOwner()
+        defer { progress.clearWorkspace(workspaceId, owner: progressOwner) }
         let native = try nativeState()
         guard let nativeWorkspace = native.workspaces.first(where: { $0.workspaceId == workspaceId }) else {
             throw DigestError(description: "Workspace not found: \(workspaceId)")
@@ -4859,7 +5045,7 @@ private final class DigestController {
         guard let workspace = try cmux.listWorkspaces().first(where: { $0.id == workspaceId || $0.ref == workspaceId }) else {
             throw DigestError(description: "Workspace not found: \(workspaceId)")
         }
-        let digest = try refresh(workspace: workspace, force: force, level: level)
+        let digest = try refresh(workspace: workspace, force: force, level: level, progressOwner: progressOwner)
         let profile = store.getScoringProfile(id: nil)
         let sort = store.getSummaryPrioritySort()
         let item = try summaryPriorityItem(
@@ -4867,9 +5053,13 @@ private final class DigestController {
             digest: digest,
             profile: profile,
             sort: sort,
-            stale: level != .full
+            stale: level != .full,
+            useWorkspacePriorityScore: level == .quickColdStart,
+            progressOwner: progressOwner
         )
+        progress.setWorkspace(workspaceId, stage: "saving", owner: progressOwner)
         try store.putSummaryPriorityItem(item, profileId: profile.id, sort: sort)
+        progress.setWorkspace(workspaceId, stage: "done", owner: progressOwner)
         return item
     }
 
@@ -4904,15 +5094,15 @@ private final class DigestController {
         force: Bool = false,
         sort requestedSort: SummaryPrioritySort?
     ) throws -> SummaryPriorityViewState {
-        progress.setSummaryPriority("queue")
-        defer { progress.clearAll() }
+        let progressOwner = progress.makeOwner()
+        progress.setSummaryPriority("queue", owner: progressOwner)
         let now = ISO8601DateFormatter().string(from: Date())
         let profile = store.getScoringProfile(id: profileId)
         let sort = requestedSort ?? store.getSummaryPrioritySort()
         let workspaceById = Dictionary(
             uniqueKeysWithValues: ((try? cmux.listWorkspaces()) ?? []).map { ($0.id, $0) }
         )
-        var items: [SummaryPriorityWorkspaceItem] = []
+        var candidates: [SummaryPriorityCandidate] = []
         var staleDigestCount = 0
         for nativeWorkspace in native.workspaces {
             let override = store.getOverride(workspaceId: nativeWorkspace.workspaceId)
@@ -4922,31 +5112,50 @@ private final class DigestController {
             let previous = store.getWorkspaceDigest(workspaceId: nativeWorkspace.workspaceId)
             if previous == nil { staleDigestCount += 1 }
             let coldStart = previous == nil && !force
-            var usedColdStart = false
+            candidates.append(
+                SummaryPriorityCandidate(
+                    nativeWorkspace: nativeWorkspace,
+                    workspace: workspaceById[nativeWorkspace.workspaceId],
+                    coldStart: coldStart
+                )
+            )
+        }
+        let workspaceIds = candidates.map(\.nativeWorkspace.workspaceId)
+        for workspaceId in workspaceIds {
+            progress.setWorkspace(workspaceId, stage: "queue", owner: progressOwner)
+        }
+        defer {
+            progress.clearSummaryPriority(owner: progressOwner)
+            progress.clearWorkspaces(workspaceIds, owner: progressOwner)
+        }
+        let items = try runLimited(candidates) { candidate in
+            let workspaceId = candidate.nativeWorkspace.workspaceId
             let digest: WorkspaceDigest
-            if let workspace = workspaceById[nativeWorkspace.workspaceId] {
-                if coldStart {
-                    progress.setWorkspace(nativeWorkspace.workspaceId, stage: "quick")
-                    digest = try refresh(workspace: workspace, force: false, level: .quickColdStart)
-                    usedColdStart = true
-                } else {
-                    digest = try refresh(workspace: workspace, force: force, level: .full)
-                }
+            if let workspace = candidate.workspace {
+                digest = try self.refresh(
+                    workspace: workspace,
+                    force: candidate.coldStart ? false : force,
+                    level: candidate.coldStart ? .quickColdStart : .full,
+                    progressOwner: progressOwner
+                )
             } else {
-                digest = try refresh(workspaceId: nativeWorkspace.workspaceId, force: force)
+                digest = try self.refresh(workspaceId: workspaceId, force: force, progressOwner: progressOwner)
             }
-            let item = try summaryPriorityItem(
-                nativeWorkspace: nativeWorkspace,
+            let item = try self.summaryPriorityItem(
+                nativeWorkspace: candidate.nativeWorkspace,
                 digest: digest,
                 profile: profile,
                 sort: sort,
-                stale: usedColdStart
+                stale: candidate.coldStart,
+                useWorkspacePriorityScore: candidate.coldStart,
+                progressOwner: progressOwner
             )
-            progress.setWorkspace(nativeWorkspace.workspaceId, stage: "saving")
-            try store.putSummaryPriorityItem(item, profileId: profile.id, sort: sort)
-            items.append(item)
+            self.progress.setWorkspace(workspaceId, stage: "saving", owner: progressOwner)
+            try self.store.putSummaryPriorityItem(item, profileId: profile.id, sort: sort)
+            self.progress.setWorkspace(workspaceId, stage: "done", owner: progressOwner)
+            return item
         }
-        progress.setSummaryPriority("sorting")
+        progress.setSummaryPriority("sorting", owner: progressOwner)
         let sorted = SummaryPriorityScoringEngine.sort(items, sort: sort)
         let topScore = sorted.map { SummaryPriorityScoringEngine.activeScore(item: $0, sort: sort) }.max() ?? 0
         return SummaryPriorityViewState(
@@ -5006,19 +5215,27 @@ private final class DigestController {
         digest: WorkspaceDigest,
         profile: ScoringProfile,
         sort: SummaryPrioritySort,
-        stale: Bool = false
+        stale: Bool = false,
+        useWorkspacePriorityScore: Bool = false,
+        progressOwner: String? = nil
     ) throws -> SummaryPriorityWorkspaceItem {
         let override = store.getOverride(workspaceId: nativeWorkspace.workspaceId)
         let fallback = SummaryPriorityScoringEngine.localDimensionDrafts(digest: digest, profile: profile)
         let selectedDimension = selectedDimensionId(sort: sort, profile: profile)
-        progress.setWorkspace(nativeWorkspace.workspaceId, stage: "scoring")
-        guard let score = llm.dimensionScore(
-            digest: digest,
-            profile: profile,
-            dimensionId: selectedDimension,
-            fallback: fallback
-        ) else {
-            throw DigestError(description: "CLI score unavailable for workspace \(nativeWorkspace.workspaceId)")
+        let score: DimensionScore
+        if useWorkspacePriorityScore {
+            score = workspacePriorityScore(digest: digest, fallback: fallback, dimensionId: selectedDimension)
+        } else {
+            progress.setWorkspace(nativeWorkspace.workspaceId, stage: "scoring", owner: progressOwner)
+            guard let llmScore = llm.dimensionScore(
+                digest: digest,
+                profile: profile,
+                dimensionId: selectedDimension,
+                fallback: fallback
+            ) else {
+                throw DigestError(description: "CLI score unavailable for workspace \(nativeWorkspace.workspaceId)")
+            }
+            score = llmScore
         }
         let assessed = [selectedDimension: score]
         let dimensions = SummaryPriorityScoringEngine.applyOverride(override, to: assessed)
@@ -5050,6 +5267,33 @@ private final class DigestController {
             ],
             generatedAt: digest.generatedAt,
             inputHash: digest.inputHash
+        )
+    }
+
+    private func workspacePriorityScore(
+        digest: WorkspaceDigest,
+        fallback: [String: DimensionScore],
+        dimensionId: String
+    ) -> DimensionScore {
+        let fallbackScore = fallback[dimensionId]
+        let fallbackRaw = fallbackScore?.rawScore ?? digest.priorityHints.score
+        let rawScore: Double
+        if dimensionId == "urgency" {
+            rawScore = digest.priorityHints.score
+        } else {
+            rawScore = (fallbackRaw * 0.6) + (digest.priorityHints.score * 0.4)
+        }
+        let reason = digest.priorityHints.reasons.first?.trimmedNonEmpty
+            ?? fallbackScore?.reason
+            ?? "Quick workspace priority score."
+        let confidence = min(
+            0.75,
+            max(fallbackScore?.confidence ?? 0.45, digest.priorityHints.reasons.isEmpty ? 0.45 : 0.6)
+        )
+        return DimensionScore(
+            rawScore: min(max(rawScore, 0), 100),
+            confidence: confidence,
+            reason: "Quick LLM priority: \(reason)"
         )
     }
 
@@ -5125,9 +5369,10 @@ private final class DigestController {
     private func refresh(
         workspace: CmuxWorkspaceRef,
         force: Bool,
-        level: WorkspaceDigestRefreshLevel
+        level: WorkspaceDigestRefreshLevel,
+        progressOwner: String? = nil
     ) throws -> WorkspaceDigest {
-        progress.setWorkspace(workspace.id, stage: "reading")
+        progress.setWorkspace(workspace.id, stage: "reading", owner: progressOwner)
         agentSessions.invalidateCaches()
         let now = ISO8601DateFormatter().string(from: Date())
         let screenLines = screenLines(for: level)
@@ -5198,7 +5443,7 @@ private final class DigestController {
         }
 
         if level.usesSurfaceLLM, !pendingSurfaceLLMRequests.isEmpty {
-            progress.setWorkspace(workspace.id, stage: "surfaces")
+            progress.setWorkspace(workspace.id, stage: "surfaces", owner: progressOwner)
             let llmSurfaceDigests = llm.surfaceDigests(
                 requests: pendingSurfaceLLMRequests,
                 workspaceCwd: workspaceLLMCwd,
@@ -5212,6 +5457,11 @@ private final class DigestController {
         }
 
         let surfaceDigests = surfaceDigestOrder.compactMap { surfaceDigestsById[$0] }
+        let promptSurfaceDigests = Self.workspacePromptSurfaceDigests(
+            surfaceDigests,
+            surfaces: terminalSurfaces,
+            level: level
+        )
 
         let workspaceInputHash = Hashing.hashEncodable(WorkspaceDigestHashInput(
             workspace: workspace,
@@ -5258,13 +5508,14 @@ private final class DigestController {
            previous.inputHash == workspaceInputHash,
            previous.debug?.summarySession != nil,
            !needsSeedSession {
+            progress.setWorkspace(workspace.id, stage: "done", owner: progressOwner)
             return previous
         }
 
-        progress.setWorkspace(workspace.id, stage: level == .seed ? "seed" : "summary")
+        progress.setWorkspace(workspace.id, stage: level.workspaceSummaryStage, owner: progressOwner)
         let localDraft = LocalDigestDraftEngine.workspaceDigest(
             workspace: workspace,
-            surfaceDigests: surfaceDigests,
+            surfaceDigests: promptSurfaceDigests,
             sessionDigests: sessionDigests,
             gitFacts: gitFacts,
             ghprContext: ghprContext,
@@ -5277,7 +5528,7 @@ private final class DigestController {
         )
         guard var next = llm.workspaceDigest(
             workspace: workspace,
-            surfaceDigests: surfaceDigests,
+            surfaceDigests: promptSurfaceDigests,
             sessionDigests: sessionDigests,
             gitFacts: gitFacts,
             ghprContext: ghprContext,
@@ -5288,14 +5539,17 @@ private final class DigestController {
             fallback: localDraft,
             inputSnapshot: inputSnapshot,
             force: force,
-            workspaceCwd: workspaceLLMCwd
+            workspaceCwd: workspaceLLMCwd,
+            level: level
         ) else {
             throw DigestError(description: "CLI summary unavailable for workspace \(workspace.id)")
         }
         next = stabilizeTopic(previous: previous, next: next)
-        progress.setWorkspace(workspace.id, stage: "saving")
+        progress.setWorkspace(workspace.id, stage: "saving", owner: progressOwner)
         try store.putWorkspaceDigest(next)
+        progress.setWorkspace(workspace.id, stage: "updating", owner: progressOwner)
         cmux.setDigestStatus(next)
+        progress.setWorkspace(workspace.id, stage: "done", owner: progressOwner)
         return next
     }
 
@@ -5333,6 +5587,37 @@ private final class DigestController {
         let leaders = counts.filter { $0.value == maxCount }.keys
         if let focusedCwd, leaders.contains(focusedCwd) { return focusedCwd }
         return leaders.sorted().first
+    }
+
+    private static func workspacePromptSurfaceDigests(
+        _ digests: [SurfaceDigest],
+        surfaces: [CmuxSurfaceRef],
+        level: WorkspaceDigestRefreshLevel
+    ) -> [SurfaceDigest] {
+        guard let limit = level.workspacePromptSurfaceLimit,
+              digests.count > limit else {
+            return digests
+        }
+        let focusedIds = Set(surfaces.filter(\.focused).map(\.id))
+        return digests.sorted { lhs, rhs in
+            let lhsFocused = focusedIds.contains(lhs.surfaceId)
+            let rhsFocused = focusedIds.contains(rhs.surfaceId)
+            if lhsFocused != rhsFocused { return lhsFocused }
+            let lhsActive = Self.isActivePromptStatus(lhs.status)
+            let rhsActive = Self.isActivePromptStatus(rhs.status)
+            if lhsActive != rhsActive { return lhsActive }
+            if lhs.confidence != rhs.confidence { return lhs.confidence > rhs.confidence }
+            return lhs.surfaceId < rhs.surfaceId
+        }.prefix(limit).map { $0 }
+    }
+
+    private static func isActivePromptStatus(_ status: DigestStatus) -> Bool {
+        switch status {
+        case .idle, .done, .unknown:
+            return false
+        case .working, .waitingForUser, .blocked, .runningTests:
+            return true
+        }
     }
 
     private func stabilizeTopic(previous: WorkspaceDigest?, next: WorkspaceDigest) -> WorkspaceDigest {
