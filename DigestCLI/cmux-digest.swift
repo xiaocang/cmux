@@ -5113,6 +5113,44 @@ private final class DigestController {
         return item
     }
 
+    func scoreSummaryPriorityWorkspace(
+        workspaceId: String,
+        sort requestedSort: SummaryPrioritySort? = nil
+    ) throws -> SummaryPriorityWorkspaceItem {
+        guard let digest = store.getWorkspaceDigest(workspaceId: workspaceId) else {
+            return try refreshSummaryPriorityWorkspace(
+                workspaceId: workspaceId,
+                force: false,
+                level: .quickColdStart,
+                sort: requestedSort
+            )
+        }
+
+        let progressOwner = progress.makeOwner()
+        defer { progress.clearWorkspace(workspaceId, owner: progressOwner) }
+        let native = try nativeState()
+        guard let nativeWorkspace = native.workspaces.first(where: { $0.workspaceId == workspaceId }) else {
+            throw DigestError(description: "Workspace not found: \(workspaceId)")
+        }
+
+        let profile = store.getScoringProfile(id: nil)
+        let sort = requestedSort ?? store.getSummaryPrioritySort()
+        progress.setWorkspace(workspaceId, stage: "quick", owner: progressOwner)
+        let item = try summaryPriorityItem(
+            nativeWorkspace: nativeWorkspace,
+            digest: digest,
+            profile: profile,
+            sort: sort,
+            stale: digest.debug?.summarySession == nil,
+            useWorkspacePriorityScore: true,
+            progressOwner: progressOwner
+        )
+        progress.setWorkspace(workspaceId, stage: "saving", owner: progressOwner)
+        try store.putSummaryPriorityItem(item, profileId: profile.id, sort: sort)
+        progress.setWorkspace(workspaceId, stage: "done", owner: progressOwner)
+        return item
+    }
+
     func updateOverride(workspaceId: String, patch: [String: Any]) throws -> SummaryPriorityWorkspaceItem {
         var override = store.getOverride(workspaceId: workspaceId)
         if let pinned = patch["pinned"] as? Bool { override.pinned = pinned }
@@ -6743,6 +6781,16 @@ private final class DigestSocketDaemon {
                     workspaceId: id,
                     force: force,
                     level: level,
+                    sort: parseSort(body: body)
+                ))
+
+            case "score_summary_priority_workspace":
+                guard let id = (body["workspaceId"] as? String), !id.isEmpty else {
+                    writeError(client, "missing workspaceId")
+                    return
+                }
+                writeOK(client, encoded: try controller.scoreSummaryPriorityWorkspace(
+                    workspaceId: id,
                     sort: parseSort(body: body)
                 ))
 

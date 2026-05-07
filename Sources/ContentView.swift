@@ -13658,6 +13658,13 @@ final class WorkspaceTabStore: ObservableObject {
     private var agentOperationRefreshCounter = WorkspaceAgentOperationRefreshCounter()
     private var progressPollTimer: Timer?
     private var progressPollInFlight = false
+#if DEBUG
+    var refreshSummaryPriorityInterceptorForTesting: ((Bool, WorkspaceSidebarSummaryPrioritySort?) -> Bool)?
+    var refreshWorkspaceInterceptorForTesting:
+        ((String, Bool, String?, @escaping (WorkspaceSidebarSummaryPriorityItem?) -> Void) -> Bool)?
+    var scoreWorkspaceInterceptorForTesting:
+        ((String, WorkspaceSidebarSummaryPrioritySort, @escaping (WorkspaceSidebarSummaryPriorityItem?) -> Void) -> Bool)?
+#endif
 
     init() {
         selectedSort = Self.loadSelectedSort()
@@ -13971,6 +13978,11 @@ final class WorkspaceTabStore: ObservableObject {
     }
 
     func refreshSummaryPriority(force: Bool = false, sort: WorkspaceSidebarSummaryPrioritySort? = nil) {
+#if DEBUG
+        if refreshSummaryPriorityInterceptorForTesting?(force, sort) == true {
+            return
+        }
+#endif
         refreshSummaryPriority(force: force, sort: sort, retryAttempt: 0)
     }
 
@@ -14144,6 +14156,7 @@ final class WorkspaceTabStore: ObservableObject {
             "sort=\(Self.debugSortDescription(sort))"
         )
 #endif
+        refreshMissingSelectedDimensionScoresQuickly(for: sort, requestGeneration: requestGeneration)
     }
 
     func setDisplayMode(_ mode: WorkspaceSidebarDisplayMode) {
@@ -14237,6 +14250,44 @@ final class WorkspaceTabStore: ObservableObject {
         return items.contains { $0.scores.dimensions[dimensionId] != nil }
     }
 
+    private func refreshMissingSelectedDimensionScoresQuickly(
+        for sort: WorkspaceSidebarSummaryPrioritySort,
+        requestGeneration: Int
+    ) {
+        guard sort.isDimension else { return }
+        guard let current = summaryPriority else {
+#if DEBUG
+            cmuxDebugLog(
+                "summaryPriority.setSort.quickMissingScores.fullSeed gen=\(requestGeneration) " +
+                "sort=\(Self.debugSortDescription(sort))"
+            )
+#endif
+            refreshSummaryPriority(force: false, sort: sort)
+            return
+        }
+
+        let dimensionId = sort.dimensionId ?? "urgency"
+        let workspaceIds = current.items
+            .filter { $0.scores.dimensions[dimensionId] == nil }
+            .map(\.workspaceId)
+        guard !workspaceIds.isEmpty else { return }
+
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.setSort.quickMissingScores gen=\(requestGeneration) " +
+            "sort=\(Self.debugSortDescription(sort)) workspaces=\(workspaceIds.count)"
+        )
+#endif
+        for (index, workspaceId) in workspaceIds.enumerated() {
+            scoreWorkspaceForSelectedDimension(
+                workspaceId: workspaceId,
+                sort: sort,
+                requestGeneration: requestGeneration,
+                refinementDelay: Double(index) * 0.15
+            )
+        }
+    }
+
     private static func goalDrivenComposite(_ item: WorkspaceSidebarSummaryPriorityItem) -> Double {
         // Phase 1 stub: max raw score across known dimensions. Replace with
         // the real CLI scorer in the follow-up PR.
@@ -14258,13 +14309,167 @@ final class WorkspaceTabStore: ObservableObject {
             .map(\.workspaceId)
         guard !staleWorkspaceIds.isEmpty else { return }
 
+        let sort = summaryPriority?.sort ?? selectedSort
+        let requestGeneration = sortRequestGeneration
         for (index, workspaceId) in staleWorkspaceIds.enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.15) { [weak self] in
-                self?.refreshWorkspace(workspaceId: workspaceId, force: false, refinement: "seed") { [weak self] item in
-                    guard let self, item?.stale == true else { return }
-                    self.refreshWorkspace(workspaceId: workspaceId, force: false, refinement: "full", completion: nil)
-                }
+            refineStaleWorkspace(
+                workspaceId: workspaceId,
+                delay: Double(index) * 0.15,
+                sort: sort,
+                requestGeneration: requestGeneration
+            )
+        }
+    }
+
+    private func refineStaleWorkspace(
+        workspaceId: String,
+        delay: TimeInterval,
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        requestGeneration: Int
+    ) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self,
+                  self.isCurrentSortRequest(sort, generation: requestGeneration) else { return }
+            self.refreshWorkspace(
+                workspaceId: workspaceId,
+                force: false,
+                refinement: "seed",
+                sort: sort,
+                requestGeneration: requestGeneration
+            ) { [weak self] item in
+                guard let self,
+                      self.isCurrentSortRequest(sort, generation: requestGeneration),
+                      item?.stale == true else { return }
+                self.refreshWorkspace(
+                    workspaceId: workspaceId,
+                    force: false,
+                    refinement: "full",
+                    sort: sort,
+                    requestGeneration: requestGeneration,
+                    completion: nil
+                )
             }
+        }
+    }
+
+    private func scoreWorkspaceForSelectedDimension(
+        workspaceId: String,
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        requestGeneration: Int,
+        refinementDelay: TimeInterval
+    ) {
+        guard isCurrentSortRequest(sort, generation: requestGeneration) else { return }
+
+        let handleScoreCompletion: (WorkspaceSidebarSummaryPriorityItem?) -> Void = { [weak self] item in
+            guard let self,
+                  self.isCurrentSortRequest(sort, generation: requestGeneration) else { return }
+            guard let item else {
+                self.refreshWorkspace(
+                    workspaceId: workspaceId,
+                    force: false,
+                    refinement: "quick",
+                    sort: sort,
+                    requestGeneration: requestGeneration
+                ) { [weak self] item in
+                    guard let self,
+                          self.isCurrentSortRequest(sort, generation: requestGeneration),
+                          item?.stale == true else { return }
+                    self.refineStaleWorkspace(
+                        workspaceId: workspaceId,
+                        delay: refinementDelay,
+                        sort: sort,
+                        requestGeneration: requestGeneration
+                    )
+                }
+                return
+            }
+
+            self.applyRefreshedWorkspaceItem(item)
+            guard item.stale == true else { return }
+            self.refineStaleWorkspace(
+                workspaceId: workspaceId,
+                delay: refinementDelay,
+                sort: sort,
+                requestGeneration: requestGeneration
+            )
+        }
+
+#if DEBUG
+        if scoreWorkspaceInterceptorForTesting?(workspaceId, sort, handleScoreCompletion) == true {
+            return
+        }
+#endif
+
+        let payload: [String: Any] = [
+            "workspaceId": workspaceId,
+            "sort": sort.requestPayload
+        ]
+        performWorkspaceRequest(
+            command: "score_summary_priority_workspace",
+            workspaceId: workspaceId,
+            payload: payload
+        ) { [weak self] result in
+            guard let self,
+                  self.isCurrentSortRequest(sort, generation: requestGeneration) else { return }
+            switch result {
+            case .failure(let error):
+                self.errorMessage = Self.displayMessage(for: error)
+                handleScoreCompletion(nil)
+            case .success(let item):
+                handleScoreCompletion(item)
+            }
+        }
+    }
+
+    private func isCurrentSortRequest(
+        _ sort: WorkspaceSidebarSummaryPrioritySort,
+        generation: Int
+    ) -> Bool {
+        generation == sortRequestGeneration && sort == selectedSort
+    }
+
+    private func setRefreshingWorkspace(_ workspaceId: String, refreshing: Bool) {
+        var next = refreshingWorkspaceIds
+        if refreshing {
+            next.insert(workspaceId)
+        } else {
+            next.remove(workspaceId)
+        }
+        refreshingWorkspaceIds = next
+    }
+
+    private func runPendingAgentRefreshIfNeeded(_ shouldRun: Bool, workspaceId: String) {
+        guard shouldRun else { return }
+#if DEBUG
+        cmuxDebugLog("summaryPriority.agentOperation.pendingRefresh workspace=\(workspaceId.prefix(8))")
+#endif
+        refreshWorkspace(workspaceId: workspaceId, force: true, refinement: nil, completion: nil)
+    }
+
+    private func performWorkspaceRequest(
+        command: String,
+        workspaceId: String,
+        payload: [String: Any],
+        onResult: @escaping (Result<WorkspaceSidebarSummaryPriorityItem, Error>) -> Void
+    ) {
+        guard workspaceRefreshesInFlight.insert(workspaceId).inserted else { return }
+        errorMessage = nil
+        setRefreshingWorkspace(workspaceId, refreshing: true)
+        workspaceRefreshStages[workspaceId] = "connecting"
+        startProgressPolling()
+        sendDigestCommand(
+            command,
+            payload: payload,
+            decoding: WorkspaceSidebarSummaryPriorityItem.self
+        ) { [weak self] result in
+            guard let self else { return }
+            self.workspaceRefreshesInFlight.remove(workspaceId)
+            let shouldRunPendingAgentRefresh = self.agentOperationRefreshCounter.refreshDidFinish(workspaceId: workspaceId)
+            self.setRefreshingWorkspace(workspaceId, refreshing: false)
+            self.workspaceRefreshStages.removeValue(forKey: workspaceId)
+            self.stopProgressPollingIfIdle()
+            onResult(result)
+            self.runPendingAgentRefreshIfNeeded(shouldRunPendingAgentRefresh, workspaceId: workspaceId)
         }
     }
 
@@ -14272,33 +14477,44 @@ final class WorkspaceTabStore: ObservableObject {
         workspaceId: String,
         force: Bool,
         refinement: String?,
+        sort: WorkspaceSidebarSummaryPrioritySort? = nil,
+        requestGeneration: Int? = nil,
         completion: ((WorkspaceSidebarSummaryPriorityItem?) -> Void)?
     ) {
-        guard workspaceRefreshesInFlight.insert(workspaceId).inserted else { return }
-        errorMessage = nil
-        var nextRefreshingWorkspaceIds = refreshingWorkspaceIds
-        nextRefreshingWorkspaceIds.insert(workspaceId)
-        refreshingWorkspaceIds = nextRefreshingWorkspaceIds
-        workspaceRefreshStages[workspaceId] = "connecting"
-        startProgressPolling()
+        let effectiveSort = sort ?? selectedSort
+        if let requestGeneration,
+           !isCurrentSortRequest(effectiveSort, generation: requestGeneration) {
+            completion?(nil)
+            return
+        }
+#if DEBUG
+        if refreshWorkspaceInterceptorForTesting?(workspaceId, force, refinement, { item in
+            if let requestGeneration,
+               !self.isCurrentSortRequest(effectiveSort, generation: requestGeneration) {
+                completion?(nil)
+                return
+            }
+            completion?(item)
+        }) == true {
+            return
+        }
+#endif
         var payload: [String: Any] = ["workspaceId": workspaceId, "force": force]
-        payload["sort"] = selectedSort.requestPayload
+        payload["sort"] = effectiveSort.requestPayload
         if let refinement {
             payload["refinement"] = refinement
         }
-        sendDigestCommand(
-            "refresh_summary_priority_workspace",
-            payload: payload,
-            decoding: WorkspaceSidebarSummaryPriorityItem.self
+        performWorkspaceRequest(
+            command: "refresh_summary_priority_workspace",
+            workspaceId: workspaceId,
+            payload: payload
         ) { [weak self] result in
             guard let self else { return }
-            self.workspaceRefreshesInFlight.remove(workspaceId)
-            let shouldRunPendingAgentRefresh = self.agentOperationRefreshCounter.refreshDidFinish(workspaceId: workspaceId)
-            var nextRefreshingWorkspaceIds = self.refreshingWorkspaceIds
-            nextRefreshingWorkspaceIds.remove(workspaceId)
-            self.refreshingWorkspaceIds = nextRefreshingWorkspaceIds
-            self.workspaceRefreshStages.removeValue(forKey: workspaceId)
-            self.stopProgressPollingIfIdle()
+            if let requestGeneration,
+               !self.isCurrentSortRequest(effectiveSort, generation: requestGeneration) {
+                completion?(nil)
+                return
+            }
             switch result {
             case .failure(let error):
                 self.errorMessage = Self.displayMessage(for: error)
@@ -14306,12 +14522,6 @@ final class WorkspaceTabStore: ObservableObject {
             case .success(let item):
                 self.applyRefreshedWorkspaceItem(item)
                 completion?(item)
-            }
-            if shouldRunPendingAgentRefresh {
-#if DEBUG
-                cmuxDebugLog("summaryPriority.agentOperation.pendingRefresh workspace=\(workspaceId.prefix(8))")
-#endif
-                self.refreshWorkspace(workspaceId: workspaceId, force: true, refinement: nil, completion: nil)
             }
         }
     }

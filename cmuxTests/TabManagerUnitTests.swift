@@ -482,6 +482,234 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
         )
     }
 
+#if DEBUG
+    func testChangingToDimensionWithoutCachedScoresUsesScoreOnlyPathAndReorders() throws {
+        let defaults = UserDefaults.standard
+        let key = "workspaceTab.summaryPriority.selectedSort"
+        let previousSort = defaults.data(forKey: key)
+        defer {
+            if let previousSort {
+                defaults.set(previousSort, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+
+        let manager = TabManager()
+        let first = try XCTUnwrap(manager.selectedWorkspace)
+        let second = manager.addWorkspace(select: false)
+        let store = WorkspaceTabStore()
+        var summaryRefreshRequestCount = 0
+        var scoreRequests: [(workspaceId: String, sort: WorkspaceSidebarSummaryPrioritySort)] = []
+        var workspaceRefreshRequestCount = 0
+        store.refreshSummaryPriorityInterceptorForTesting = { _, _ in
+            summaryRefreshRequestCount += 1
+            return true
+        }
+        store.scoreWorkspaceInterceptorForTesting = { workspaceId, sort, completion in
+            scoreRequests.append((workspaceId, sort))
+            let workspace = manager.tabs.first { $0.id.uuidString == workspaceId } ?? first
+            completion(summaryPriorityItem(
+                workspace: workspace,
+                nativeOrder: workspace.id == first.id ? 0 : 1,
+                scores: ["importance": workspace.id == first.id ? 25 : 90]
+            ))
+            return true
+        }
+        store.refreshWorkspaceInterceptorForTesting = { _, _, _, completion in
+            workspaceRefreshRequestCount += 1
+            completion(nil)
+            return true
+        }
+        store.summaryPriority = WorkspaceSidebarSummaryPriorityState(
+            profileId: "default",
+            sort: .dimension(id: "urgency"),
+            items: [
+                summaryPriorityItem(workspace: first, nativeOrder: 0, scores: ["urgency": 95]),
+                summaryPriorityItem(workspace: second, nativeOrder: 1, scores: ["urgency": 40])
+            ],
+            dimensions: WorkspaceSidebarDimensionDefinition.builtinDefaults,
+            stats: WorkspaceSidebarSummaryPriorityStats(
+                total: 2,
+                needsAttention: 1,
+                topScore: 95,
+                staleDigestCount: 0
+            ),
+            generatedAt: "2026-05-07T12:00:00Z"
+        )
+
+        store.setSort(.dimension(id: "importance"))
+
+        XCTAssertEqual(summaryRefreshRequestCount, 0)
+        XCTAssertTrue(waitForCondition(timeout: 1.0) {
+            scoreRequests.count == 2
+        })
+        XCTAssertEqual(scoreRequests.map(\.workspaceId), [first.id.uuidString, second.id.uuidString])
+        XCTAssertEqual(scoreRequests.map(\.sort), [.dimension(id: "importance"), .dimension(id: "importance")])
+        XCTAssertEqual(workspaceRefreshRequestCount, 0)
+        XCTAssertEqual(store.summaryPriority?.sort, .dimension(id: "importance"))
+        XCTAssertEqual(store.summaryPriority?.items.map(\.workspaceId), [
+            second.id.uuidString,
+            first.id.uuidString
+        ])
+    }
+
+    func testScoreOnlyUnavailableFallsBackToQuickWorkspaceRefresh() throws {
+        let manager = TabManager()
+        let first = try XCTUnwrap(manager.selectedWorkspace)
+        let store = WorkspaceTabStore()
+        var scoreRequestCount = 0
+        var workspaceRefreshRequests: [(workspaceId: String, force: Bool, refinement: String?)] = []
+        store.scoreWorkspaceInterceptorForTesting = { _, _, completion in
+            scoreRequestCount += 1
+            completion(nil)
+            return true
+        }
+        store.refreshWorkspaceInterceptorForTesting = { workspaceId, force, refinement, completion in
+            workspaceRefreshRequests.append((workspaceId, force, refinement))
+            completion(summaryPriorityItem(
+                workspace: first,
+                nativeOrder: 0,
+                scores: ["importance": 70]
+            ))
+            return true
+        }
+        store.summaryPriority = WorkspaceSidebarSummaryPriorityState(
+            profileId: "default",
+            sort: .dimension(id: "urgency"),
+            items: [
+                summaryPriorityItem(workspace: first, nativeOrder: 0, scores: ["urgency": 40])
+            ],
+            dimensions: WorkspaceSidebarDimensionDefinition.builtinDefaults,
+            stats: WorkspaceSidebarSummaryPriorityStats(
+                total: 1,
+                needsAttention: 0,
+                topScore: 40,
+                staleDigestCount: 0
+            ),
+            generatedAt: "2026-05-07T12:00:00Z"
+        )
+
+        store.setSort(.dimension(id: "importance"))
+
+        XCTAssertEqual(scoreRequestCount, 1)
+        XCTAssertEqual(workspaceRefreshRequests.count, 1)
+        XCTAssertEqual(workspaceRefreshRequests.first?.workspaceId, first.id.uuidString)
+        XCTAssertEqual(workspaceRefreshRequests.first?.force, false)
+        XCTAssertEqual(workspaceRefreshRequests.first?.refinement, "quick")
+    }
+
+    func testChangingDimensionBeforeScoreCompletionDropsOldResponse() throws {
+        let manager = TabManager()
+        let first = try XCTUnwrap(manager.selectedWorkspace)
+        let store = WorkspaceTabStore()
+        var importanceCompletion: ((WorkspaceSidebarSummaryPriorityItem?) -> Void)?
+        var workspaceRefreshRequestCount = 0
+        store.scoreWorkspaceInterceptorForTesting = { _, sort, completion in
+            if sort == .dimension(id: "importance") {
+                importanceCompletion = completion
+            } else {
+                completion(summaryPriorityItem(
+                    workspace: first,
+                    nativeOrder: 0,
+                    scores: ["progress": 30]
+                ))
+            }
+            return true
+        }
+        store.refreshWorkspaceInterceptorForTesting = { _, _, _, completion in
+            workspaceRefreshRequestCount += 1
+            completion(nil)
+            return true
+        }
+        store.summaryPriority = WorkspaceSidebarSummaryPriorityState(
+            profileId: "default",
+            sort: .dimension(id: "urgency"),
+            items: [
+                summaryPriorityItem(workspace: first, nativeOrder: 0, scores: ["urgency": 40])
+            ],
+            dimensions: WorkspaceSidebarDimensionDefinition.builtinDefaults,
+            stats: WorkspaceSidebarSummaryPriorityStats(
+                total: 1,
+                needsAttention: 0,
+                topScore: 40,
+                staleDigestCount: 0
+            ),
+            generatedAt: "2026-05-07T12:00:00Z"
+        )
+
+        store.setSort(.dimension(id: "importance"))
+        store.setSort(.dimension(id: "progress"))
+        importanceCompletion?(summaryPriorityItem(
+            workspace: first,
+            nativeOrder: 0,
+            scores: ["importance": 95],
+            stale: true
+        ))
+
+        XCTAssertEqual(store.summaryPriority?.sort, .dimension(id: "progress"))
+        XCTAssertNil(store.summaryPriority?.items.first?.scores.dimensions["importance"])
+        XCTAssertEqual(workspaceRefreshRequestCount, 0)
+    }
+
+    func testChangingDimensionBeforeSeedCompletionStopsFullRefinement() throws {
+        let manager = TabManager()
+        let first = try XCTUnwrap(manager.selectedWorkspace)
+        let store = WorkspaceTabStore()
+        var seedCompletion: ((WorkspaceSidebarSummaryPriorityItem?) -> Void)?
+        var workspaceRefreshRequests: [String?] = []
+        store.scoreWorkspaceInterceptorForTesting = { _, sort, completion in
+            let dimension = sort.dimensionId ?? "urgency"
+            completion(summaryPriorityItem(
+                workspace: first,
+                nativeOrder: 0,
+                scores: [dimension: 65],
+                stale: sort == .dimension(id: "importance")
+            ))
+            return true
+        }
+        store.refreshWorkspaceInterceptorForTesting = { _, _, refinement, completion in
+            workspaceRefreshRequests.append(refinement)
+            if refinement == "seed", seedCompletion == nil {
+                seedCompletion = completion
+            } else {
+                completion(nil)
+            }
+            return true
+        }
+        store.summaryPriority = WorkspaceSidebarSummaryPriorityState(
+            profileId: "default",
+            sort: .dimension(id: "urgency"),
+            items: [
+                summaryPriorityItem(workspace: first, nativeOrder: 0, scores: ["urgency": 40])
+            ],
+            dimensions: WorkspaceSidebarDimensionDefinition.builtinDefaults,
+            stats: WorkspaceSidebarSummaryPriorityStats(
+                total: 1,
+                needsAttention: 0,
+                topScore: 40,
+                staleDigestCount: 0
+            ),
+            generatedAt: "2026-05-07T12:00:00Z"
+        )
+
+        store.setSort(.dimension(id: "importance"))
+        XCTAssertTrue(waitForCondition(timeout: 1.0) {
+            seedCompletion != nil
+        })
+
+        store.setSort(.dimension(id: "progress"))
+        seedCompletion?(summaryPriorityItem(
+            workspace: first,
+            nativeOrder: 0,
+            scores: ["importance": 75],
+            stale: true
+        ))
+
+        XCTAssertFalse(workspaceRefreshRequests.contains("full"))
+    }
+#endif
+
     func testNativeSummaryPrioritySortDoesNotRequestWorkspaceReorder() throws {
         let manager = TabManager()
         let first = try XCTUnwrap(manager.selectedWorkspace)
@@ -596,6 +824,25 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
         let first = try XCTUnwrap(manager.selectedWorkspace)
         let second = manager.addWorkspace(select: false)
         let store = WorkspaceTabStore()
+        var summaryRefreshRequestCount = 0
+        var scoreRequestCount = 0
+        var workspaceRefreshRequestCount = 0
+#if DEBUG
+        store.refreshSummaryPriorityInterceptorForTesting = { _, _ in
+            summaryRefreshRequestCount += 1
+            return true
+        }
+        store.scoreWorkspaceInterceptorForTesting = { _, _, completion in
+            scoreRequestCount += 1
+            completion(nil)
+            return true
+        }
+        store.refreshWorkspaceInterceptorForTesting = { _, _, _, completion in
+            workspaceRefreshRequestCount += 1
+            completion(nil)
+            return true
+        }
+#endif
         store.summaryPriority = WorkspaceSidebarSummaryPriorityState(
             profileId: "default",
             sort: .dimension(id: "urgency"),
@@ -616,6 +863,9 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
         store.setSort(.dimension(id: "importance"))
 
         XCTAssertFalse(store.isLoading)
+        XCTAssertEqual(summaryRefreshRequestCount, 0)
+        XCTAssertEqual(scoreRequestCount, 0)
+        XCTAssertEqual(workspaceRefreshRequestCount, 0)
         XCTAssertEqual(store.summaryPriority?.items.map(\.workspaceId), [
             first.id.uuidString,
             second.id.uuidString
@@ -637,7 +887,8 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
     private func summaryPriorityItem(
         workspace: Workspace,
         nativeOrder: Int,
-        scores: [String: Double]
+        scores: [String: Double],
+        stale: Bool = false
     ) -> WorkspaceSidebarSummaryPriorityItem {
         WorkspaceSidebarSummaryPriorityItem(
             workspaceId: workspace.id.uuidString,
@@ -669,7 +920,7 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
             ),
             nextAction: nil,
             pinned: false,
-            stale: false,
+            stale: stale,
             evidence: nil
         )
     }
