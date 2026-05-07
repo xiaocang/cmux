@@ -1042,7 +1042,11 @@ private final class CmuxAdapter {
     }
 
     func sidebarState(workspaceId: String) -> String {
-        (try? sendV1("sidebar_state --tab=\(workspaceId)")) ?? ""
+        (try? sidebarStateOrThrow(workspaceId: workspaceId)) ?? ""
+    }
+
+    func sidebarStateOrThrow(workspaceId: String) throws -> String {
+        try sendV1("sidebar_state --tab=\(workspaceId)")
     }
 
     func setDigestStatus(_ digest: WorkspaceDigest) {
@@ -4929,9 +4933,12 @@ private final class DigestController {
         guard config.writeSidebarMetadata else {
             return ["status": "sidebar metadata disabled"]
         }
-        let sidebarState = cmux.sidebarState(workspaceId: workspaceId)
+        let sidebarState = try cmux.sidebarStateOrThrow(workspaceId: workspaceId)
         let context = ghpr.context(fromSidebarState: sidebarState)
         cmux.applyGHPRMetadata(context, workspaceId: workspaceId)
+        guard context != nil else {
+            return ["status": "no ghpr context"]
+        }
         return ["status": "ok"]
     }
 

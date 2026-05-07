@@ -51,6 +51,10 @@ final class CmuxDigestDaemonSupervisor {
         startIfNeeded()
     }
 
+    func shutdown() {
+        stop(waitUntilExit: true)
+    }
+
     private func startIfNeeded() {
         guard process?.isRunning != true else { return }
         guard let resources = Bundle.main.resourceURL else { return }
@@ -288,9 +292,14 @@ final class CmuxDigestDaemonSupervisor {
             )
             do {
                 try client.connect()
-                _ = try client.send(
+                let response = try client.send(
                     command: "refresh_ghpr_metadata {\"workspaceId\":\"\(escaped)\"}"
                 )
+#if DEBUG
+                cmuxDebugLog(
+                    "digest.ghpr.refresh.response workspace=\(workspaceId) response=\(debugResponseSummary(response))"
+                )
+#endif
             } catch {
 #if DEBUG
                 cmuxDebugLog(
@@ -300,6 +309,16 @@ final class CmuxDigestDaemonSupervisor {
             }
         }
     }
+
+#if DEBUG
+    private static func debugResponseSummary(_ response: String) -> String {
+        let singleLine = response
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "")
+        guard singleLine.count > 240 else { return singleLine }
+        return String(singleLine.prefix(240)) + "..."
+    }
+#endif
 }
 
 @main
