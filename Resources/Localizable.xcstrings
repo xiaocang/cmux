@@ -41551,76 +41551,6 @@
         }
       }
     },
-    "extensionColumn.configure.provider.heuristic": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Heuristic"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "ヒューリスティック"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "启发式"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "啟發式"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "휴리스틱"
-          }
-        }
-      }
-    },
-    "extensionColumn.configure.provider.openai": {
-      "extractionState": "manual",
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "OpenAI"
-          }
-        },
-        "ja": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "OpenAI"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "OpenAI"
-          }
-        },
-        "zh-Hant": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "OpenAI"
-          }
-        },
-        "ko": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "OpenAI"
-          }
-        }
-      }
-    },
     "extensionColumn.configure.title": {
       "extractionState": "manual",
       "localizations": {
@@ -76707,115 +76637,187 @@
         }
       }
     },
+    "settings.digest.model.claudeDefault": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Haiku（デフォルト）" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "Haiku（默认）" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "Haiku（預設）" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "de": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "es": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "fr": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "it": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "da": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "pl": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "ru": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "bs": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "ar": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "nb": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "th": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "tr": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } },
+        "uk": { "stringUnit": { "state": "translated", "value": "Haiku (default)" } }
+      }
+    },
+    "settings.digest.model.codexDefault": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Codex デフォルト" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "Codex 默认" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "Codex 預設" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "de": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "es": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "fr": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "it": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "da": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "pl": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "ru": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "bs": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "ar": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "nb": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "th": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "tr": { "stringUnit": { "state": "translated", "value": "Codex default" } },
+        "uk": { "stringUnit": { "state": "translated", "value": "Codex default" } }
+      }
+    },
+    "settings.digest.model.custom": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "カスタム..." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "自定义..." } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "自訂..." } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "de": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "es": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "fr": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "it": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "da": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "pl": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "ru": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "bs": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "ar": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "nb": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "pt-BR": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "th": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "tr": { "stringUnit": { "state": "translated", "value": "Custom..." } },
+        "uk": { "stringUnit": { "state": "translated", "value": "Custom..." } }
+      }
+    },
     "settings.digest.model.subtitle": {
       "extractionState": "manual",
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "プロバイダーによる要約で使う任意のモデル名です。"
+            "value": "プロバイダーのプリセットを選ぶか、カスタム CLI モデル名を入力します。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "选择 provider 预设，或输入自定义 CLI model 名称。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "選擇 provider 預設，或輸入自訂 CLI model 名稱。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "da": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "bs": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "ar": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "nb": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "th": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Optional model name for provider-backed summaries."
+            "value": "Choose a provider preset or enter a custom CLI model name."
           }
         },
         "uk": {
@@ -76951,115 +76953,115 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "外部プロバイダーが設定されていない場合はヒューリスティック要約を使用します。"
+            "value": "要約には Claude Code または Codex CLI を使用します。"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "使用 Claude Code 或 Codex CLI 生成摘要。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "使用 Claude Code 或 Codex CLI 產生摘要。"
           }
         },
         "ko": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "da": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "bs": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "ar": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "nb": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "pt-BR": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "th": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "tr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         },
         "uk": {
           "stringUnit": {
             "state": "translated",
-            "value": "Use heuristic summaries unless an external provider is configured."
+            "value": "Use Claude Code or Codex CLI for summaries."
           }
         }
       }

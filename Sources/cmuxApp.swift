@@ -124,7 +124,7 @@ final class CmuxDigestDaemonSupervisor {
         let rawProvider = defaults.string(forKey: "digest.provider")?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let rawProvider, !rawProvider.isEmpty {
-            environment["CMUX_DIGEST_PROVIDER"] = rawProvider
+            environment["CMUX_DIGEST_PROVIDER"] = DigestProviderOption.normalizedRawValue(rawProvider)
         }
 
         if let model = defaults.string(forKey: "digest.model")?
@@ -287,7 +287,7 @@ struct cmuxApp: App {
     private var showSidebarDevBuildBanner = DevBuildBannerDebugSettings.defaultShowSidebarBanner
     @AppStorage(SocketControlSettings.appStorageKey) private var socketControlMode = SocketControlSettings.defaultMode.rawValue
     @AppStorage("digest.enabled") private var digestEnabled = false
-    @AppStorage("digest.provider") private var digestProvider = "heuristic"
+    @AppStorage("digest.provider") private var digestProvider = DigestProviderOption.defaultValue.rawValue
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
@@ -5449,20 +5449,15 @@ struct WorkspaceSummarySettingsProfile: Codable, Equatable {
 }
 
 enum DigestProviderOption: String, CaseIterable, Identifiable {
-    case heuristic
     case claudeCode = "claude-code"
     case codex
-    case openai
+
+    static let defaultValue = DigestProviderOption.claudeCode
 
     var id: String { rawValue }
 
     var label: String {
         switch self {
-        case .heuristic:
-            return String(
-                localized: "extensionColumn.configure.provider.heuristic",
-                defaultValue: "Heuristic"
-            )
         case .claudeCode:
             return String(
                 localized: "extensionColumn.configure.provider.claude",
@@ -5473,17 +5468,173 @@ enum DigestProviderOption: String, CaseIterable, Identifiable {
                 localized: "extensionColumn.configure.provider.codex",
                 defaultValue: "Codex"
             )
-        case .openai:
-            return String(
-                localized: "extensionColumn.configure.provider.openai",
-                defaultValue: "OpenAI"
-            )
         }
     }
 
     static func normalizedRawValue(_ rawValue: String) -> String {
         let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return Self(rawValue: normalized)?.rawValue ?? Self.heuristic.rawValue
+        return Self(rawValue: normalized)?.rawValue ?? Self.defaultValue.rawValue
+    }
+
+    static func validatedRawValue(_ rawValue: String) -> String? {
+        let normalized = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return Self(rawValue: normalized)?.rawValue
+    }
+}
+
+struct DigestModelOption: Identifiable, Hashable {
+    static let defaultId = "__default__"
+    static let customId = "__custom__"
+
+    let id: String
+    let modelValue: String
+    let label: String
+
+    static func options(for provider: DigestProviderOption) -> [DigestModelOption] {
+        switch provider {
+        case .claudeCode:
+            return [
+                DigestModelOption(
+                    id: Self.defaultId,
+                    modelValue: "",
+                    label: String(localized: "settings.digest.model.claudeDefault", defaultValue: "Haiku (default)")
+                ),
+                DigestModelOption(id: "sonnet", modelValue: "sonnet", label: "Sonnet"),
+                DigestModelOption(id: "opus", modelValue: "opus", label: "Opus"),
+                customOption
+            ]
+        case .codex:
+            return [
+                DigestModelOption(
+                    id: Self.defaultId,
+                    modelValue: "",
+                    label: String(localized: "settings.digest.model.codexDefault", defaultValue: "Codex default")
+                ),
+                DigestModelOption(id: "gpt-5.5", modelValue: "gpt-5.5", label: "GPT-5.5"),
+                DigestModelOption(id: "gpt-5.4", modelValue: "gpt-5.4", label: "GPT-5.4"),
+                DigestModelOption(id: "gpt-5.4-mini", modelValue: "gpt-5.4-mini", label: "GPT-5.4 Mini"),
+                DigestModelOption(id: "gpt-5.3-codex", modelValue: "gpt-5.3-codex", label: "GPT-5.3 Codex"),
+                DigestModelOption(id: "gpt-5.3-codex-spark", modelValue: "gpt-5.3-codex-spark", label: "GPT-5.3 Codex Spark"),
+                customOption
+            ]
+        }
+    }
+
+    static func option(id: String, provider: DigestProviderOption) -> DigestModelOption? {
+        options(for: provider).first { $0.id == id }
+    }
+
+    static func selectionId(for rawModel: String, provider: DigestProviderOption) -> String {
+        let model = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        if model.isEmpty {
+            return Self.defaultId
+        }
+        if provider == .claudeCode, model == "haiku" {
+            return Self.defaultId
+        }
+        if options(for: provider).contains(where: { $0.id == model }) {
+            return model
+        }
+        return Self.customId
+    }
+
+    static func customPlaceholder(for provider: DigestProviderOption) -> String {
+        switch provider {
+        case .claudeCode:
+            return "sonnet"
+        case .codex:
+            return "gpt-5.4"
+        }
+    }
+
+    private static var customOption: DigestModelOption {
+        DigestModelOption(
+            id: Self.customId,
+            modelValue: "",
+            label: String(localized: "settings.digest.model.custom", defaultValue: "Custom...")
+        )
+    }
+}
+
+struct DigestModelPicker: View {
+    @Binding var providerRawValue: String
+    @Binding var model: String
+    @Binding var legacyClaudeModel: String
+    var alignment: HorizontalAlignment = .trailing
+    var frameAlignment: Alignment = .trailing
+
+    @State private var pinnedSelectionId: String?
+
+    private var selectedProvider: DigestProviderOption {
+        DigestProviderOption(rawValue: DigestProviderOption.normalizedRawValue(providerRawValue)) ?? .defaultValue
+    }
+
+    private var effectiveModel: String {
+        let current = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !current.isEmpty {
+            return current
+        }
+        return legacyClaudeModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var selectionId: String {
+        if pinnedSelectionId == DigestModelOption.customId {
+            return DigestModelOption.customId
+        }
+        return DigestModelOption.selectionId(for: effectiveModel, provider: selectedProvider)
+    }
+
+    private var selectionBinding: Binding<String> {
+        Binding(
+            get: { selectionId },
+            set: { newValue in
+                pinnedSelectionId = newValue
+                guard newValue != DigestModelOption.customId,
+                      let option = DigestModelOption.option(id: newValue, provider: selectedProvider) else {
+                    return
+                }
+                model = option.modelValue
+                legacyClaudeModel = ""
+            }
+        )
+    }
+
+    private var customModelBinding: Binding<String> {
+        Binding(
+            get: { effectiveModel },
+            set: { newValue in
+                pinnedSelectionId = DigestModelOption.customId
+                model = newValue
+                legacyClaudeModel = ""
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: alignment, spacing: 6) {
+            Picker("", selection: selectionBinding) {
+                ForEach(DigestModelOption.options(for: selectedProvider)) { option in
+                    Text(option.label).tag(option.id)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.menu)
+            .controlSize(.small)
+            .frame(maxWidth: .infinity, alignment: frameAlignment)
+
+            if selectionId == DigestModelOption.customId {
+                TextField(
+                    DigestModelOption.customPlaceholder(for: selectedProvider),
+                    text: customModelBinding
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(maxWidth: .infinity, alignment: frameAlignment)
+            }
+        }
+        .onChange(of: providerRawValue) { _, _ in
+            pinnedSelectionId = nil
+        }
     }
 }
 
@@ -5757,7 +5908,7 @@ struct SettingsView: View {
     @AppStorage("sidebarShowProgress") private var sidebarShowProgress = true
     @AppStorage("sidebarShowStatusPills") private var sidebarShowMetadata = true
     @AppStorage("digest.enabled") private var digestEnabled = false
-    @AppStorage("digest.provider") private var digestProvider = "heuristic"
+    @AppStorage("digest.provider") private var digestProvider = DigestProviderOption.defaultValue.rawValue
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
     @AppStorage("digest.currentWorkspaceMinIntervalSec") private var digestCurrentWorkspaceMinIntervalSec = 45
@@ -7074,6 +7225,38 @@ struct SettingsView: View {
                                 .controlSize(.small)
                         }
 
+                        SettingsCardDivider()
+
+                        SettingsPickerRow(
+                            configurationReview: .json("digest.provider"),
+                            String(localized: "settings.digest.provider", defaultValue: "Provider"),
+                            subtitle: String(localized: "settings.digest.provider.subtitle", defaultValue: "Use Claude Code or Codex CLI for summaries."),
+                            controlWidth: pickerColumnWidth,
+                            selection: digestProviderSelection,
+                            accessibilityId: "DigestProviderPicker"
+                        ) {
+                            ForEach(DigestProviderOption.allCases) { option in
+                                Text(option.label).tag(option.rawValue)
+                            }
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.model"),
+                            String(localized: "settings.digest.model", defaultValue: "Model"),
+                            subtitle: String(localized: "settings.digest.model.subtitle", defaultValue: "Choose a provider preset or enter a custom CLI model name."),
+                            controlWidth: pickerColumnWidth
+                        ) {
+                            DigestModelPicker(
+                                providerRawValue: $digestProvider,
+                                model: $digestModel,
+                                legacyClaudeModel: $digestClaudeCodeModel,
+                                alignment: .trailing,
+                                frameAlignment: .trailing
+                            )
+                        }
+
                         if digestEnabled {
                             SettingsCardDivider()
 
@@ -8171,7 +8354,7 @@ struct SettingsView: View {
         sidebarShowProgress = true
         sidebarShowMetadata = true
         digestEnabled = false
-        digestProvider = "heuristic"
+        digestProvider = DigestProviderOption.defaultValue.rawValue
         digestModel = ""
         digestClaudeCodeModel = ""
         digestCurrentWorkspaceMinIntervalSec = 45

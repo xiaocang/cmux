@@ -12997,6 +12997,7 @@ struct WorkspaceSidebarSummaryPriorityItem: Codable, Identifiable, Equatable {
     let scores: Scores
     let nextAction: NextAction?
     let pinned: Bool
+    let stale: Bool?
     let evidence: [Evidence]?
 
     var id: String { workspaceId }
@@ -13514,6 +13515,7 @@ final class WorkspaceTabStore: ObservableObject {
 #endif
                 self.summaryPriority = decoded
                 self.mergeContextSummaries(items: decoded.items)
+                self.refineColdStartItems(decoded.items)
             }
         }
     }
@@ -13547,8 +13549,12 @@ final class WorkspaceTabStore: ObservableObject {
             return String(localized: "extensionColumn.refreshStage.connecting", defaultValue: "Connecting")
         case "reading":
             return String(localized: "extensionColumn.refreshStage.reading", defaultValue: "Reading")
+        case "quick":
+            return String(localized: "extensionColumn.refreshStage.quick", defaultValue: "Quick score")
         case "surfaces":
             return String(localized: "extensionColumn.refreshStage.surfaces", defaultValue: "Surfaces")
+        case "seed":
+            return String(localized: "extensionColumn.refreshStage.seed", defaultValue: "Seed summary")
         case "summary":
             return String(localized: "extensionColumn.refreshStage.summary", defaultValue: "Summary")
         case "scoring":
@@ -13650,7 +13656,7 @@ final class WorkspaceTabStore: ObservableObject {
 
     private static func goalDrivenComposite(_ item: WorkspaceSidebarSummaryPriorityItem) -> Double {
         // Phase 1 stub: max raw score across known dimensions. Replace with
-        // the real LLM/heuristic scorer in the follow-up PR.
+        // the real CLI scorer in the follow-up PR.
         let raws = item.scores.dimensions.values.map(\.rawScore)
         return raws.max() ?? 0
     }
@@ -13660,6 +13666,31 @@ final class WorkspaceTabStore: ObservableObject {
     }
 
     func refreshWorkspace(workspaceId: String) {
+        refreshWorkspace(workspaceId: workspaceId, force: true, refinement: nil, completion: nil)
+    }
+
+    private func refineColdStartItems(_ items: [WorkspaceSidebarSummaryPriorityItem]) {
+        let staleWorkspaceIds = items
+            .filter { $0.stale == true }
+            .map(\.workspaceId)
+        guard !staleWorkspaceIds.isEmpty else { return }
+
+        for (index, workspaceId) in staleWorkspaceIds.enumerated() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.15) { [weak self] in
+                self?.refreshWorkspace(workspaceId: workspaceId, force: false, refinement: "seed") { [weak self] item in
+                    guard let self, item?.stale == true else { return }
+                    self.refreshWorkspace(workspaceId: workspaceId, force: false, refinement: "full", completion: nil)
+                }
+            }
+        }
+    }
+
+    private func refreshWorkspace(
+        workspaceId: String,
+        force: Bool,
+        refinement: String?,
+        completion: ((WorkspaceSidebarSummaryPriorityItem?) -> Void)?
+    ) {
         guard workspaceRefreshesInFlight.insert(workspaceId).inserted else { return }
         errorMessage = nil
         var nextRefreshingWorkspaceIds = refreshingWorkspaceIds
@@ -13667,9 +13698,13 @@ final class WorkspaceTabStore: ObservableObject {
         refreshingWorkspaceIds = nextRefreshingWorkspaceIds
         workspaceRefreshStages[workspaceId] = "connecting"
         startProgressPolling()
+        var payload: [String: Any] = ["workspaceId": workspaceId, "force": force]
+        if let refinement {
+            payload["refinement"] = refinement
+        }
         sendDigestCommand(
             "refresh_summary_priority_workspace",
-            payload: ["workspaceId": workspaceId],
+            payload: payload,
             decoding: WorkspaceSidebarSummaryPriorityItem.self
         ) { [weak self] result in
             guard let self else { return }
@@ -13682,8 +13717,10 @@ final class WorkspaceTabStore: ObservableObject {
             switch result {
             case .failure(let error):
                 self.errorMessage = Self.displayMessage(for: error)
+                completion?(nil)
             case .success(let item):
                 self.applyRefreshedWorkspaceItem(item)
+                completion?(item)
             }
         }
     }
@@ -13703,8 +13740,12 @@ final class WorkspaceTabStore: ObservableObject {
             generatedAt: Self.iso8601Formatter.string(from: Date())
         )
         var items = current.items
-        let alreadyHadItem = current.items.contains { $0.workspaceId == item.workspaceId }
-        if let index = items.firstIndex(where: { $0.workspaceId == item.workspaceId }) {
+        let existingIndex = items.firstIndex(where: { $0.workspaceId == item.workspaceId })
+        if let index = existingIndex, items[index] == item {
+            return
+        }
+        let existingWasStale = existingIndex.map { items[$0].stale == true } ?? false
+        if let index = existingIndex {
             items[index] = item
         } else {
             items.append(item)
@@ -13714,10 +13755,13 @@ final class WorkspaceTabStore: ObservableObject {
         let topScore = sortedItems
             .map { Self.activeScore(item: $0, sort: current.sort) }
             .max() ?? 0
-        let staleDigestCount = max(
-            0,
-            current.stats.staleDigestCount - (alreadyHadItem ? 0 : 1)
-        )
+        let staleDelta: Int
+        switch (existingWasStale, item.stale == true) {
+        case (true, false): staleDelta = -1
+        case (false, true): staleDelta = 1
+        default: staleDelta = 0
+        }
+        let staleDigestCount = max(0, current.stats.staleDigestCount + staleDelta)
 
         summaryPriority = WorkspaceSidebarSummaryPriorityState(
             profileId: current.profileId,
@@ -15502,10 +15546,14 @@ private struct TabItemView: View, Equatable {
             Text("\(badge.score)")
                 .font(.system(size: 9.5, weight: .semibold, design: .monospaced))
                 .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
         }
         .foregroundColor(activeSecondaryColor(usesInvertedActiveForeground ? 0.95 : 0.78))
         .padding(.horizontal, 5)
         .frame(height: 16)
+        .fixedSize(horizontal: true, vertical: false)
+        .layoutPriority(3)
         .background(
             Capsule(style: .continuous)
                 .fill(usesInvertedActiveForeground ? Color.white.opacity(0.14) : Color.primary.opacity(0.07))
@@ -15562,7 +15610,6 @@ private struct TabItemView: View, Equatable {
                 .foregroundColor(activePrimaryTextColor)
                 .lineLimit(1)
                 .truncationMode(.tail)
-                .layoutPriority(1)
 
             Spacer(minLength: 0)
 
@@ -19646,15 +19693,9 @@ private struct ExtensionColumnConfigurationPanel: View {
     @ObservedObject var summaryProfileStore: WorkspaceSummaryProfileSettingsStore
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var legacyDigestClaudeModel = ""
-    @AppStorage("digest.provider") private var digestProvider = "heuristic"
-    @State private var newSummaryDimensionId = ""
-    @State private var newSummaryDimensionLabel = ""
+    @AppStorage("digest.provider") private var digestProvider = DigestProviderOption.defaultValue.rawValue
 
     let availableHeight: CGFloat
-
-    private var canAddSummaryDimension: Bool {
-        summaryProfileStore.canAddDimension(id: newSummaryDimensionId)
-    }
 
     var body: some View {
         ScrollView {
@@ -19693,10 +19734,14 @@ private struct ExtensionColumnConfigurationPanel: View {
                 Text(String(localized: "settings.digest.model", defaultValue: "Model"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundColor(.secondary)
-                TextField("haiku", text: digestModelBinding)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 12, design: .monospaced))
-                    .frame(maxWidth: .infinity)
+                DigestModelPicker(
+                    providerRawValue: $digestProvider,
+                    model: $digestModel,
+                    legacyClaudeModel: $legacyDigestClaudeModel,
+                    alignment: .leading,
+                    frameAlignment: .leading
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -19705,22 +19750,6 @@ private struct ExtensionColumnConfigurationPanel: View {
         Binding(
             get: { DigestProviderOption.normalizedRawValue(digestProvider) },
             set: { digestProvider = DigestProviderOption.normalizedRawValue($0) }
-        )
-    }
-
-    private var digestModelBinding: Binding<String> {
-        Binding(
-            get: {
-                let model = digestModel.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !model.isEmpty {
-                    return digestModel
-                }
-                return legacyDigestClaudeModel
-            },
-            set: { newValue in
-                digestModel = newValue
-                legacyDigestClaudeModel = ""
-            }
         )
     }
 
@@ -19742,20 +19771,9 @@ private struct ExtensionColumnConfigurationPanel: View {
 
             ExtensionConfigurationDivider()
 
-            ExtensionSummaryAddDimensionRow(
-                id: $newSummaryDimensionId,
-                label: $newSummaryDimensionLabel,
-                canAdd: canAddSummaryDimension,
-                onAdd: addSummaryDimension
-            )
-
-            ExtensionConfigurationDivider()
-
             HStack(spacing: 8) {
                 Button(String(localized: "settings.summaryPriority.resetDimensions.button", defaultValue: "Reset")) {
                     summaryProfileStore.resetToDefaults()
-                    newSummaryDimensionId = ""
-                    newSummaryDimensionLabel = ""
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -19793,16 +19811,6 @@ private struct ExtensionColumnConfigurationPanel: View {
                 summaryProfileStore.updateDimension(id: id, label: newValue)
             }
         )
-    }
-
-    private func addSummaryDimension() {
-        let added = summaryProfileStore.addDimension(
-            id: newSummaryDimensionId,
-            label: newSummaryDimensionLabel
-        )
-        guard added else { return }
-        newSummaryDimensionId = ""
-        newSummaryDimensionLabel = ""
     }
 
     private var summaryProfileStatusText: String? {
@@ -19929,54 +19937,6 @@ private struct ExtensionSummaryDimensionConfigurationRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct ExtensionSummaryAddDimensionRow: View {
-    @Binding var id: String
-    @Binding var label: String
-    let canAdd: Bool
-    let onAdd: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(String(localized: "settings.summaryPriority.addDimension", defaultValue: "Add Dimension"))
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-
-            HStack(spacing: 6) {
-                TextField(
-                    String(localized: "settings.summaryPriority.dimension.id.placeholder", defaultValue: "id"),
-                    text: $id
-                )
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11, design: .monospaced))
-                .frame(width: 62)
-                .onSubmit {
-                    if canAdd { onAdd() }
-                }
-
-                TextField(
-                    String(localized: "settings.summaryPriority.dimension.label.placeholder", defaultValue: "Label"),
-                    text: $label
-                )
-                .textFieldStyle(.roundedBorder)
-                .font(.system(size: 11))
-                .frame(maxWidth: .infinity)
-                .onSubmit {
-                    if canAdd { onAdd() }
-                }
-
-                Button(action: onAdd) {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .buttonStyle(.borderless)
-                .controlSize(.small)
-                .disabled(!canAdd)
-                .help(String(localized: "settings.summaryPriority.dimension.add.help", defaultValue: "Add summary dimension"))
-            }
-        }
     }
 }
 

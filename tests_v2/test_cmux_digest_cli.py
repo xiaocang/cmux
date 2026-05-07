@@ -84,6 +84,134 @@ def _workspace_ids(state: dict) -> list[str]:
     return [str(item.get("workspaceId") or "") for item in state.get("items", [])]
 
 
+def _read_jsonl(path: pathlib.Path) -> list[dict]:
+    if not path.exists():
+        return []
+    rows: list[dict] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rows.append(json.loads(line))
+    return rows
+
+
+def _write_fake_cli(path: pathlib.Path, log_path: pathlib.Path, kind: str) -> None:
+    if kind not in ("claude", "codex"):
+        raise ValueError(f"unsupported fake CLI kind: {kind!r}")
+    path.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import json
+            import os
+            import pathlib
+            import sys
+
+            KIND = {kind!r}
+            log_path = pathlib.Path({str(log_path)!r})
+            argv = sys.argv[1:]
+            output_path = None
+            if KIND == "claude":
+                prompt = ""
+                if "-p" in argv:
+                    idx = argv.index("-p")
+                    if idx + 1 < len(argv):
+                        prompt = argv[idx + 1]
+                is_resume = "--resume" in argv
+            else:
+                is_resume = len(argv) >= 2 and argv[0] == "exec" and argv[1] == "resume"
+                prompt = argv[-1] if argv else ""
+                if "--output-last-message" in argv:
+                    idx = argv.index("--output-last-message")
+                    if idx + 1 < len(argv):
+                        output_path = pathlib.Path(argv[idx + 1])
+            with log_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps({{"argv": argv, "prompt": prompt, "is_resume": is_resume}}, sort_keys=True) + "\\n")
+            if KIND == "claude" and is_resume and os.environ.get("FAKE_CLAUDE_FAIL_RESUME") == "1":
+                print("resume failed", file=sys.stderr)
+                raise SystemExit(42)
+
+            def workspace(label):
+                return {{
+                    "topic": {{"text": label, "emoji": None, "confidence": 0.9}},
+                    "summary": {{"short": label + " short", "detailed": label + " detailed"}},
+                    "state": {{
+                        "inferredGoal": label,
+                        "currentStatus": "working",
+                        "progress": [label + " progress"],
+                        "blockers": [],
+                        "risks": [],
+                        "nextActions": [label + " next"],
+                    }},
+                    "priorityHints": {{"needsAttention": True, "score": 75, "reasons": [label + " reason"]}},
+                    "evidence": [],
+                }}
+
+            def surface():
+                return {{
+                    "inferredAgent": "claude-code" if KIND == "claude" else "codex",
+                    "status": "working",
+                    "shortSummary": "fake " + KIND + " surface",
+                    "signals": ["fake"],
+                    "blockers": [],
+                    "nextActionHints": ["continue"],
+                    "evidence": [],
+                    "confidence": 0.8,
+                }}
+
+            def dimensions():
+                dimension_id = "urgency"
+                try:
+                    # Codex prepends a system prompt; trim to the first JSON object.
+                    start = prompt.find("{{") if KIND == "codex" else 0
+                    payload = json.loads(prompt[start:] if start > 0 else prompt)
+                    dims = payload.get("dimensions") or []
+                    if dims and isinstance(dims[0], dict):
+                        dimension_id = dims[0].get("id") or dimension_id
+                except Exception:
+                    pass
+                base = {{"urgency": 88, "importance": 72, "progress": 61}}.get(dimension_id, 55)
+                return {{
+                    "dimensions": {{
+                        dimension_id: {{
+                            "rawScore": base,
+                            "confidence": 0.9,
+                            "reason": "fake " + KIND + " " + dimension_id,
+                        }}
+                    }}
+                }}
+
+            label_prefix = "Claude" if KIND == "claude" else "Codex"
+            if '"mode":"incremental_update"' in prompt or '"mode": "incremental_update"' in prompt:
+                result = workspace(label_prefix + " Incremental")
+            elif '"redactedScreen"' in prompt:
+                result = surface()
+            elif '"dimensions"' in prompt and '"digest"' in prompt:
+                result = dimensions()
+            else:
+                result = workspace(label_prefix + " Full")
+
+            if KIND == "claude":
+                print(json.dumps({{"type": "result", "session_id": "claude-summary-session-1", "result": json.dumps(result)}}))
+            else:
+                if output_path is not None:
+                    output_path.write_text(json.dumps(result), encoding="utf-8")
+                print(json.dumps({{"type": "session_meta", "payload": {{"id": "codex-summary-session-1"}}}}))
+            """
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o755)
+
+
+def _write_fake_claude(path: pathlib.Path, log_path: pathlib.Path) -> None:
+    _write_fake_cli(path, log_path, kind="claude")
+
+
+def _write_fake_codex(path: pathlib.Path, log_path: pathlib.Path) -> None:
+    _write_fake_cli(path, log_path, kind="codex")
+
+
 class MockCmuxSocketServer:
     """Minimal AF_UNIX server that satisfies cmux-digest's read + write paths.
 
@@ -98,6 +226,11 @@ class MockCmuxSocketServer:
         self.path = path
         self.calls: list[str] = []
         self.calls_lock = threading.Lock()
+        self.screens = {
+            "workspace-1": "pytest is running for release validation.\nClaude is still running tests.",
+            "workspace-2": "Completed auth security refactor successfully.\nAll done.",
+            "workspace-3": "Claude asks: Do you want to continue with this ops change?\nPlease confirm.",
+        }
         self._server: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = False
@@ -213,12 +346,7 @@ class MockCmuxSocketServer:
         elif method == "surface.read_text":
             params = req.get("params") if isinstance(req.get("params"), dict) else {}
             workspace_id = params.get("workspace_id") or "workspace-1"
-            screens = {
-                "workspace-1": "pytest is running for release validation.\nClaude is still running tests.",
-                "workspace-2": "Completed auth security refactor successfully.\nAll done.",
-                "workspace-3": "Claude asks: Do you want to continue with this ops change?\nPlease confirm.",
-            }
-            result = {"text": screens.get(str(workspace_id), "")}
+            result = {"text": self.screens.get(str(workspace_id), "")}
         elif method == "notification.list":
             result = {"notifications": []}
         else:
@@ -250,11 +378,22 @@ def main() -> int:
             # the temp dir so a real settings.json doesn't leak into the test.
             env["HOME"] = str(root)
             env["XDG_CONFIG_HOME"] = str(root / "config")
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir(exist_ok=True)
+            fake_claude = fake_bin / "claude"
+            fake_claude_log = root / "fake-claude-calls.jsonl"
+            _write_fake_claude(fake_claude, fake_claude_log)
+            env["CMUX_DIGEST_ENABLED"] = "1"
+            env["CMUX_DIGEST_PROVIDER"] = "claude-code"
+            env["CMUX_DIGEST_CLAUDE_PATH"] = str(fake_claude)
+            env["CMUX_DIGEST_CLAUDE_MODEL"] = "fake-haiku"
+            env["CMUX_DIGEST_INCREMENTAL_SUMMARY"] = "1"
+            env["CMUX_DIGEST_MAX_CONCURRENT_LLM"] = "1"
 
             first = _run([digest, "refresh", "--all"], env)
             _must(first.returncode == 0, f"refresh failed: stdout={first.stdout!r} stderr={first.stderr!r}")
             _must(
-                "Waiting" in first.stdout or "waiting_for_user" in first.stdout,
+                "Claude Full" in first.stdout or "working" in first.stdout,
                 first.stdout,
             )
 
@@ -518,6 +657,110 @@ def main() -> int:
             )
             _must("Resolve Codex Private Rollout" in codex_linked.stdout, codex_linked.stdout)
             _must("status: done" in codex_linked.stdout, codex_linked.stdout)
+
+            fake_bin = root / "fake-bin"
+            fake_bin.mkdir(exist_ok=True)
+            fake_claude = fake_bin / "claude"
+            fake_claude_log = root / "fake-claude-calls.jsonl"
+            _write_fake_claude(fake_claude, fake_claude_log)
+
+            cli_env = env.copy()
+            cli_env["CMUX_DIGEST_ENABLED"] = "1"
+            cli_env["CMUX_DIGEST_PROVIDER"] = "claude-code"
+            cli_env["CMUX_DIGEST_CLAUDE_PATH"] = str(fake_claude)
+            cli_env["CMUX_DIGEST_CLAUDE_MODEL"] = "fake-haiku"
+            cli_env["CMUX_DIGEST_INCREMENTAL_SUMMARY"] = "1"
+            cli_env["CMUX_DIGEST_MAX_CONCURRENT_LLM"] = "1"
+
+            claude_full = _run([digest, "refresh", "--workspace", "workspace-1", "--force"], cli_env)
+            _must(claude_full.returncode == 0, f"fake claude full failed: stdout={claude_full.stdout!r} stderr={claude_full.stderr!r}")
+            _must("Claude Full" in claude_full.stdout, claude_full.stdout)
+
+            workspace_digest_path = root / "digest-home" / "digests" / "workspaces" / "workspace-1.json"
+            stored = json.loads(workspace_digest_path.read_text(encoding="utf-8"))
+            _must(
+                stored.get("debug", {}).get("summarySession", {}).get("sessionId") == "claude-summary-session-1",
+                json.dumps(stored.get("debug", {}), sort_keys=True),
+            )
+
+            server.screens["workspace-1"] = "pytest finished; the release validation now needs final review."
+            claude_incremental = _run([digest, "refresh", "--workspace", "workspace-1"], cli_env)
+            _must(
+                claude_incremental.returncode == 0,
+                f"fake claude incremental failed: stdout={claude_incremental.stdout!r} stderr={claude_incremental.stderr!r}",
+            )
+            _must("Claude Incremental" in claude_incremental.stdout, claude_incremental.stdout)
+            claude_calls = _read_jsonl(fake_claude_log)
+            claude_resume_calls = [row for row in claude_calls if row.get("is_resume")]
+            _must(claude_resume_calls, f"expected a claude resume call, got {claude_calls!r}")
+            _must(
+                "--resume" in claude_resume_calls[-1]["argv"]
+                and "claude-summary-session-1" in claude_resume_calls[-1]["argv"],
+                claude_resume_calls[-1],
+            )
+            _must('"mode":"incremental_update"' in claude_resume_calls[-1]["prompt"], claude_resume_calls[-1]["prompt"])
+            _must('"redactedScreen"' not in claude_resume_calls[-1]["prompt"], claude_resume_calls[-1]["prompt"])
+
+            claude_call_count = len(_read_jsonl(fake_claude_log))
+            claude_unchanged = _run([digest, "refresh", "--workspace", "workspace-1"], cli_env)
+            _must(claude_unchanged.returncode == 0, claude_unchanged.stderr)
+            _must(
+                len(_read_jsonl(fake_claude_log)) == claude_call_count,
+                "unchanged workspace input should not call fake claude again",
+            )
+
+            fake_codex = fake_bin / "codex"
+            fake_codex_log = root / "fake-codex-calls.jsonl"
+            _write_fake_codex(fake_codex, fake_codex_log)
+            codex_env = cli_env.copy()
+            codex_env["CMUX_DIGEST_PROVIDER"] = "codex"
+            codex_env["CMUX_DIGEST_CODEX_PATH"] = str(fake_codex)
+            codex_env["CMUX_DIGEST_MODEL"] = "fake-gpt"
+
+            codex_full = _run([digest, "refresh", "--workspace", "workspace-1", "--force"], codex_env)
+            _must(codex_full.returncode == 0, f"fake codex full failed: stdout={codex_full.stdout!r} stderr={codex_full.stderr!r}")
+            _must("Codex Full" in codex_full.stdout, codex_full.stdout)
+            server.screens["workspace-1"] = "pytest finished; Codex has a smaller final-review delta."
+            codex_incremental = _run([digest, "refresh", "--workspace", "workspace-1"], codex_env)
+            _must(
+                codex_incremental.returncode == 0,
+                f"fake codex incremental failed: stdout={codex_incremental.stdout!r} stderr={codex_incremental.stderr!r}",
+            )
+            _must("Codex Incremental" in codex_incremental.stdout, codex_incremental.stdout)
+            codex_calls = _read_jsonl(fake_codex_log)
+            codex_resume_calls = [row for row in codex_calls if row.get("is_resume")]
+            _must(codex_resume_calls, f"expected a codex exec resume call, got {codex_calls!r}")
+            _must(
+                codex_resume_calls[-1]["argv"][:2] == ["exec", "resume"]
+                and "codex-summary-session-1" in codex_resume_calls[-1]["argv"],
+                codex_resume_calls[-1],
+            )
+            _must('"mode":"incremental_update"' in codex_resume_calls[-1]["prompt"], codex_resume_calls[-1]["prompt"])
+
+            fail_log = root / "fake-claude-fail-calls.jsonl"
+            failing_claude = fake_bin / "claude-fail-resume"
+            _write_fake_claude(failing_claude, fail_log)
+            fail_env = cli_env.copy()
+            fail_env["CMUX_DIGEST_CLAUDE_PATH"] = str(failing_claude)
+            fail_env["FAKE_CLAUDE_FAIL_RESUME"] = "1"
+            server.screens["workspace-1"] = "new full baseline before forced resume failure."
+            failed_resume_full = _run([digest, "refresh", "--workspace", "workspace-1", "--force"], fail_env)
+            _must(failed_resume_full.returncode == 0, failed_resume_full.stderr)
+            server.screens["workspace-1"] = "delta that should make resume fail and then full fallback succeed."
+            failed_resume = _run([digest, "refresh", "--workspace", "workspace-1"], fail_env)
+            _must(failed_resume.returncode == 0, f"resume fallback failed: stdout={failed_resume.stdout!r} stderr={failed_resume.stderr!r}")
+            fail_calls = _read_jsonl(fail_log)
+            _must(any(row.get("is_resume") for row in fail_calls), f"expected failing resume attempt, got {fail_calls!r}")
+            resume_index = next(idx for idx, row in enumerate(fail_calls) if row.get("is_resume"))
+            _must(
+                any(
+                    not row.get("is_resume")
+                    and '"redactedScreen"' not in row.get("prompt", "")
+                    and '"mode":"incremental_update"' not in row.get("prompt", "")
+                    for row in fail_calls[resume_index + 1 :]
+                ),
+                f"expected full fallback after resume failure, got {fail_calls!r}",
+            )
         finally:
             server.stop()
 

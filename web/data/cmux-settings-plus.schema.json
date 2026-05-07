@@ -28,19 +28,19 @@
         },
         "provider": {
           "type": "string",
-          "enum": ["heuristic", "claude-code", "codex", "openai"],
-          "default": "heuristic",
-          "description": "Digest summarization provider."
+          "enum": ["claude-code", "codex"],
+          "default": "claude-code",
+          "description": "Digest summarization CLI provider."
         },
         "model": {
           "type": "string",
           "default": "",
-          "description": "Optional model name for provider-backed summaries."
+          "description": "Optional CLI model name for summaries. The UI offers provider-specific presets plus a custom value."
         },
         "claudeCodeModel": {
           "type": "string",
           "default": "",
-          "description": "Optional Claude Code model when provider is claude-code."
+          "description": "Legacy optional Claude Code model when provider is claude-code. Prefer digest.model."
         },
         "currentWorkspaceMinIntervalSec": {
           "type": "integer",
@@ -69,7 +69,7 @@
         "sendFullDiffToLLM": {
           "type": "boolean",
           "default": false,
-          "description": "Send the full git diff to provider-backed summaries."
+          "description": "Send the full git diff to CLI-backed summaries."
         },
         "writeSidebarMetadata": {
           "type": "boolean",

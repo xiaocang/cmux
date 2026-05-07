@@ -788,7 +788,11 @@ final class CmuxSettingsFileStore {
             snapshot.managedUserDefaults["digest.enabled"] = .bool(value)
         }
         if let raw = jsonString(section["provider"]) {
-            snapshot.managedUserDefaults["digest.provider"] = .string(raw)
+            if let normalized = DigestProviderOption.validatedRawValue(raw) {
+                snapshot.managedUserDefaults["digest.provider"] = .string(normalized)
+            } else {
+                logInvalid("digest.provider", sourcePath: sourcePath)
+            }
         }
         if let raw = jsonString(section["model"]) {
             snapshot.managedUserDefaults["digest.model"] = .string(raw)
