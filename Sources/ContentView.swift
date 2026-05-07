@@ -653,24 +653,234 @@ private final class ExtensionColumnOverlayContainerView: NSView {
     var sidebarWidth: CGFloat = 0
     var overlayHitWidth: CGFloat = 0
     weak var scrollForwardingTarget: NSScrollView?
+#if DEBUG
+    private var debugScrollLastLogTime: TimeInterval = 0
+    private var debugScrollLastSignature: String?
+    private var debugScrollEventCount = 0
+#endif
 
     override var isOpaque: Bool { false }
 
     override func hitTest(_ point: NSPoint) -> NSView? {
         guard isInsideOverlayHitBand(point) else { return nil }
-        if let hit = super.hitTest(point) {
-            return hit
-        }
+        let hit = super.hitTest(point)
         if NSApp.currentEvent?.type == .scrollWheel {
+            if internalScrollView(owning: hit) != nil {
+#if DEBUG
+                debugScrollLog(
+                    signature: "hitTest.internalScroll",
+                    "hitTest.passInternal point=\(debugPoint(point)) hit=\(debugViewName(hit))"
+                )
+#endif
+                return hit
+            }
+#if DEBUG
+            debugScrollLog(
+                signature: "hitTest.capture",
+                "hitTest.capture point=\(debugPoint(point)) hit=\(debugViewName(hit))"
+            )
+#endif
             return self
         }
-        return nil
+        return hit
     }
 
     override func scrollWheel(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
-        guard isInsideOverlayHitBand(point) else { return }
-        scrollForwardingTarget?.scrollWheel(with: event)
+        guard isInsideOverlayHitBand(point) else {
+#if DEBUG
+            debugScrollLog(
+                signature: "direct.outsideBand",
+                "direct.outsideBand point=\(debugPoint(point)) band=\(debugBandDescription())"
+            )
+#endif
+            return
+        }
+#if DEBUG
+        debugScrollLog(
+            signature: "direct.forward",
+            "direct.forward point=\(debugPoint(point)) precise=\(event.hasPreciseScrollingDeltas ? 1 : 0)"
+        )
+#endif
+        scrollSidebar(with: event)
+    }
+
+    func shouldForwardScrollEvent(_ event: NSEvent) -> Bool {
+        guard let point = currentMousePointInOverlay() else {
+#if DEBUG
+            debugScrollLog(signature: "monitor.noWindow", "monitor.noWindow")
+#endif
+            return false
+        }
+        guard isInsideOverlayHitBand(point) else {
+#if DEBUG
+            debugScrollLog(
+                signature: "monitor.outsideBand",
+                "monitor.outsideBand point=\(debugPoint(point)) band=\(debugBandDescription()) " +
+                "bounds=\(debugSize(bounds.size)) captures=\(capturesMouseEvents ? 1 : 0)"
+            )
+#endif
+            return false
+        }
+        if let internalScrollView = internalScrollView(under: point) {
+#if DEBUG
+            debugScrollLog(
+                signature: "monitor.internalScroll",
+                "monitor.passInternal point=\(debugPoint(point)) internal=\(debugViewName(internalScrollView))"
+            )
+#endif
+            return false
+        }
+#if DEBUG
+        debugScrollLog(
+            signature: "monitor.forward",
+            "monitor.forward point=\(debugPoint(point)) target=\(debugViewName(scrollForwardingTarget)) " +
+            "rawDelta=(\(debugNumber(event.scrollingDeltaX)),\(debugNumber(event.scrollingDeltaY))) " +
+            "fallback=(\(debugNumber(event.deltaX)),\(debugNumber(event.deltaY)))"
+        )
+#endif
+        return true
+    }
+
+    @discardableResult
+    func scrollSidebar(with event: NSEvent) -> Bool {
+        guard let scrollView = scrollForwardingTarget ?? discoverSidebarScrollView() else {
+#if DEBUG
+            debugScrollLog(signature: "scroll.noTarget", "scroll.noTarget")
+#endif
+            return false
+        }
+        scrollForwardingTarget = scrollView
+        guard let documentView = scrollView.documentView else {
+#if DEBUG
+            debugScrollLog(signature: "scroll.noDocument", "scroll.noDocument target=\(debugViewName(scrollView))")
+#endif
+            return false
+        }
+        let clipView = scrollView.contentView
+        let documentSize = documentView.bounds.size
+        let clipSize = clipView.bounds.size
+        let maxOrigin = CGPoint(
+            x: max(0, documentSize.width - clipSize.width),
+            y: max(0, documentSize.height - clipSize.height)
+        )
+        guard maxOrigin.x > 0 || maxOrigin.y > 0 else {
+#if DEBUG
+            debugScrollLog(
+                signature: "scroll.noRange",
+                "scroll.noRange doc=\(debugSize(documentSize)) clip=\(debugSize(clipSize))"
+            )
+#endif
+            return false
+        }
+
+        let currentOrigin = clipView.bounds.origin
+        let deltaX = scrollDelta(event.scrollingDeltaX, fallback: event.deltaX)
+        let deltaY = scrollDelta(event.scrollingDeltaY, fallback: event.deltaY)
+        let nextOrigin = CGPoint(
+            x: min(max(currentOrigin.x + deltaX, 0), maxOrigin.x),
+            y: min(max(currentOrigin.y - deltaY, 0), maxOrigin.y)
+        )
+        guard abs(nextOrigin.x - currentOrigin.x) > 0.01
+            || abs(nextOrigin.y - currentOrigin.y) > 0.01 else {
+#if DEBUG
+            debugScrollLog(
+                signature: "scroll.noMove",
+                "scroll.noMove current=\(debugPoint(currentOrigin)) delta=(\(debugNumber(deltaX)),\(debugNumber(deltaY))) " +
+                "max=\(debugPoint(maxOrigin))"
+            )
+#endif
+            return false
+        }
+
+        clipView.scroll(to: nextOrigin)
+        scrollView.reflectScrolledClipView(clipView)
+#if DEBUG
+        debugScrollLog(
+            signature: "scroll.moved",
+            "scroll.moved current=\(debugPoint(currentOrigin)) next=\(debugPoint(nextOrigin)) " +
+            "delta=(\(debugNumber(deltaX)),\(debugNumber(deltaY))) max=\(debugPoint(maxOrigin))",
+            force: true
+        )
+#endif
+        return true
+    }
+
+    private func internalScrollView(owning hit: NSView?) -> NSScrollView? {
+        var current = hit
+        while let view = current, view !== self {
+            if let scrollView = view as? NSScrollView {
+                return scrollView
+            }
+            current = view.superview
+        }
+        return nil
+    }
+
+    private func internalScrollView(under point: NSPoint) -> NSScrollView? {
+        internalScrollView(owning: super.hitTest(point))
+    }
+
+    private func currentMousePointInOverlay() -> NSPoint? {
+        guard let window else { return nil }
+        let windowPoint = window.convertPoint(fromScreen: NSEvent.mouseLocation)
+        return convert(windowPoint, from: nil)
+    }
+
+    private func discoverSidebarScrollView() -> NSScrollView? {
+        guard let window,
+              let searchRoot = window.contentView?.superview ?? window.contentView else { return nil }
+        var best: (scrollView: NSScrollView, score: CGFloat)?
+        for scrollView in scrollViews(in: searchRoot) {
+            guard scrollView.window === window,
+                  !scrollView.isHiddenOrHasHiddenAncestor,
+                  scrollView.documentView != nil else { continue }
+            let frame = convert(scrollView.bounds, from: scrollView)
+            guard frame.width > 20,
+                  frame.height > 20,
+                  frame.minX < sidebarWidth,
+                  frame.maxX > 0 else { continue }
+            let overlap = min(frame.maxX, sidebarWidth) - max(frame.minX, 0)
+            guard overlap > min(frame.width, sidebarWidth) * 0.5 else { continue }
+            let score = abs(frame.minX) + abs(frame.width - sidebarWidth)
+            if best == nil || score < best!.score {
+                best = (scrollView, score)
+            }
+        }
+#if DEBUG
+        if let best {
+            let frame = convert(best.scrollView.bounds, from: best.scrollView)
+            debugScrollLog(
+                signature: "scroll.discoveredTarget",
+                "scroll.discoveredTarget target=\(debugViewName(best.scrollView)) frame=\(debugRect(frame)) score=\(debugNumber(best.score))",
+                force: true
+            )
+        } else {
+            debugScrollLog(signature: "scroll.discoverMiss", "scroll.discoverMiss")
+        }
+#endif
+        return best?.scrollView
+    }
+
+    private func scrollViews(in root: NSView) -> [NSScrollView] {
+        var result: [NSScrollView] = []
+        func visit(_ view: NSView) {
+            if let scrollView = view as? NSScrollView {
+                result.append(scrollView)
+            }
+            for subview in view.subviews {
+                visit(subview)
+            }
+        }
+        visit(root)
+        return result
+    }
+
+    private func scrollDelta(_ preciseDelta: CGFloat, fallback lineDelta: CGFloat) -> CGFloat {
+        if abs(preciseDelta) > 0.01 {
+            return preciseDelta
+        }
+        return lineDelta * 10
     }
 
     private func isInsideOverlayHitBand(_ point: NSPoint) -> Bool {
@@ -679,6 +889,46 @@ private final class ExtensionColumnOverlayContainerView: NSView {
         let hitMaxX = hitMinX + max(0, overlayHitWidth)
         return point.x >= hitMinX && point.x <= hitMaxX
     }
+
+#if DEBUG
+    private func debugScrollLog(signature: String, _ message: @autoclosure () -> String, force: Bool = false) {
+        debugScrollEventCount += 1
+        let now = ProcessInfo.processInfo.systemUptime
+        guard force
+            || signature != debugScrollLastSignature
+            || now - debugScrollLastLogTime >= 0.35 else { return }
+        debugScrollLastSignature = signature
+        debugScrollLastLogTime = now
+        cmuxDebugLog("extension.scroll count=\(debugScrollEventCount) \(message())")
+    }
+
+    private func debugPoint(_ point: CGPoint) -> String {
+        "(\(debugNumber(point.x)),\(debugNumber(point.y)))"
+    }
+
+    private func debugSize(_ size: CGSize) -> String {
+        "(\(debugNumber(size.width))x\(debugNumber(size.height)))"
+    }
+
+    private func debugRect(_ rect: CGRect) -> String {
+        "{x=\(debugNumber(rect.minX)) y=\(debugNumber(rect.minY)) w=\(debugNumber(rect.width)) h=\(debugNumber(rect.height))}"
+    }
+
+    private func debugNumber(_ value: CGFloat) -> String {
+        String(format: "%.1f", Double(value))
+    }
+
+    private func debugBandDescription() -> String {
+        let hitMinX = max(0, sidebarWidth)
+        let hitMaxX = hitMinX + max(0, overlayHitWidth)
+        return "\(debugNumber(hitMinX))...\(debugNumber(hitMaxX))"
+    }
+
+    private func debugViewName(_ view: NSView?) -> String {
+        guard let view else { return "nil" }
+        return String(describing: type(of: view))
+    }
+#endif
 }
 #if DEBUG
 private func debugCommandPaletteWindowSummary(_ window: NSWindow?) -> String {
@@ -1355,6 +1605,7 @@ private final class WindowExtensionColumnOverlayController: NSObject {
     private let hostingView = NSHostingView(rootView: AnyView(EmptyView()))
     private var installConstraints: [NSLayoutConstraint] = []
     private weak var installedThemeFrame: NSView?
+    private var scrollMonitor: Any?
 
     init(window: NSWindow) {
         self.window = window
@@ -1422,6 +1673,13 @@ private final class WindowExtensionColumnOverlayController: NSObject {
         containerView.overlayHitWidth = hitWidth
         containerView.scrollForwardingTarget = scrollForwardingTarget
 
+#if DEBUG
+        cmuxDebugLog(
+            "extension.scroll.update visible=\(isVisible ? 1 : 0) sidebarWidth=\(String(format: "%.1f", Double(sidebarWidth))) " +
+            "hitWidth=\(String(format: "%.1f", Double(hitWidth))) target=\(scrollForwardingTarget.map { String(describing: type(of: $0)) } ?? "nil")"
+        )
+#endif
+
         if isVisible {
             hostingView.rootView = rootView
             containerView.capturesMouseEvents = true
@@ -1433,6 +1691,43 @@ private final class WindowExtensionColumnOverlayController: NSObject {
             containerView.capturesMouseEvents = false
             containerView.alphaValue = 0
             containerView.isHidden = true
+        }
+        updateScrollMonitor(isVisible: isVisible)
+    }
+
+    private func updateScrollMonitor(isVisible: Bool) {
+        if isVisible {
+            guard scrollMonitor == nil else {
+#if DEBUG
+                cmuxDebugLog("extension.scroll.monitor.alreadyInstalled")
+#endif
+                return
+            }
+#if DEBUG
+            cmuxDebugLog("extension.scroll.monitor.install")
+#endif
+            scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+                guard let self,
+                      self.containerView.shouldForwardScrollEvent(event) else {
+                    return event
+                }
+#if DEBUG
+                cmuxDebugLog("extension.scroll.monitor.consume")
+#endif
+                return self.containerView.scrollSidebar(with: event) ? nil : event
+            }
+        } else if let scrollMonitor {
+#if DEBUG
+            cmuxDebugLog("extension.scroll.monitor.remove")
+#endif
+            NSEvent.removeMonitor(scrollMonitor)
+            self.scrollMonitor = nil
+        }
+    }
+
+    deinit {
+        if let scrollMonitor {
+            NSEvent.removeMonitor(scrollMonitor)
         }
     }
 }
@@ -20194,8 +20489,8 @@ private struct ExtensionRowDual: View {
     }
 
     private var rowState: RowState {
-        if isLoading { return .refreshing }
         if row.item != nil { return .loaded }
+        if isLoading { return .refreshing }
         return .awaiting
     }
 
@@ -20292,6 +20587,13 @@ private struct ExtensionRowDual: View {
                         Capsule()
                             .stroke(ExtensionColumnPalette.separator(for: colorScheme, opacity: 0.85), lineWidth: 1)
                     )
+            }
+            if isLoading {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundColor(secondaryTextColor(0.48))
+                    .opacity(0.65)
+                    .safeHelp(refreshStageLabel ?? String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…"))
             }
             Image(systemName: "chevron.right")
                 .font(.system(size: 9, weight: .semibold))
