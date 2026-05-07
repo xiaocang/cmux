@@ -45,6 +45,12 @@ final class CmuxDigestDaemonSupervisor {
         startIfNeeded()
     }
 
+    func restartIfRunning() {
+        guard process?.isRunning == true else { return }
+        stop()
+        startIfNeeded()
+    }
+
     private func startIfNeeded() {
         guard process?.isRunning != true else { return }
         guard let resources = Bundle.main.resourceURL else { return }
@@ -149,6 +155,24 @@ final class CmuxDigestDaemonSupervisor {
 
         let writeSidebar = (defaults.object(forKey: "digest.writeSidebarMetadata") as? Bool) ?? digestEnabled
         environment["CMUX_DIGEST_WRITE_SIDEBAR"] = digestEnabled && writeSidebar ? "1" : "0"
+
+        let ghprEnabled = (defaults.object(forKey: DigestGHPRIntegrationSettings.enabledKey) as? Bool)
+            ?? DigestGHPRIntegrationSettings.defaultEnabled
+        environment["CMUX_DIGEST_GHPR_ENABLED"] = ghprEnabled ? "1" : "0"
+        let ghprSocketPath = defaults.string(forKey: DigestGHPRIntegrationSettings.socketPathKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let ghprSocketPath, !ghprSocketPath.isEmpty {
+            environment["CMUX_DIGEST_GHPR_SOCKET_PATH"] = ghprSocketPath
+        } else {
+            environment["CMUX_DIGEST_GHPR_SOCKET_PATH"] = DigestGHPRIntegrationSettings.defaultSocketPath
+        }
+        environment["CMUX_DIGEST_GHPR_DISPLAY_ITEMS"] = defaults.string(
+            forKey: DigestGHPRIntegrationSettings.displayItemsKey
+        ) ?? DigestGHPRIntegrationSettings.defaultDisplayItemsText
+        if let jiraBaseURL = defaults.string(forKey: DigestGHPRIntegrationSettings.jiraBaseURLKey),
+           !jiraBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            environment["CMUX_DIGEST_GHPR_JIRA_BASE_URL"] = jiraBaseURL
+        }
     }
 
 #if DEBUG
@@ -196,6 +220,58 @@ final class CmuxDigestDaemonSupervisor {
         logHandle = nil
 #endif
     }
+
+    private static let ghprRefreshDebounceQueue = DispatchQueue(
+        label: "com.cmux.digest-ghpr-refresh-debounce"
+    )
+    private static var ghprRefreshPending: Set<String> = []
+    private static let ghprRefreshDebounceInterval: TimeInterval = 1.5
+    private static let ghprRefreshSocketTimeoutSeconds: TimeInterval = 5
+
+    /// Coalesced ghpr-only refresh nudge sent to the digest daemon when a PR
+    /// shell refresh resolves. Hits the lightweight `refresh_ghpr_metadata`
+    /// command (no LLM, diff-only sidebar writes) instead of forcing a full
+    /// digest refresh, and dedupes bursts within the debounce window so a
+    /// single workspace can't fan out N concurrent force-refreshes.
+    /// Daemon-down / ghpr-disabled cases are silent by design.
+    static func requestRefresh(workspaceId: String) {
+        let defaults = UserDefaults.standard
+        guard defaults.bool(forKey: "digest.enabled"),
+              defaults.bool(forKey: DigestGHPRIntegrationSettings.enabledKey) else {
+            return
+        }
+        ghprRefreshDebounceQueue.async {
+            if ghprRefreshPending.contains(workspaceId) { return }
+            ghprRefreshPending.insert(workspaceId)
+            ghprRefreshDebounceQueue.asyncAfter(
+                deadline: .now() + ghprRefreshDebounceInterval
+            ) {
+                ghprRefreshPending.remove(workspaceId)
+                Self.dispatchGHPRMetadataRefresh(workspaceId: workspaceId)
+            }
+        }
+    }
+
+    private static func dispatchGHPRMetadataRefresh(workspaceId: String) {
+        let socketPath = digestSocketPath()
+        let escaped = workspaceId
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        DispatchQueue.global(qos: .utility).async {
+            let client = CmuxSocketClient(
+                path: socketPath,
+                timeoutSeconds: ghprRefreshSocketTimeoutSeconds
+            )
+            do {
+                try client.connect()
+                _ = try client.send(
+                    command: "refresh_ghpr_metadata {\"workspaceId\":\"\(escaped)\"}"
+                )
+            } catch {
+                // Daemon may not be running or socket may have just been recreated.
+            }
+        }
+    }
 }
 
 @main
@@ -211,25 +287,14 @@ struct cmuxApp: App {
     private var showSidebarDevBuildBanner = DevBuildBannerDebugSettings.defaultShowSidebarBanner
     @AppStorage(SocketControlSettings.appStorageKey) private var socketControlMode = SocketControlSettings.defaultMode.rawValue
     @AppStorage("digest.enabled") private var digestEnabled = false
-    @AppStorage("digest.daemonEnabled") private var digestDaemonEnabled = false
     @AppStorage("digest.provider") private var digestProvider = "heuristic"
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
-    @AppStorage("workspaceTab.displayMode") private var workspaceTabDisplayMode = "native"
-    @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
-    @AppStorage(ExtensionColumnSettings.openKey)
-    private var extensionColumnOpen = ExtensionColumnSettings.defaultOpen
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     private var browserToolbarAccessorySpacing: Int {
         BrowserToolbarAccessorySpacingDebugSettings.resolved(browserToolbarAccessorySpacingRaw)
-    }
-
-    private var shouldRunDigestDaemon: Bool {
-        digestDaemonEnabled
-            || digestEnabled
-            || (summaryPriorityEnabled && (workspaceTabDisplayMode == "summary_priority" || extensionColumnOpen))
     }
 
     init() {
@@ -404,7 +469,7 @@ struct cmuxApp: App {
 #endif
                     bootstrapMainWindowScene()
                     updateSocketController()
-                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.update(enabled: digestEnabled)
                 }
                 .onChange(of: appearanceMode) { _ in
                     applyAppearance()
@@ -412,29 +477,17 @@ struct cmuxApp: App {
                 .onChange(of: socketControlMode) { _ in
                     updateSocketController()
                 }
-                .onChange(of: digestDaemonEnabled) { _ in
-                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
-                }
                 .onChange(of: digestEnabled) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
                 }
                 .onChange(of: digestProvider) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
                 }
                 .onChange(of: digestModel) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
                 }
                 .onChange(of: digestClaudeCodeModel) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
-                }
-                .onChange(of: workspaceTabDisplayMode) { _ in
-                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
-                }
-                .onChange(of: summaryPriorityEnabled) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
-                }
-                .onChange(of: extensionColumnOpen) { _ in
-                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -5590,6 +5643,7 @@ struct WorkspaceSummarySettingsProfile: Codable, Equatable {
 enum DigestProviderOption: String, CaseIterable, Identifiable {
     case heuristic
     case claudeCode = "claude-code"
+    case codex
     case openai
 
     var id: String { rawValue }
@@ -5605,6 +5659,11 @@ enum DigestProviderOption: String, CaseIterable, Identifiable {
             return String(
                 localized: "extensionColumn.configure.provider.claude",
                 defaultValue: "Claude Code"
+            )
+        case .codex:
+            return String(
+                localized: "extensionColumn.configure.provider.codex",
+                defaultValue: "Codex"
             )
         case .openai:
             return String(
@@ -5883,7 +5942,6 @@ struct SettingsView: View {
     @AppStorage("sidebarShowProgress") private var sidebarShowProgress = true
     @AppStorage("sidebarShowStatusPills") private var sidebarShowMetadata = true
     @AppStorage("digest.enabled") private var digestEnabled = false
-    @AppStorage("digest.daemonEnabled") private var digestDaemonEnabled = false
     @AppStorage("digest.provider") private var digestProvider = "heuristic"
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
@@ -5894,6 +5952,16 @@ struct SettingsView: View {
     @AppStorage("digest.sendFullDiffToLLM") private var digestSendFullDiffToLLM = false
     @AppStorage("digest.writeSidebarMetadata") private var digestWriteSidebarMetadata = true
     @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
+    @AppStorage(WorkspaceSidebarScoreDisplayLocation.storageKey)
+    private var workspaceScoreDisplayLocation = WorkspaceSidebarScoreDisplayLocation.defaultValue.rawValue
+    @AppStorage(DigestGHPRIntegrationSettings.enabledKey)
+    private var digestGHPRIntegrationEnabled = DigestGHPRIntegrationSettings.defaultEnabled
+    @AppStorage(DigestGHPRIntegrationSettings.socketPathKey)
+    private var digestGHPRSocketPath = DigestGHPRIntegrationSettings.defaultSocketPath
+    @AppStorage(DigestGHPRIntegrationSettings.displayItemsKey)
+    private var digestGHPRDisplayItems = DigestGHPRIntegrationSettings.defaultDisplayItemsText
+    @AppStorage(DigestGHPRIntegrationSettings.jiraBaseURLKey)
+    private var digestGHPRJiraBaseURL = DigestGHPRIntegrationSettings.defaultJiraBaseURL
     @AppStorage("sidebarTintHex") private var sidebarTintHex = SidebarTintDefaults.hex
     @AppStorage("sidebarTintHexLight") private var sidebarTintHexLight: String?
     @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
@@ -7363,6 +7431,22 @@ struct SettingsView: View {
                                 .controlSize(.small)
                         }
 
+                        if digestEnabled {
+                            SettingsCardDivider()
+
+                            SettingsCardRow(
+                                configurationReview: .action,
+                                String(localized: "settings.digest.restartDaemon", defaultValue: "Restart Digest Daemon"),
+                                subtitle: String(localized: "settings.digest.restartDaemon.subtitle", defaultValue: "Restart the local digest service if summaries stop updating.")
+                            ) {
+                                Button(String(localized: "settings.digest.restartDaemon.button", defaultValue: "Restart")) {
+                                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                            }
+                        }
+
                         SettingsCardDivider()
 
                         SettingsCardRow(
@@ -7374,6 +7458,60 @@ struct SettingsView: View {
                                 .labelsHidden()
                                 .controlSize(.small)
                         }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.ghpr.enabled"),
+                            String(localized: "settings.digest.ghpr.enabled", defaultValue: "Enable ghpr Integration"),
+                            subtitle: String(localized: "settings.digest.ghpr.enabled.subtitle", defaultValue: "Read PRDashboard's local socket for read-only PR context and feed it into Workspace Digest.")
+                        ) {
+                            Toggle("", isOn: $digestGHPRIntegrationEnabled)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.ghpr.socketPath"),
+                            String(localized: "settings.digest.ghpr.socketPath", defaultValue: "ghpr Socket Path"),
+                            subtitle: String(localized: "settings.digest.ghpr.socketPath.subtitle", defaultValue: "Unix socket used by PRDashboard. Leave the default unless you run a custom socket.")
+                        ) {
+                            TextField(DigestGHPRIntegrationSettings.defaultSocketPath, text: $digestGHPRSocketPath)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 260)
+                        }
+                        .disabled(!digestGHPRIntegrationEnabled)
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.ghpr.displayItems"),
+                            String(localized: "settings.digest.ghpr.displayItems", defaultValue: "ghpr Display Items"),
+                            subtitle: String(localized: "settings.digest.ghpr.displayItems.subtitle", defaultValue: "Comma-separated sidebar items, such as ci, review, unresolved, jira, title, draft, conflicts.")
+                        ) {
+                            TextField(DigestGHPRIntegrationSettings.defaultDisplayItemsText, text: $digestGHPRDisplayItems)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 220)
+                        }
+                        .disabled(!digestGHPRIntegrationEnabled)
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("digest.ghpr.jiraBaseURL"),
+                            String(localized: "settings.digest.ghpr.jiraBaseURL", defaultValue: "Jira Base URL"),
+                            subtitle: String(localized: "settings.digest.ghpr.jiraBaseURL.subtitle", defaultValue: "Optional Jira base, for example https://jira.example.com. Use {ticket} for custom URL templates.")
+                        ) {
+                            TextField(
+                                String(localized: "settings.digest.ghpr.jiraBaseURL.placeholder", defaultValue: "https://jira.example.com"),
+                                text: $digestGHPRJiraBaseURL
+                            )
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 260)
+                        }
+                        .disabled(!digestGHPRIntegrationEnabled)
                     }
 
                     SettingsSectionHeader(title: String(localized: "settings.section.automation", defaultValue: "Automation"))
@@ -8035,6 +8173,9 @@ struct SettingsView: View {
             guard newValue <= 0 else { return }
             sidebarPullRequestShellDebounceDelaySeconds = SidebarPullRequestShellDebounceSettings.defaultDelaySeconds
         }
+        .onChange(of: digestGHPRIntegrationEnabled) { _, _ in
+            CmuxDigestDaemonSupervisor.shared.restartIfRunning()
+        }
         .onChange(of: browserInsecureHTTPAllowlist) { oldValue, newValue in
             // Keep draft in sync with external changes unless the user has local unsaved edits.
             if browserInsecureHTTPAllowlistDraft == oldValue {
@@ -8207,7 +8348,6 @@ struct SettingsView: View {
         sidebarShowProgress = true
         sidebarShowMetadata = true
         digestEnabled = false
-        digestDaemonEnabled = false
         digestProvider = "heuristic"
         digestModel = ""
         digestClaudeCodeModel = ""
@@ -8218,6 +8358,11 @@ struct SettingsView: View {
         digestSendFullDiffToLLM = false
         digestWriteSidebarMetadata = true
         summaryPriorityEnabled = true
+        workspaceScoreDisplayLocation = WorkspaceSidebarScoreDisplayLocation.defaultValue.rawValue
+        digestGHPRIntegrationEnabled = DigestGHPRIntegrationSettings.defaultEnabled
+        digestGHPRSocketPath = DigestGHPRIntegrationSettings.defaultSocketPath
+        digestGHPRDisplayItems = DigestGHPRIntegrationSettings.defaultDisplayItemsText
+        digestGHPRJiraBaseURL = DigestGHPRIntegrationSettings.defaultJiraBaseURL
         summaryProfileStore.resetToDefaults()
         newSummaryDimensionId = ""
         newSummaryDimensionLabel = ""

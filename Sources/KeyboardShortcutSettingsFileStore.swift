@@ -82,7 +82,6 @@ final class CmuxSettingsFileStore {
         "automation.portBase",
         "automation.portRange",
         "digest.enabled",
-        "digest.daemonEnabled",
         "digest.provider",
         "digest.model",
         "digest.claudeCodeModel",
@@ -93,8 +92,13 @@ final class CmuxSettingsFileStore {
         "digest.sendFullDiffToLLM",
         "digest.writeSidebarMetadata",
         "digest.maxConcurrentLLM",
+        "digest.ghpr.enabled",
+        "digest.ghpr.socketPath",
+        "digest.ghpr.displayItems",
+        "digest.ghpr.jiraBaseURL",
         "workspaceTab.displayMode",
         "workspaceTab.summaryPriority.enabled",
+        "workspaceTab.summaryPriority.scoreDisplayLocation",
         "workspaceTab.summaryPriority.sortMode",
         "workspaceTab.summaryPriority.sortDimensionId",
         "workspaceTab.summaryPriority.sortDirection",
@@ -777,9 +781,6 @@ final class CmuxSettingsFileStore {
         if let value = jsonBool(section["enabled"]) {
             snapshot.managedUserDefaults["digest.enabled"] = .bool(value)
         }
-        if let value = jsonBool(section["daemonEnabled"]) {
-            snapshot.managedUserDefaults["digest.daemonEnabled"] = .bool(value)
-        }
         if let raw = jsonString(section["provider"]) {
             snapshot.managedUserDefaults["digest.provider"] = .string(raw)
         }
@@ -826,6 +827,35 @@ final class CmuxSettingsFileStore {
                 logInvalid("digest.maxConcurrentLLM", sourcePath: sourcePath)
             }
         }
+        if let ghprSection = section["ghpr"] as? [String: Any] {
+            parseDigestGHPRSection(ghprSection, sourcePath: sourcePath, snapshot: &snapshot)
+        }
+    }
+
+    private func parseDigestGHPRSection(
+        _ section: [String: Any],
+        sourcePath: String,
+        snapshot: inout ResolvedSettingsSnapshot
+    ) {
+        if let value = jsonBool(section["enabled"]) {
+            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.enabledKey] = .bool(value)
+        }
+        if let raw = jsonString(section["socketPath"]) {
+            let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.socketPathKey] = .string(
+                value.isEmpty ? DigestGHPRIntegrationSettings.defaultSocketPath : value
+            )
+        }
+        if let values = jsonStringArray(section["displayItems"]) {
+            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.displayItemsKey] = .string(
+                values.joined(separator: ", ")
+            )
+        } else if section.keys.contains("displayItems") {
+            logInvalid("digest.ghpr.displayItems", sourcePath: sourcePath)
+        }
+        if let raw = jsonString(section["jiraBaseURL"]) {
+            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.jiraBaseURLKey] = .string(raw)
+        }
     }
 
     private func parseWorkspaceTabSection(
@@ -846,6 +876,13 @@ final class CmuxSettingsFileStore {
         }
         if let value = jsonBool(summaryPriority["enabled"]) {
             snapshot.managedUserDefaults["workspaceTab.summaryPriority.enabled"] = .bool(value)
+        }
+        if let raw = jsonString(summaryPriority["scoreDisplayLocation"]) {
+            if raw == "sidebar" || raw == "extension" {
+                snapshot.managedUserDefaults[WorkspaceSidebarScoreDisplayLocation.storageKey] = .string(raw)
+            } else {
+                logInvalid("workspaceTab.summaryPriority.scoreDisplayLocation", sourcePath: sourcePath)
+            }
         }
         guard let sort = summaryPriority["defaultSort"] as? [String: Any] else {
             return
@@ -1442,6 +1479,12 @@ final class CmuxSettingsFileStore {
             [
                 "digest": [
                     "enabled": false,
+                    "ghpr": [
+                        "enabled": DigestGHPRIntegrationSettings.defaultEnabled,
+                        "socketPath": DigestGHPRIntegrationSettings.defaultSocketPath,
+                        "displayItems": DigestGHPRIntegrationSettings.defaultDisplayItems,
+                        "jiraBaseURL": DigestGHPRIntegrationSettings.defaultJiraBaseURL,
+                    ],
                 ],
             ],
             [

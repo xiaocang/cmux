@@ -97531,6 +97531,96 @@
         }
       }
     },
+    "extensionColumn.refreshStage.connecting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Connecting" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "接続中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "连接中" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "連線中" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "연결 중" } }
+      }
+    },
+    "extensionColumn.refreshStage.queue": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Queued" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "キュー" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "队列中" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "佇列中" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "대기" } }
+      }
+    },
+    "extensionColumn.refreshStage.reading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "読み取り" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "读取" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "讀取" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "읽기" } }
+      }
+    },
+    "extensionColumn.refreshStage.retrying": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Retrying" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "再試行" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "重试" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "重試" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "재시도" } }
+      }
+    },
+    "extensionColumn.refreshStage.saving": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Saving" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "保存" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "保存" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "儲存" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "저장" } }
+      }
+    },
+    "extensionColumn.refreshStage.scoring": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Scoring" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "採点" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "打分" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "評分" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "점수" } }
+      }
+    },
+    "extensionColumn.refreshStage.sorting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Sorting" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "並べ替え" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "排序" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "排序" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "정렬" } }
+      }
+    },
+    "extensionColumn.refreshStage.summary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Summary" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "要約" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "摘要" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "摘要" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "요약" } }
+      }
+    },
+    "extensionColumn.refreshStage.surfaces": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Surfaces" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "画面" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "界面" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "介面" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "화면" } }
+      }
+    },
     "extensionColumn.sort.importance": {
       "extractionState": "manual",
       "localizations": {
@@ -100723,6 +100813,261 @@
           "stringUnit": {
             "state": "translated",
             "value": "Let cmux-digest publish topic and summary through sidebar metadata."
+          }
+        }
+      }
+    },
+    "settings.digest.ghpr.displayItems": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ghpr Display Items"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ghpr 表示項目"
+          }
+        }
+      }
+    },
+    "settings.digest.ghpr.displayItems.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Comma-separated sidebar items, such as ci, review, unresolved, jira, title, draft, conflicts."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイドバーに表示する項目をカンマ区切りで指定します。例: ci, review, unresolved, jira, title, draft, conflicts。"
+          }
+        }
+      }
+    },
+    "settings.digest.ghpr.enabled": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enable ghpr Integration"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ghpr 連携を有効化"
+          }
+        }
+      }
+    },
+    "settings.digest.ghpr.enabled.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Read PRDashboard's local socket for read-only PR context and feed it into Workspace Digest."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PRDashboard のローカルソケットから読み取り専用の PR コンテキストを取得し、Workspace Digest に渡します。"
+          }
+        }
+      }
+    },
+    "settings.digest.ghpr.jiraBaseURL": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira Base URL"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jira ベース URL"
+          }
+        }
+      }
+    },
+    "settings.digest.ghpr.jiraBaseURL.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Optional Jira base, for example https://jira.example.com. Use {ticket} for custom URL templates."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任意の Jira ベース URL です。例: https://jira.example.com。カスタム URL テンプレートには {ticket} を使えます。"
+          }
+        }
+      }
+    },
+    "settings.digest.ghpr.jiraBaseURL.placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://jira.example.com"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://jira.example.com"
+          }
+        }
+      }
+    },
+    "settings.digest.ghpr.socketPath": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ghpr Socket Path"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ghpr ソケットパス"
+          }
+        }
+      }
+    },
+    "settings.digest.ghpr.socketPath.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unix socket used by PRDashboard. Leave the default unless you run a custom socket."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PRDashboard が使用する Unix ソケットです。カスタムソケットを使う場合以外は既定値のままにしてください。"
+          }
+        }
+      }
+    },
+    "settings.leaderKey.enabled": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enable Leader Key"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リーダーキーを有効化"
+          }
+        }
+      }
+    },
+    "settings.leaderKey.enabled.subtitleOff": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leader key is disabled. The prefix key will pass through to the terminal."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リーダーキーは無効です。プレフィックスキーはターミナルに送信されます。"
+          }
+        }
+      }
+    },
+    "settings.leaderKey.enabled.subtitleOn": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Press the leader key prefix, then a sub-key to trigger an action."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リーダーキーを押した後、サブキーでアクションを実行します。"
+          }
+        }
+      }
+    },
+    "settings.leaderKey.timeout": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Timeout"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タイムアウト"
+          }
+        }
+      }
+    },
+    "settings.leaderKey.timeout.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Seconds to wait for the sub-key before cancelling leader mode."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "リーダーモードをキャンセルするまでのサブキー待機秒数。"
+          }
+        }
+      }
+    },
+    "settings.leaderKey.timeout.value": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%.1fs"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%.1f秒"
           }
         }
       }
@@ -105166,6 +105511,56 @@
         "ko": { "stringUnit": { "state": "translated", "value": "저장된 정렬" } }
       }
     },
+    "extensionColumn.scoreDisplay.sidebar.tooltip": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Scores shown in sidebar" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "スコアはサイドバーに表示" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "分数显示在侧边栏" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "分數顯示在側邊欄" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "점수를 사이드바에 표시" } }
+      }
+    },
+    "extensionColumn.scoreDisplay.extension.tooltip": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Scores shown in extension" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "スコアは拡張列に表示" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "分数显示在 extension" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "分數顯示在 extension" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "점수를 확장 영역에 표시" } }
+      }
+    },
+    "settings.digest.restartDaemon": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Restart Digest Daemon" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Digest デーモンを再起動" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "重启 Digest Daemon" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "重新啟動 Digest Daemon" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Digest 데몬 재시작" } }
+      }
+    },
+    "settings.digest.restartDaemon.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Restart the local digest service if summaries stop updating." } },
+        "ja": { "stringUnit": { "state": "translated", "value": "要約の更新が止まった場合にローカル digest サービスを再起動します。" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "如果摘要停止更新，可重启本地 digest 服务。" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "如果摘要停止更新，可重新啟動本機 digest 服務。" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "요약 업데이트가 멈추면 로컬 digest 서비스를 재시작합니다." } }
+      }
+    },
+    "settings.digest.restartDaemon.button": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Restart" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "再起動" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "重启" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "重新啟動" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "재시작" } }
+      }
+    },
     "extensionColumn.configure.provider.heuristic": {
       "extractionState": "manual",
       "localizations": {
@@ -105174,6 +105569,16 @@
         "zh-Hans": { "stringUnit": { "state": "translated", "value": "启发式" } },
         "zh-Hant": { "stringUnit": { "state": "translated", "value": "啟發式" } },
         "ko": { "stringUnit": { "state": "translated", "value": "휴리스틱" } }
+      }
+    },
+    "extensionColumn.configure.provider.codex": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Codex" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Codex" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "Codex" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "Codex" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "Codex" } }
       }
     },
     "extensionColumn.configure.provider.openai": {
