@@ -21056,9 +21056,7 @@ private struct ExtensionRowDual: View {
                     )
             }
             if isLoading {
-                Image(systemName: "arrow.triangle.2.circlepath")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundColor(secondaryTextColor(0.48))
+                RefreshingSymbol(size: 8, color: secondaryTextColor(0.48))
                     .opacity(0.65)
                     .safeHelp(refreshStageLabel ?? String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…"))
             }
@@ -21252,6 +21250,21 @@ private struct BreatheOpacity: ViewModifier {
     }
 }
 
+private struct RefreshingSymbol: View {
+    let size: CGFloat
+    let color: Color
+    @State private var isRotating = false
+
+    var body: some View {
+        Image(systemName: "arrow.triangle.2.circlepath")
+            .font(.system(size: size, weight: .semibold))
+            .foregroundColor(color)
+            .rotationEffect(.degrees(isRotating ? 360 : 0))
+            .animation(.linear(duration: 0.85).repeatForever(autoreverses: false), value: isRotating)
+            .onAppear { isRotating = true }
+    }
+}
+
 private struct L2PendingTimelinePanel: View {
     @Environment(\.colorScheme) private var colorScheme
 
@@ -21315,9 +21328,14 @@ private struct L2PendingTimelinePanel: View {
                 .foregroundColor(.primary)
                 .lineLimit(1)
             Spacer(minLength: 6)
-            Image(systemName: isLoading ? "arrow.triangle.2.circlepath" : "clock")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundColor(.secondary)
+            if isLoading {
+                RefreshingSymbol(size: 10, color: .secondary)
+                    .safeHelp(refreshStageLabel ?? String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…"))
+            } else {
+                Image(systemName: "clock")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
         }
     }
 
@@ -21472,6 +21490,10 @@ private struct L2TimelinePanel: View {
             Spacer(minLength: 6)
             if showsScore, let score = scoreValue {
                 scoreBadge(score)
+            }
+            if isRefreshing {
+                RefreshingSymbol(size: 10, color: .secondary)
+                    .safeHelp(refreshStageLabel ?? String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…"))
             }
         }
     }
