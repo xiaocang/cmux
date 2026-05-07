@@ -97531,6 +97531,96 @@
         }
       }
     },
+    "extensionColumn.refreshStage.connecting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Connecting" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "接続中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "连接中" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "連線中" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "연결 중" } }
+      }
+    },
+    "extensionColumn.refreshStage.queue": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Queued" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "キュー" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "队列中" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "佇列中" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "대기" } }
+      }
+    },
+    "extensionColumn.refreshStage.reading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "読み取り" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "读取" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "讀取" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "읽기" } }
+      }
+    },
+    "extensionColumn.refreshStage.retrying": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Retrying" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "再試行" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "重试" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "重試" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "재시도" } }
+      }
+    },
+    "extensionColumn.refreshStage.saving": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Saving" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "保存" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "保存" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "儲存" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "저장" } }
+      }
+    },
+    "extensionColumn.refreshStage.scoring": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Scoring" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "採点" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "打分" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "評分" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "점수" } }
+      }
+    },
+    "extensionColumn.refreshStage.sorting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Sorting" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "並べ替え" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "排序" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "排序" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "정렬" } }
+      }
+    },
+    "extensionColumn.refreshStage.summary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Summary" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "要約" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "摘要" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "摘要" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "요약" } }
+      }
+    },
+    "extensionColumn.refreshStage.surfaces": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Surfaces" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "画面" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "界面" } },
+        "zh-Hant": { "stringUnit": { "state": "translated", "value": "介面" } },
+        "ko": { "stringUnit": { "state": "translated", "value": "화면" } }
+      }
+    },
     "extensionColumn.sort.importance": {
       "extractionState": "manual",
       "localizations": {

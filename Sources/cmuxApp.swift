@@ -7431,19 +7431,20 @@ struct SettingsView: View {
                                 .controlSize(.small)
                         }
 
-                        SettingsCardDivider()
+                        if digestEnabled {
+                            SettingsCardDivider()
 
-                        SettingsCardRow(
-                            configurationReview: .action,
-                            String(localized: "settings.digest.restartDaemon", defaultValue: "Restart Digest Daemon"),
-                            subtitle: String(localized: "settings.digest.restartDaemon.subtitle", defaultValue: "Restart the local digest service if summaries stop updating.")
-                        ) {
-                            Button(String(localized: "settings.digest.restartDaemon.button", defaultValue: "Restart")) {
-                                CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
+                            SettingsCardRow(
+                                configurationReview: .action,
+                                String(localized: "settings.digest.restartDaemon", defaultValue: "Restart Digest Daemon"),
+                                subtitle: String(localized: "settings.digest.restartDaemon.subtitle", defaultValue: "Restart the local digest service if summaries stop updating.")
+                            ) {
+                                Button(String(localized: "settings.digest.restartDaemon.button", defaultValue: "Restart")) {
+                                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
                             }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(!digestEnabled)
                         }
 
                         SettingsCardDivider()

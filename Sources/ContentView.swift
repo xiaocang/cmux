@@ -12774,6 +12774,15 @@ struct WorkspaceSidebarSavedSort: Codable, Identifiable, Equatable {
     }
 }
 
+private struct WorkspaceSidebarDigestProgressState: Decodable {
+    var summaryPriority: WorkspaceSidebarDigestProgressItem?
+    var workspaces: [String: WorkspaceSidebarDigestProgressItem]
+}
+
+private struct WorkspaceSidebarDigestProgressItem: Decodable {
+    var stage: String
+}
+
 @MainActor
 final class WorkspaceTabStore: ObservableObject {
     @Published var summaryPriority: WorkspaceSidebarSummaryPriorityState?
@@ -12783,11 +12792,15 @@ final class WorkspaceTabStore: ObservableObject {
     @Published var errorMessage: String?
     @Published private(set) var tabContextSummaries: [UUID: WorkspaceTabContextSummary] = [:]
     @Published private(set) var refreshingWorkspaceIds: Set<String> = []
+    @Published private var summaryRefreshStage: String?
+    @Published private var workspaceRefreshStages: [String: String] = [:]
 
     private static let selectedSortDefaultsKey = "workspaceTab.summaryPriority.selectedSort"
     private static let savedSortsDefaultsKey = "workspaceTab.summaryPriority.savedSorts"
     private static let socketQueue = DispatchQueue(label: "com.cmux.digest-socket-client", qos: .userInitiated)
+    private static let progressSocketQueue = DispatchQueue(label: "com.cmux.digest-progress-socket-client", qos: .utility)
     private static let digestSocketTimeoutSeconds: TimeInterval = 420
+    private static let digestProgressSocketTimeoutSeconds: TimeInterval = 5
     private static let digestSocketStartupWaitSeconds: TimeInterval = 2
     private static let maxRefreshRetryAttempts = 5
     private static let jsonEncoder = JSONEncoder()
@@ -12797,6 +12810,8 @@ final class WorkspaceTabStore: ObservableObject {
     private var didLoadForExtension = false
     private var trackedExtensionWorkspaceIds: Set<UUID> = []
     private var workspaceRefreshesInFlight: Set<String> = []
+    private var progressPollTimer: Timer?
+    private var progressPollInFlight = false
 
     init() {
         selectedSort = Self.loadSelectedSort()
@@ -12858,6 +12873,20 @@ final class WorkspaceTabStore: ObservableObject {
 
     func isRefreshingWorkspace(_ workspaceId: UUID) -> Bool {
         refreshingWorkspaceIds.contains(workspaceId.uuidString)
+    }
+
+    func refreshStageLabel(for workspaceId: UUID) -> String? {
+        let workspaceKey = workspaceId.uuidString
+        if let stage = workspaceRefreshStages[workspaceKey] {
+            return Self.refreshStageLabel(stage)
+        }
+        if refreshingWorkspaceIds.contains(workspaceKey) {
+            return Self.refreshStageLabel("queue")
+        }
+        if isLoading {
+            return Self.refreshStageLabel(summaryRefreshStage ?? "queue")
+        }
+        return nil
     }
 
     func extensionDidOpen(tabs: [Workspace]) {
@@ -13098,7 +13127,9 @@ final class WorkspaceTabStore: ObservableObject {
 #endif
 
         isLoading = true
+        summaryRefreshStage = "connecting"
         errorMessage = nil
+        startProgressPolling()
         sendDigestCommand(
             "refresh_summary_priority",
             payload: payload,
@@ -13115,6 +13146,7 @@ final class WorkspaceTabStore: ObservableObject {
                 )
 #endif
                 if retryAttempt < Self.maxRefreshRetryAttempts, Self.isTransientConnectionError(error) {
+                    self.summaryRefreshStage = "retrying"
                     let delay = min(0.8 * Double(retryAttempt + 1), 3.0)
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                         self.refreshSummaryPriority(
@@ -13126,9 +13158,13 @@ final class WorkspaceTabStore: ObservableObject {
                     return
                 }
                 self.isLoading = false
+                self.summaryRefreshStage = nil
+                self.stopProgressPollingIfIdle()
                 self.errorMessage = Self.displayMessage(for: error)
             case .success(let decoded):
                 self.isLoading = false
+                self.summaryRefreshStage = nil
+                self.stopProgressPollingIfIdle()
                 guard requestGeneration == self.sortRequestGeneration else {
 #if DEBUG
                     cmuxDebugLog(
@@ -13182,6 +13218,31 @@ final class WorkspaceTabStore: ObservableObject {
         return error.localizedDescription
     }
 
+    private static func refreshStageLabel(_ stage: String) -> String {
+        switch stage {
+        case "queue":
+            return String(localized: "extensionColumn.refreshStage.queue", defaultValue: "Queued")
+        case "connecting":
+            return String(localized: "extensionColumn.refreshStage.connecting", defaultValue: "Connecting")
+        case "reading":
+            return String(localized: "extensionColumn.refreshStage.reading", defaultValue: "Reading")
+        case "surfaces":
+            return String(localized: "extensionColumn.refreshStage.surfaces", defaultValue: "Surfaces")
+        case "summary":
+            return String(localized: "extensionColumn.refreshStage.summary", defaultValue: "Summary")
+        case "scoring":
+            return String(localized: "extensionColumn.refreshStage.scoring", defaultValue: "Scoring")
+        case "sorting":
+            return String(localized: "extensionColumn.refreshStage.sorting", defaultValue: "Sorting")
+        case "saving":
+            return String(localized: "extensionColumn.refreshStage.saving", defaultValue: "Saving")
+        case "retrying":
+            return String(localized: "extensionColumn.refreshStage.retrying", defaultValue: "Retrying")
+        default:
+            return String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing...")
+        }
+    }
+
     func setSort(_ sort: WorkspaceSidebarSummaryPrioritySort) {
         selectedSort = sort
         persistSelectedSort(sort)
@@ -13202,7 +13263,9 @@ final class WorkspaceTabStore: ObservableObject {
         }
 
         isLoading = true
+        summaryRefreshStage = "connecting"
         errorMessage = nil
+        startProgressPolling()
         sendDigestCommand(
             "set_summary_priority_sort",
             payload: sort.requestPayload,
@@ -13211,6 +13274,8 @@ final class WorkspaceTabStore: ObservableObject {
             guard let self else { return }
             guard requestGeneration == self.sortRequestGeneration else { return }
             self.isLoading = false
+            self.summaryRefreshStage = nil
+            self.stopProgressPollingIfIdle()
             switch result {
             case .failure(let error):
 #if DEBUG
@@ -13279,6 +13344,8 @@ final class WorkspaceTabStore: ObservableObject {
         var nextRefreshingWorkspaceIds = refreshingWorkspaceIds
         nextRefreshingWorkspaceIds.insert(workspaceId)
         refreshingWorkspaceIds = nextRefreshingWorkspaceIds
+        workspaceRefreshStages[workspaceId] = "connecting"
+        startProgressPolling()
         sendDigestCommand(
             "refresh_summary_priority_workspace",
             payload: ["workspaceId": workspaceId],
@@ -13289,6 +13356,8 @@ final class WorkspaceTabStore: ObservableObject {
             var nextRefreshingWorkspaceIds = self.refreshingWorkspaceIds
             nextRefreshingWorkspaceIds.remove(workspaceId)
             self.refreshingWorkspaceIds = nextRefreshingWorkspaceIds
+            self.workspaceRefreshStages.removeValue(forKey: workspaceId)
+            self.stopProgressPollingIfIdle()
             switch result {
             case .failure(let error):
                 self.errorMessage = Self.displayMessage(for: error)
@@ -13381,7 +13450,6 @@ final class WorkspaceTabStore: ObservableObject {
         item: WorkspaceSidebarSummaryPriorityItem,
         sort: WorkspaceSidebarSummaryPrioritySort
     ) -> Double {
-        guard sort.isDimension else { return 0 }
         return item.scores.dimensions[sort.dimensionId ?? "urgency"]?.rawScore ?? 0
     }
 
@@ -13438,14 +13506,42 @@ final class WorkspaceTabStore: ObservableObject {
         }
     }
 
+    private func sendDigestProgressCommand(
+        completion: @escaping (Result<WorkspaceSidebarDigestProgressState, Error>) -> Void
+    ) {
+        sendDigestCommandRaw(
+            "digest_progress",
+            payload: [:],
+            queue: Self.progressSocketQueue,
+            timeoutSeconds: Self.digestProgressSocketTimeoutSeconds
+        ) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let body):
+                guard let data = body.data(using: .utf8) else {
+                    completion(.failure(CmuxSocketError(message: "Invalid UTF-8 from digest daemon")))
+                    return
+                }
+                do {
+                    completion(.success(try Self.jsonDecoder.decode(WorkspaceSidebarDigestProgressState.self, from: data)))
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
     private func sendDigestCommandRaw(
         _ command: String,
         payload: [String: Any],
+        queue: DispatchQueue = WorkspaceTabStore.socketQueue,
+        timeoutSeconds: TimeInterval = WorkspaceTabStore.digestSocketTimeoutSeconds,
         completion: @escaping (Result<String, Error>) -> Void
     ) {
         CmuxDigestDaemonSupervisor.shared.update(enabled: true)
         let socketPath = CmuxDigestDaemonSupervisor.digestSocketPath()
-        Self.socketQueue.async {
+        queue.async {
             let result: Result<String, Error>
             do {
                 _ = Self.waitForDigestSocket(at: socketPath, timeout: Self.digestSocketStartupWaitSeconds)
@@ -13454,7 +13550,7 @@ final class WorkspaceTabStore: ObservableObject {
                 let line = "\(command) \(payloadString)"
                 let client = CmuxSocketClient(
                     path: socketPath,
-                    timeoutSeconds: Self.digestSocketTimeoutSeconds
+                    timeoutSeconds: timeoutSeconds
                 )
                 try client.connect()
                 defer { client.close() }
@@ -13474,6 +13570,61 @@ final class WorkspaceTabStore: ObservableObject {
             }
             DispatchQueue.main.async {
                 completion(result)
+            }
+        }
+    }
+
+    private func startProgressPolling() {
+        guard progressPollTimer == nil else { return }
+        pollDigestProgress()
+        progressPollTimer = Timer.scheduledTimer(withTimeInterval: 0.7, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.pollDigestProgress()
+            }
+        }
+    }
+
+    private func stopProgressPollingIfIdle() {
+        guard !isLoading, refreshingWorkspaceIds.isEmpty else { return }
+        progressPollTimer?.invalidate()
+        progressPollTimer = nil
+        progressPollInFlight = false
+        summaryRefreshStage = nil
+        workspaceRefreshStages.removeAll()
+    }
+
+    private func pollDigestProgress() {
+        guard !progressPollInFlight else { return }
+        guard isLoading || !refreshingWorkspaceIds.isEmpty else {
+            stopProgressPollingIfIdle()
+            return
+        }
+        progressPollInFlight = true
+        sendDigestProgressCommand { [weak self] result in
+            guard let self else { return }
+            self.progressPollInFlight = false
+            guard self.isLoading || !self.refreshingWorkspaceIds.isEmpty else {
+                self.stopProgressPollingIfIdle()
+                return
+            }
+            guard case .success(let state) = result else { return }
+            let nextSummaryStage = state.summaryPriority?.stage ?? self.summaryRefreshStage
+            if nextSummaryStage != self.summaryRefreshStage {
+                self.summaryRefreshStage = nextSummaryStage
+            }
+            var nextStages = self.workspaceRefreshStages
+            for workspaceId in self.refreshingWorkspaceIds {
+                if let stage = state.workspaces[workspaceId]?.stage {
+                    nextStages[workspaceId] = stage
+                }
+            }
+            if self.isLoading {
+                for (workspaceId, item) in state.workspaces {
+                    nextStages[workspaceId] = item.stage
+                }
+            }
+            if nextStages != self.workspaceRefreshStages {
+                self.workspaceRefreshStages = nextStages
             }
         }
     }
@@ -13961,8 +14112,19 @@ private struct SummaryPriorityWorkspaceRow: View {
         sort.isDimension ? (sort.dimensionId ?? "urgency") : "urgency"
     }
 
-    private var activeScore: Double {
-        item.scores.dimensions[activeDimensionId]?.rawScore ?? 0
+    private var activeScore: Double? {
+        item.scores.dimensions[activeDimensionId]?.rawScore
+    }
+
+    private var activeDimensionTitle: String {
+        switch activeDimensionId {
+        case "urgency":
+            return String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency")
+        case "importance":
+            return String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance")
+        default:
+            return activeDimensionId
+        }
     }
 
     private var category: SummaryPriorityWorkspaceCategory {
@@ -14006,9 +14168,11 @@ private struct SummaryPriorityWorkspaceRow: View {
                             .lineLimit(1)
                         Spacer(minLength: 0)
                         HStack(spacing: 5) {
-                            Text("\(Int(activeScore))")
-                                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                                .foregroundColor(activeScoreColor)
+                            if let activeScore {
+                                Text("\(Int(activeScore))")
+                                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                                    .foregroundColor(activeScoreColor(activeScore))
+                            }
                             if showsWorkspaceShortcutHint, let workspaceShortcutLabel {
                                 ShortcutHintPill(text: workspaceShortcutLabel, fontSize: 10, emphasis: shortcutHintEmphasis)
                                     .offset(
@@ -14042,8 +14206,9 @@ private struct SummaryPriorityWorkspaceRow: View {
                     }
 
                     HStack(spacing: 7) {
-                        scoreLabel("U", score: item.scores.dimensions["urgency"]?.rawScore)
-                        scoreLabel("I", score: item.scores.dimensions["importance"]?.rawScore)
+                        if let activeScore {
+                            scoreLabel(activeDimensionTitle, score: activeScore)
+                        }
                         Text(category.label)
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundColor(activeAppearance.badgeForegroundColor(defaultColor: category.color))
@@ -14104,15 +14269,15 @@ private struct SummaryPriorityWorkspaceRow: View {
         .safeHelp(fullHelpText)
     }
 
-    private var activeScoreColor: Color {
+    private func activeScoreColor(_ score: Double) -> Color {
         if isActive {
             return activeAppearance.primaryTextColor
         }
-        return activeScore >= 70 ? category.color : .secondary
+        return score >= 70 ? category.color : .secondary
     }
 
-    private func scoreLabel(_ label: String, score: Double?) -> some View {
-        Text("\(label) \(Int(score ?? 0))")
+    private func scoreLabel(_ label: String, score: Double) -> some View {
+        Text("\(label) \(Int(score))")
             .font(.system(size: 9, weight: .semibold, design: .monospaced))
             .foregroundColor(activeAppearance.secondaryTextColor())
             .lineLimit(1)
@@ -14129,10 +14294,9 @@ private struct SummaryPriorityWorkspaceRow: View {
             lines.append("\(String(localized: "sidebar.workspaceSummary.presentStatus", defaultValue: "Current")): \(presentStatus)")
         }
 
-        let urgency = item.scores.dimensions["urgency"]
-        let importance = item.scores.dimensions["importance"]
-        lines.append("\(String(localized: "sidebar.workspaceSummary.sort.urgency", defaultValue: "Urgency")) \(Int(urgency?.rawScore ?? 0)): \(urgency?.reason ?? "")")
-        lines.append("\(String(localized: "sidebar.workspaceSummary.sort.importance", defaultValue: "Importance")) \(Int(importance?.rawScore ?? 0)): \(importance?.reason ?? "")")
+        if let activeDimensionScore = item.scores.dimensions[activeDimensionId] {
+            lines.append("\(activeDimensionTitle) \(Int(activeDimensionScore.rawScore)): \(activeDimensionScore.reason)")
+        }
 
         lines.append(item.summary.short)
         let detailed = item.summary.detailed.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -18833,6 +18997,7 @@ struct ExtensionColumnOverlay: View {
                 sortKey: sortKey,
                 showsScore: scoresVisibleInExtension,
                 isRefreshing: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
+                refreshStageLabel: workspaceTabStore.refreshStageLabel(for: row.tabId),
                 onRefresh: {
                     refreshSingle(row: row)
                 }
@@ -18841,6 +19006,7 @@ struct ExtensionColumnOverlay: View {
             L2PendingTimelinePanel(
                 row: row,
                 isLoading: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
+                refreshStageLabel: workspaceTabStore.refreshStageLabel(for: row.tabId),
                 onRefresh: {
                     refreshSingle(row: row)
                 }
@@ -18850,10 +19016,16 @@ struct ExtensionColumnOverlay: View {
 
     private func extensionColumn(rows: [ExtensionColumnRowData]) -> some View {
         ZStack(alignment: .topLeading) {
+            if !isConfiguring && summaryPriorityEnabled {
+                rowsLayer(rows: rows)
+                    .zIndex(0)
+            }
+
             VStack(spacing: 0) {
                 Spacer().frame(height: topInset)
 
                 extensionHeader
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 5)
 
@@ -18870,10 +19042,8 @@ struct ExtensionColumnOverlay: View {
 
                 Spacer(minLength: 0)
             }
-
-            if !isConfiguring && summaryPriorityEnabled {
-                rowsLayer(rows: rows)
-            }
+            .frame(width: ExtensionColumnSettings.columnWidth, alignment: .topLeading)
+            .zIndex(10)
         }
         .frame(width: ExtensionColumnSettings.columnWidth, alignment: .topLeading)
         .frame(height: containerHeight, alignment: .topLeading)
@@ -18901,6 +19071,7 @@ struct ExtensionColumnOverlay: View {
                         isHovered: workspaceSidebarLayoutMetricsStore.hoveredWorkspaceId == row.tabId,
                         isActive: tabManager.selectedTabId == row.tabId,
                         isLoading: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
+                        refreshStageLabel: workspaceTabStore.refreshStageLabel(for: row.tabId),
                         targetHeight: rowFrame.height,
                         onRefresh: {
                             if let workspace = tabManager.tabs.first(where: { $0.id == row.tabId }) {
@@ -18935,13 +19106,16 @@ struct ExtensionColumnOverlay: View {
     }
 
     private var extensionHeader: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             Text(isConfiguring
                  ? String(localized: "extensionColumn.configure.title", defaultValue: "Configure")
                  : String(localized: "extensionColumn.header.title", defaultValue: "Extension"))
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
-            Spacer(minLength: 0)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(minWidth: 0, alignment: .leading)
+            Spacer(minLength: 2)
             if !isConfiguring {
                 sortMenuButton
                 scoreLocationToggleButton
@@ -19052,22 +19226,14 @@ struct ExtensionColumnOverlay: View {
                 ? WorkspaceSidebarScoreDisplayLocation.extensionColumn.rawValue
                 : WorkspaceSidebarScoreDisplayLocation.sidebar.rawValue
         } label: {
-            ZStack {
-                Text("\u{1F441}\u{FE0E}")
-                    .font(.system(size: 12, weight: .medium))
-                if scoresVisibleInExtension {
-                    Rectangle()
-                        .fill(Color.primary.opacity(0.72))
-                        .frame(width: 13, height: 1.4)
-                        .rotationEffect(.degrees(-18))
-                }
-            }
-            .foregroundColor(.primary.opacity(scoresVisibleInSidebar ? 0.78 : 0.46))
-            .frame(width: 20, height: 20)
-            .background(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .fill(Color.primary.opacity(scoresVisibleInSidebar ? 0.10 : 0.06))
-            )
+            Text(scoresVisibleInSidebar ? "\u{25C9}" : "\u{25CB}")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundColor(.primary.opacity(scoresVisibleInSidebar ? 0.78 : 0.46))
+                .frame(width: 20, height: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(scoresVisibleInSidebar ? 0.10 : 0.06))
+                )
         }
         .buttonStyle(.plain)
         .safeHelp(
@@ -19081,22 +19247,15 @@ struct ExtensionColumnOverlay: View {
         let isGoalDriven = workspaceTabStore.selectedSort.isGoalDriven
         let info = ExtensionColumnDimensions.info(for: sortKey)
         let glyph = isGoalDriven ? "sparkles" : info.glyph
-        let label = isGoalDriven
-            ? String(localized: "extensionColumn.sort.quick.label", defaultValue: "Quick")
-            : info.label
         return HStack(spacing: 4) {
             Image(systemName: glyph)
                 .font(.system(size: 9, weight: .semibold))
-            Text(label)
-                .font(.system(size: 10, weight: .medium))
-                .lineLimit(1)
-                .frame(maxWidth: 84)
             Image(systemName: "chevron.down")
                 .font(.system(size: 8, weight: .semibold))
                 .opacity(0.7)
         }
         .foregroundColor(.primary)
-        .padding(.horizontal, 7)
+        .frame(width: 32)
         .frame(height: 20)
         .background(
             RoundedRectangle(cornerRadius: 5, style: .continuous)
@@ -19643,6 +19802,7 @@ private struct ExtensionRowDual: View {
     let isHovered: Bool
     let isActive: Bool
     let isLoading: Bool
+    let refreshStageLabel: String?
     let targetHeight: CGFloat?
     let onRefresh: () -> Void
 
@@ -19719,7 +19879,7 @@ private struct ExtensionRowDual: View {
         case .refreshing:
             HStack(spacing: 5) {
                 AnimatedTypingDots()
-                Text(String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…"))
+                Text(refreshStageLabel ?? String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…"))
                     .font(.system(size: 9.5, design: .monospaced))
                     .foregroundColor(secondaryTextColor(0.52))
             }
@@ -19947,6 +20107,7 @@ private struct L2PendingTimelinePanel: View {
 
     let row: ExtensionColumnRowData
     let isLoading: Bool
+    let refreshStageLabel: String?
     let onRefresh: () -> Void
 
     var body: some View {
@@ -20058,7 +20219,7 @@ private struct L2PendingTimelinePanel: View {
 
     private var stateText: String {
         if isLoading {
-            return String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…")
+            return refreshStageLabel ?? String(localized: "extensionColumn.row.refreshing", defaultValue: "refreshing…")
         }
         return row.contextSummary?.status
             ?? String(localized: "extensionColumn.row.awaiting", defaultValue: "awaiting digest — click to refresh")
@@ -20098,6 +20259,7 @@ private struct L2TimelinePanel: View {
     let sortKey: String
     let showsScore: Bool
     let isRefreshing: Bool
+    let refreshStageLabel: String?
     let onRefresh: () -> Void
 
     var body: some View {
@@ -20158,15 +20320,19 @@ private struct L2TimelinePanel: View {
                 .foregroundColor(.primary)
                 .lineLimit(1)
             Spacer(minLength: 6)
-            if showsScore {
-                scoreBadge
+            if showsScore, let score = scoreValue {
+                scoreBadge(score)
             }
         }
     }
 
-    private var scoreBadge: some View {
+    private var scoreValue: Int? {
+        guard let raw = item.scores.dimensions[sortKey]?.rawScore else { return nil }
+        return Int(raw.rounded())
+    }
+
+    private func scoreBadge(_ score: Int) -> some View {
         let dim = ExtensionColumnDimensions.info(for: sortKey)
-        let score = Int((item.scores.dimensions[sortKey]?.rawScore ?? 0).rounded())
         return HStack(spacing: 4) {
             Image(systemName: dim.glyph)
                 .font(.system(size: 9, weight: .semibold))
