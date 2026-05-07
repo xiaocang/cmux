@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/manaflow-ai/cmux/main/web/data/cmux-settings-plus.schema.json",
+  "title": "cmux settings.json (plus extensions)",
+  "description": "Schema fragments for cmux 'plus' fork-only settings. Referenced from cmux-settings.schema.json via $ref so plus additions stay isolated from upstream-shared schema.",
+  "$defs": {
+    "sidebarPullRequestShellDebounceEnabled": {
+      "type": "boolean",
+      "default": false,
+      "description": "Delay and coalesce shell-triggered sidebar pull request refreshes before checking GitHub."
+    },
+    "sidebarPullRequestShellDebounceSeconds": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 5,
+      "description": "Delay window in seconds for shell-triggered sidebar pull request refreshes."
+    },
+    "digest": {
+      "title": "digest",
+      "description": "Workspace Digest settings from Settings > Workspace Digest.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Allow cmux-digest to summarize workspace state for sidebar and Radar views."
+        },
+        "provider": {
+          "type": "string",
+          "enum": ["heuristic", "claude-code", "codex", "openai"],
+          "default": "heuristic",
+          "description": "Digest summarization provider."
+        },
+        "model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model name for provider-backed summaries."
+        },
+        "claudeCodeModel": {
+          "type": "string",
+          "default": "",
+          "description": "Optional Claude Code model when provider is claude-code."
+        },
+        "currentWorkspaceMinIntervalSec": {
+          "type": "integer",
+          "minimum": 10,
+          "default": 45,
+          "description": "Minimum seconds between current workspace digest refreshes."
+        },
+        "backgroundMinIntervalSec": {
+          "type": "integer",
+          "minimum": 30,
+          "default": 300,
+          "description": "Minimum seconds between background workspace digest refreshes."
+        },
+        "screenLines": {
+          "type": "integer",
+          "minimum": 20,
+          "maximum": 1000,
+          "default": 160,
+          "description": "Number of recent terminal lines read per surface."
+        },
+        "includeDiffStat": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include git diff statistics as trusted local context."
+        },
+        "sendFullDiffToLLM": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send the full git diff to provider-backed summaries."
+        },
+        "writeSidebarMetadata": {
+          "type": "boolean",
+          "default": true,
+          "description": "Let cmux-digest publish topic and summary through sidebar metadata."
+        },
+        "ghpr": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Optional PRDashboard socket integration for read-only PR context.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Read PRDashboard's local socket for the workspace pull request and feed the context into Workspace Digest."
+            },
+            "socketPath": {
+              "type": "string",
+              "default": "",
+              "description": "Unix socket path for PRDashboard. Leave empty to use /tmp/com.xiaocang.PRDashboard.<uid>.sock."
+            },
+            "displayItems": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "pr",
+                  "title",
+                  "ci",
+                  "review",
+                  "unresolved",
+                  "jira",
+                  "draft",
+                  "conflicts",
+                  "updated",
+                  "author",
+                  "pinned"
+                ]
+              },
+              "default": ["ci", "review", "unresolved", "jira"],
+              "description": "Sidebar metadata items to show for the linked PR."
+            },
+            "jiraBaseURL": {
+              "type": "string",
+              "default": "",
+              "description": "Optional Jira base URL for clickable tickets. Use {ticket} for custom URL templates."
+            }
+          }
+        }
+      }
+    },
+    "workspaceTab": {
+      "title": "workspaceTab",
+      "description": "Workspace tab and Summary Priority sidebar settings.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "defaultDisplayMode": {
+          "type": "string",
+          "enum": ["native", "summary_priority"],
+          "default": "native",
+          "description": "Default workspace sidebar display mode."
+        },
+        "summaryPriority": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable Summary Priority ranking for workspace summaries."
+            },
+            "scoreDisplayLocation": {
+              "type": "string",
+              "enum": ["sidebar", "extension"],
+              "default": "sidebar",
+              "description": "Choose whether Summary Priority scores appear in the native sidebar or in the extension column."
+            },
+            "defaultSort": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": ["dimension", "native_order", "recent"],
+                  "default": "dimension",
+                  "description": "Default Summary Priority sort mode."
+                },
+                "dimensionId": {
+                  "type": "string",
+                  "default": "urgency",
+                  "description": "Dimension id used when mode is dimension."
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": ["asc", "desc"],
+                  "default": "desc",
+                  "description": "Default Summary Priority sort direction."
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
