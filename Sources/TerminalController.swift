@@ -8148,6 +8148,7 @@ class TerminalController {
 
         CmuxEventBus.shared.publishWorkstreamEvent(event, phase: "received")
         v2ApplyPromptSubmitSideEffects(for: event)
+        WorkspaceAgentOperationEvent.postIfCountable(event: event)
 
         let result = FeedCoordinator.shared.ingestBlocking(
             event: event,

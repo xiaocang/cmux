@@ -380,6 +380,65 @@ enum FeedJumpResolver {
 extension Notification.Name {
     static let feedRequestFocus = Notification.Name("cmux.feedRequestFocus")
     static let feedRequestSendText = Notification.Name("cmux.feedRequestSendText")
+    static let workspaceAgentOperationDidOccur = Notification.Name("cmux.workspaceAgentOperationDidOccur")
+}
+
+enum WorkspaceAgentOperationEvent {
+    static let workspaceIdKey = "workspaceId"
+    static let sourceKey = "source"
+    static let sessionIdKey = "sessionId"
+    static let hookEventNameKey = "hookEventName"
+
+    static func postIfCountable(event: WorkstreamEvent) {
+        guard isCountable(event.hookEventName),
+              let workspaceId = resolvedWorkspaceId(for: event) else {
+            return
+        }
+        NotificationCenter.default.post(
+            name: .workspaceAgentOperationDidOccur,
+            object: nil,
+            userInfo: [
+                workspaceIdKey: workspaceId.uuidString,
+                sourceKey: event.source,
+                sessionIdKey: event.sessionId,
+                hookEventNameKey: event.hookEventName.rawValue,
+            ]
+        )
+    }
+
+    static func workspaceId(from notification: Notification) -> UUID? {
+        guard let raw = notification.userInfo?[workspaceIdKey] as? String else { return nil }
+        return UUID(uuidString: raw)
+    }
+
+    static func isCountable(_ hookEventName: WorkstreamEvent.HookEventName) -> Bool {
+        switch hookEventName {
+        case .sessionStart, .sessionEnd:
+            return false
+        case .userPromptSubmit,
+             .preToolUse,
+             .postToolUse,
+             .permissionRequest,
+             .askUserQuestion,
+             .exitPlanMode,
+             .todoWrite,
+             .stop,
+             .subagentStop,
+             .notification:
+            return true
+        }
+    }
+
+    static func resolvedWorkspaceId(for event: WorkstreamEvent) -> UUID? {
+        if let rawWorkspaceId = event.workspaceId?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let workspaceId = UUID(uuidString: rawWorkspaceId) {
+            return workspaceId
+        }
+        guard let target = FeedJumpResolver.lookup(agent: event.source, sessionId: event.sessionId) else {
+            return nil
+        }
+        return UUID(uuidString: target.workspaceId)
+    }
 }
 
 // MARK: - Native notification banner

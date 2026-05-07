@@ -898,7 +898,7 @@ final class CmuxSettingsFileStore {
             return
         }
         if let raw = jsonString(sort["mode"]) {
-            if ["dimension", "native_order", "recent"].contains(raw) {
+            if ["dimension", "native", "native_order", "recent"].contains(raw) {
                 snapshot.managedUserDefaults["workspaceTab.summaryPriority.sortMode"] = .string(raw)
             } else {
                 logInvalid("workspaceTab.summaryPriority.defaultSort.mode", sourcePath: sourcePath)

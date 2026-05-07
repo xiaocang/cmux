@@ -443,6 +443,7 @@ private enum WorkspaceTabDisplayMode: String, Codable {
 
 private enum SummaryPrioritySortMode: String, Codable {
     case dimension
+    case native
     case nativeOrder = "native_order"
     case recent
 }
@@ -4260,15 +4261,24 @@ private enum SummaryPriorityScoringEngine {
 
             let comparison: ComparisonResult
             switch sort.mode {
-            case .nativeOrder:
+            case .native, .nativeOrder:
                 comparison = compare(lhs.nativeOrder, rhs.nativeOrder)
             case .recent:
                 comparison = compare(lhs.generatedAt, rhs.generatedAt)
             case .dimension:
                 let id = sort.dimensionId ?? "urgency"
-                let lhsScore = lhs.scores.dimensions[id]?.rawScore ?? 0
-                let rhsScore = rhs.scores.dimensions[id]?.rawScore ?? 0
-                comparison = compare(lhsScore, rhsScore)
+                let lhsScore = lhs.scores.dimensions[id]?.rawScore
+                let rhsScore = rhs.scores.dimensions[id]?.rawScore
+                switch (lhsScore, rhsScore) {
+                case let (lhsScore?, rhsScore?):
+                    comparison = compare(lhsScore, rhsScore)
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                case (nil, nil):
+                    comparison = .orderedSame
+                }
             }
 
             if comparison != .orderedSame {
@@ -4600,13 +4610,38 @@ private final class DigestStore {
         }
     }
 
+    func getSummaryPriorityItem(workspaceId: String, profileId: String) -> SummaryPriorityWorkspaceItem? {
+        locked {
+            summaryPriorityItemUnlocked(workspaceId: workspaceId, profileId: profileId)
+        }
+    }
+
     func putSummaryPriorityItem(_ item: SummaryPriorityWorkspaceItem, profileId: String, sort: SummaryPrioritySort) throws {
         try locked {
-            let data = try encoder.encode(item)
-            let url = summaryItemsURL.appendingPathComponent("\(safeName(profileId))-\(safeName(item.workspaceId)).json")
+            var mergedItem = item
+            if let previous = summaryPriorityItemUnlocked(workspaceId: item.workspaceId, profileId: profileId) {
+                var dimensions = previous.scores.dimensions
+                dimensions.merge(item.scores.dimensions) { _, new in new }
+                mergedItem.scores.dimensions = dimensions
+            }
+            let data = try encoder.encode(mergedItem)
+            let url = summaryPriorityItemURL(workspaceId: item.workspaceId, profileId: profileId)
             try data.write(to: url, options: .atomic)
-            updateSummaryPriorityIndex(item, profileId: profileId, sort: sort, jsonPath: url.path)
+            updateSummaryPriorityIndex(mergedItem, profileId: profileId, sort: sort, jsonPath: url.path)
         }
+    }
+
+    private func summaryPriorityItemUnlocked(workspaceId: String, profileId: String) -> SummaryPriorityWorkspaceItem? {
+        let url = summaryPriorityItemURL(workspaceId: workspaceId, profileId: profileId)
+        guard let data = try? Data(contentsOf: url),
+              let item = try? decoder.decode(SummaryPriorityWorkspaceItem.self, from: data) else {
+            return nil
+        }
+        return item
+    }
+
+    private func summaryPriorityItemURL(workspaceId: String, profileId: String) -> URL {
+        summaryItemsURL.appendingPathComponent("\(safeName(profileId))-\(safeName(workspaceId)).json")
     }
 
     private func locked<T>(_ body: () throws -> T) rethrows -> T {
@@ -4655,6 +4690,9 @@ private final class DigestStore {
                 dimensionId: sort.dimensionId?.trimmedNonEmpty ?? "urgency",
                 direction: sort.direction
             )
+        }
+        if sort.mode == .nativeOrder {
+            return SummaryPrioritySort(mode: .native, dimensionId: nil, direction: sort.direction)
         }
         return SummaryPrioritySort(mode: sort.mode, dimensionId: nil, direction: sort.direction)
     }
@@ -5035,13 +5073,18 @@ private final class DigestController {
 
     func setSummaryPrioritySort(_ sort: SummaryPrioritySort) throws -> SummaryPriorityViewState {
         try store.setSummaryPrioritySort(sort)
-        return try summaryPriorityState(force: false, sort: sort)
+        return try cachedSummaryPriorityState(
+            native: nativeState(),
+            profileId: nil,
+            sort: sort
+        )
     }
 
     func refreshSummaryPriorityWorkspace(
         workspaceId: String,
         force: Bool = true,
-        level: WorkspaceDigestRefreshLevel = .full
+        level: WorkspaceDigestRefreshLevel = .full,
+        sort requestedSort: SummaryPrioritySort? = nil
     ) throws -> SummaryPriorityWorkspaceItem {
         let progressOwner = progress.makeOwner()
         defer { progress.clearWorkspace(workspaceId, owner: progressOwner) }
@@ -5054,7 +5097,7 @@ private final class DigestController {
         }
         let digest = try refresh(workspace: workspace, force: force, level: level, progressOwner: progressOwner)
         let profile = store.getScoringProfile(id: nil)
-        let sort = store.getSummaryPrioritySort()
+        let sort = requestedSort ?? store.getSummaryPrioritySort()
         let item = try summaryPriorityItem(
             nativeWorkspace: nativeWorkspace,
             digest: digest,
@@ -5180,6 +5223,52 @@ private final class DigestController {
         )
     }
 
+    private func cachedSummaryPriorityState(
+        native: NativeWorkspaceViewState,
+        profileId: String? = nil,
+        sort requestedSort: SummaryPrioritySort
+    ) throws -> SummaryPriorityViewState {
+        let now = ISO8601DateFormatter().string(from: Date())
+        let profile = store.getScoringProfile(id: profileId)
+        let sort = requestedSort
+        var staleDigestCount = 0
+        let items = native.workspaces.compactMap { nativeWorkspace -> SummaryPriorityWorkspaceItem? in
+            let override = store.getOverride(workspaceId: nativeWorkspace.workspaceId)
+            if override.hidden || SummaryPriorityScoringEngine.isSnoozed(override) {
+                return nil
+            }
+            guard var item = store.getSummaryPriorityItem(
+                workspaceId: nativeWorkspace.workspaceId,
+                profileId: profile.id
+            ) else {
+                staleDigestCount += 1
+                return nil
+            }
+            item.nativeOrder = nativeWorkspace.order
+            item.title = nativeWorkspace.title
+            item.pinned = override.pinned
+            item.scores.dimensions = SummaryPriorityScoringEngine.normalizedDimensions(
+                SummaryPriorityScoringEngine.applyOverride(override, to: item.scores.dimensions),
+                profile: profile
+            )
+            return item
+        }
+        let sorted = SummaryPriorityScoringEngine.sort(items, sort: sort)
+        return SummaryPriorityViewState(
+            profileId: profile.id,
+            sort: sort,
+            items: sorted,
+            dimensions: profile.dimensions,
+            stats: SummaryPriorityStats(
+                total: native.workspaces.count,
+                needsAttention: sorted.filter { ($0.scores.dimensions["urgency"]?.rawScore ?? 0) >= 70 }.count,
+                topScore: sorted.map { SummaryPriorityScoringEngine.activeScore(item: $0, sort: sort) }.max() ?? 0,
+                staleDigestCount: staleDigestCount
+            ),
+            generatedAt: now
+        )
+    }
+
     private func nativeItem(
         workspace: CmuxWorkspaceRef,
         order: Int,
@@ -5245,8 +5334,15 @@ private final class DigestController {
             score = llmScore
         }
         let assessed = [selectedDimension: score]
-        let dimensions = SummaryPriorityScoringEngine.applyOverride(override, to: assessed)
-            .filter { $0.key == selectedDimension }
+        var historicalDimensions = store.getSummaryPriorityItem(
+            workspaceId: nativeWorkspace.workspaceId,
+            profileId: profile.id
+        )?.scores.dimensions ?? [:]
+        historicalDimensions.merge(assessed) { _, new in new }
+        let dimensions = SummaryPriorityScoringEngine.normalizedDimensions(
+            SummaryPriorityScoringEngine.applyOverride(override, to: historicalDimensions),
+            profile: profile
+        )
         let rankReason = dimensions[selectedDimension]?.reason
             ?? "CLI score unavailable for current sort dimension."
         let nextAction = digest.state.nextActions.first.map {
@@ -6646,7 +6742,8 @@ private final class DigestSocketDaemon {
                 writeOK(client, encoded: try controller.refreshSummaryPriorityWorkspace(
                     workspaceId: id,
                     force: force,
-                    level: level
+                    level: level,
+                    sort: parseSort(body: body)
                 ))
 
             case "set_summary_priority_override":
@@ -6742,8 +6839,8 @@ private final class DigestSocketDaemon {
             rawValue: (source["direction"] as? String) ?? "desc"
         ) ?? .desc
 
-        if rawMode == "native_order" {
-            return SummaryPrioritySort(mode: .nativeOrder, dimensionId: nil, direction: direction)
+        if rawMode == "native" || rawMode == "native_order" {
+            return SummaryPrioritySort(mode: .native, dimensionId: nil, direction: direction)
         }
         if rawMode == "recent" {
             return SummaryPrioritySort(mode: .recent, dimensionId: nil, direction: direction)
@@ -7055,8 +7152,10 @@ private enum CmuxDigestMain {
         guard let raw = optionValue(args, "--sort") else { return nil }
         let direction = optionValue(args, "--direction").flatMap(SummaryPrioritySortDirection.init(rawValue:)) ?? .desc
         switch raw {
+        case "native":
+            return SummaryPrioritySort(mode: .native, dimensionId: nil, direction: direction)
         case "native_order":
-            return SummaryPrioritySort(mode: .nativeOrder, dimensionId: nil, direction: direction)
+            return SummaryPrioritySort(mode: .native, dimensionId: nil, direction: direction)
         case "recent":
             return SummaryPrioritySort(mode: .recent, dimensionId: nil, direction: direction)
         case "finalScore":
@@ -7075,9 +7174,9 @@ private enum CmuxDigestMain {
           show [--workspace <id>]
           radar [--limit <n>] [--include-idle]
           handoff --workspace <id>
-          workspaces [--native | --summary-priority] [--sort urgency|importance|native_order|recent]
+          workspaces [--native | --summary-priority] [--sort urgency|importance|native|native_order|recent]
           workspace-tab set-mode native|summary_priority
-          summary-priority [refresh --all] [--sort urgency|importance|native_order|recent]
+          summary-priority [refresh --all] [--sort urgency|importance|native|native_order|recent]
           summary-priority override --workspace <id> [--pin|--unpin|--hide|--show|--dimension id=score]
           watch
           daemon

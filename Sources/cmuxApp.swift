@@ -5964,7 +5964,8 @@ struct SettingsView: View {
     @AppStorage("digest.includeDiffStat") private var digestIncludeDiffStat = true
     @AppStorage("digest.sendFullDiffToLLM") private var digestSendFullDiffToLLM = false
     @AppStorage("digest.writeSidebarMetadata") private var digestWriteSidebarMetadata = true
-    @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
+    @AppStorage(WorkspaceSummaryPrioritySettings.enabledKey)
+    private var summaryPriorityEnabled = WorkspaceSummaryPrioritySettings.defaultEnabled
     @AppStorage(WorkspaceSidebarScoreDisplayLocation.storageKey)
     private var workspaceScoreDisplayLocation = WorkspaceSidebarScoreDisplayLocation.defaultValue.rawValue
     @AppStorage(DigestGHPRIntegrationSettings.enabledKey)

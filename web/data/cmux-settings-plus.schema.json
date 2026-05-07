@@ -154,7 +154,7 @@
               "properties": {
                 "mode": {
                   "type": "string",
-                  "enum": ["dimension", "native_order", "recent"],
+                  "enum": ["dimension", "native", "native_order", "recent"],
                   "default": "dimension",
                   "description": "Default Summary Priority sort mode."
                 },

@@ -67,6 +67,18 @@ enum WorkspaceAutoReorderSettings {
     }
 }
 
+enum WorkspaceSummaryPrioritySettings {
+    static let enabledKey = "workspaceTab.summaryPriority.enabled"
+    static let defaultEnabled = true
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: enabledKey) == nil {
+            return defaultEnabled
+        }
+        return defaults.bool(forKey: enabledKey)
+    }
+}
+
 enum LastSurfaceCloseShortcutSettings {
     static let key = "closeWorkspaceOnLastSurfaceShortcut"
     // Keep the legacy stored meaning so existing values still map to the same
@@ -937,6 +949,8 @@ class TabManager: ObservableObject {
     @Published var tabs: [Workspace] = []
     @Published var isLeaderModeActive: Bool = false
     @Published private(set) var isWorkspaceCycleHot: Bool = false
+    @Published private(set) var notificationAutoReorderAllowedBySort =
+        !WorkspaceSummaryPrioritySettings.isEnabled() || WorkspaceSidebarSummaryPrioritySort.defaultSort.isNative
     @Published private(set) var pendingBackgroundWorkspaceLoadIds: Set<UUID> = []
     @Published private(set) var debugPinnedWorkspaceLoadIds: Set<UUID> = []
 
@@ -4729,7 +4743,17 @@ class TabManager: ObservableObject {
         tabs = selectedPinned + remainingPinned + selectedUnpinned + remainingUnpinned
     }
 
+    func setNotificationAutoReorderPolicy(
+        summaryPriorityEnabled: Bool,
+        selectedSort: WorkspaceSidebarSummaryPrioritySort
+    ) {
+        let nextAllowed = !summaryPriorityEnabled || selectedSort.isNative
+        guard notificationAutoReorderAllowedBySort != nextAllowed else { return }
+        notificationAutoReorderAllowedBySort = nextAllowed
+    }
+
     func moveTabToTopForNotification(_ tabId: UUID) {
+        guard notificationAutoReorderAllowedBySort else { return }
         guard let index = tabs.firstIndex(where: { $0.id == tabId }) else { return }
         let pinnedCount = tabs.filter { $0.isPinned }.count
         guard index != pinnedCount else { return }
@@ -4765,6 +4789,58 @@ class TabManager: ObservableObject {
             return reorderWorkspace(tabId: tabId, toIndex: idx + 1)
         }
         return false
+    }
+
+    @discardableResult
+    func reorderWorkspaces(to prioritizedWorkspaceIds: [UUID]) -> Bool {
+        guard tabs.count > 1 else { return true }
+
+        var rankByWorkspaceId: [UUID: Int] = [:]
+        for workspaceId in prioritizedWorkspaceIds where rankByWorkspaceId[workspaceId] == nil {
+            rankByWorkspaceId[workspaceId] = rankByWorkspaceId.count
+        }
+        guard !rankByWorkspaceId.isEmpty else { return false }
+
+        let nextTabs = Self.summaryPriorityOrderedWorkspaces(
+            tabs,
+            rankByWorkspaceId: rankByWorkspaceId
+        )
+        guard nextTabs.map(\.id) != tabs.map(\.id) else { return true }
+
+        tabs = nextTabs
+        return true
+    }
+
+    private static func summaryPriorityOrderedWorkspaces(
+        _ workspaces: [Workspace],
+        rankByWorkspaceId: [UUID: Int]
+    ) -> [Workspace] {
+        let indexed = workspaces.enumerated().map { index, workspace in
+            (index: index, workspace: workspace)
+        }
+
+        func ordered(_ entries: [(index: Int, workspace: Workspace)]) -> [Workspace] {
+            entries.sorted { lhs, rhs in
+                let lhsRank = rankByWorkspaceId[lhs.workspace.id]
+                let rhsRank = rankByWorkspaceId[rhs.workspace.id]
+                switch (lhsRank, rhsRank) {
+                case let (lhsRank?, rhsRank?):
+                    if lhsRank != rhsRank { return lhsRank < rhsRank }
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                case (nil, nil):
+                    break
+                }
+                return lhs.index < rhs.index
+            }
+            .map(\.workspace)
+        }
+
+        let pinned = indexed.filter { $0.workspace.isPinned }
+        let unpinned = indexed.filter { !$0.workspace.isPinned }
+        return ordered(pinned) + ordered(unpinned)
     }
 
     func setCustomTitle(tabId: UUID, title: String?) {
