@@ -20,7 +20,6 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
 
     private static let touchedDefaultsKeys: [String] = [
         "digest.enabled",
-        "digest.daemonEnabled",
         "digest.provider",
         "digest.model",
         "digest.claudeCodeModel",
@@ -36,6 +35,7 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         "digest.ghpr.jiraBaseURL",
         "workspaceTab.displayMode",
         "workspaceTab.summaryPriority.enabled",
+        "workspaceTab.summaryPriority.scoreDisplayLocation",
         "workspaceTab.summaryPriority.sortMode",
         "workspaceTab.summaryPriority.sortDimensionId",
         "workspaceTab.summaryPriority.sortDirection",
@@ -143,6 +143,7 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
           "workspaceTab": {
             "defaultDisplayMode": "totally_invalid",
             "summaryPriority": {
+              "scoreDisplayLocation": "extension",
               "defaultSort": {
                 "mode": "dimension",
                 "dimensionId": "urgency",
@@ -164,6 +165,7 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         XCTAssertNil(UserDefaults.standard.object(forKey: "workspaceTab.displayMode"))
 
         // Sort fields must still apply — regression assertion.
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "workspaceTab.summaryPriority.scoreDisplayLocation"), "extension")
         XCTAssertEqual(UserDefaults.standard.string(forKey: "workspaceTab.summaryPriority.sortMode"), "dimension")
         XCTAssertEqual(UserDefaults.standard.string(forKey: "workspaceTab.summaryPriority.sortDimensionId"), "urgency")
         XCTAssertEqual(UserDefaults.standard.string(forKey: "workspaceTab.summaryPriority.sortDirection"), "desc")
@@ -204,7 +206,6 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         {
           "digest": {
             "enabled": true,
-            "daemonEnabled": true,
             "provider": "openai",
             "model": "gpt-test",
             "claudeCodeModel": "haiku-test",
@@ -226,7 +227,6 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         )
 
         XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.enabled"), true)
-        XCTAssertEqual(UserDefaults.standard.bool(forKey: "digest.daemonEnabled"), true)
         XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.provider"), "openai")
         XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.model"), "gpt-test")
         XCTAssertEqual(UserDefaults.standard.string(forKey: "digest.claudeCodeModel"), "haiku-test")
@@ -243,7 +243,8 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         {
           "workspaceTab": {
             "summaryPriority": {
-              "enabled": false
+              "enabled": false,
+              "scoreDisplayLocation": "sidebar"
             }
           }
         }
@@ -257,6 +258,7 @@ final class WorkspaceDigestSettingsParsingTests: XCTestCase {
         )
 
         XCTAssertEqual(UserDefaults.standard.object(forKey: "workspaceTab.summaryPriority.enabled") as? Bool, false)
+        XCTAssertEqual(UserDefaults.standard.string(forKey: "workspaceTab.summaryPriority.scoreDisplayLocation"), "sidebar")
         XCTAssertNil(UserDefaults.standard.object(forKey: "workspaceTab.summaryPriority.sortMode"))
         XCTAssertNil(UserDefaults.standard.object(forKey: "workspaceTab.summaryPriority.sortDimensionId"))
         XCTAssertNil(UserDefaults.standard.object(forKey: "workspaceTab.summaryPriority.sortDirection"))

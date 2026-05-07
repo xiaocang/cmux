@@ -443,14 +443,9 @@
           "default": false,
           "description": "Allow cmux-digest to summarize workspace state for sidebar and Radar views."
         },
-        "daemonEnabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "Run the local cmux-digest daemon for Summary workspace mode."
-        },
         "provider": {
           "type": "string",
-          "enum": ["heuristic", "claude-code", "openai"],
+          "enum": ["heuristic", "claude-code", "codex", "openai"],
           "default": "heuristic",
           "description": "Digest summarization provider."
         },
@@ -538,6 +533,60 @@
               "type": "string",
               "default": "",
               "description": "Optional Jira base URL for clickable tickets. Use {ticket} for custom URL templates."
+            }
+          }
+        }
+      }
+    },
+    "workspaceTab": {
+      "title": "workspaceTab",
+      "description": "Workspace tab and Summary Priority sidebar settings.",
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "defaultDisplayMode": {
+          "type": "string",
+          "enum": ["native", "summary_priority"],
+          "default": "native",
+          "description": "Default workspace sidebar display mode."
+        },
+        "summaryPriority": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable Summary Priority ranking for workspace summaries."
+            },
+            "scoreDisplayLocation": {
+              "type": "string",
+              "enum": ["sidebar", "extension"],
+              "default": "sidebar",
+              "description": "Choose whether Summary Priority scores appear in the native sidebar or in the extension column."
+            },
+            "defaultSort": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "mode": {
+                  "type": "string",
+                  "enum": ["dimension", "native_order", "recent"],
+                  "default": "dimension",
+                  "description": "Default Summary Priority sort mode."
+                },
+                "dimensionId": {
+                  "type": "string",
+                  "default": "urgency",
+                  "description": "Dimension id used when mode is dimension."
+                },
+                "direction": {
+                  "type": "string",
+                  "enum": ["asc", "desc"],
+                  "default": "desc",
+                  "description": "Default Summary Priority sort direction."
+                }
+              }
             }
           }
         }

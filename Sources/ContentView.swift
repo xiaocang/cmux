@@ -9928,6 +9928,8 @@ struct VerticalTabsSidebar: View {
     @State private var laidOutWorkspaceRowIds: Set<UUID> = []
     @State private var pendingSelectedWorkspaceScrollId: UUID?
     @AppStorage("workspaceTab.displayMode") private var workspaceTabDisplayMode = WorkspaceSidebarDisplayMode.native.rawValue
+    @AppStorage(WorkspaceSidebarScoreDisplayLocation.storageKey)
+    private var scoreDisplayLocationRaw = WorkspaceSidebarScoreDisplayLocation.defaultValue.rawValue
     @AppStorage(WorkspacePresentationModeSettings.modeKey)
     private var workspacePresentationMode = WorkspacePresentationModeSettings.defaultMode.rawValue
     @AppStorage("sidebarMatchTerminalBackground")
@@ -9946,6 +9948,10 @@ struct VerticalTabsSidebar: View {
 
     private var workspaceSidebarDisplayMode: WorkspaceSidebarDisplayMode {
         WorkspaceSidebarDisplayMode(rawValue: workspaceTabDisplayMode) ?? .native
+    }
+
+    private var scoreDisplayLocation: WorkspaceSidebarScoreDisplayLocation {
+        WorkspaceSidebarScoreDisplayLocation.resolved(rawValue: scoreDisplayLocationRaw)
     }
 
     private var showsSidebarNotificationMessage: Bool {
@@ -10030,7 +10036,7 @@ struct VerticalTabsSidebar: View {
         let allSelectedRemoteContextMenuTargetsConnecting: Bool
         let allSelectedRemoteContextMenuTargetsDisconnected: Bool
         let workspaceTerminalScrollBarHiddenById: [UUID: Bool]
-        let summaryScoreBadgesById: [UUID: WorkspaceSidebarScoreBadge]
+        let summaryScoreBadgeById: [UUID: WorkspaceSidebarScoreBadge]
 
         var workspaceIds: [UUID] {
             tabs.map(\.id)
@@ -10055,10 +10061,12 @@ struct VerticalTabsSidebar: View {
         let workspaceTerminalScrollBarHiddenById = Dictionary(
             uniqueKeysWithValues: tabs.map { ($0.id, $0.terminalScrollBarHidden) }
         )
-        let summaryScoreBadgesById = Self.summaryScoreBadgesByWorkspaceId(
-            summaryPriority: workspaceTabStore.summaryPriority,
-            selectedSort: workspaceTabStore.selectedSort
-        )
+        let summaryScoreBadgeById = scoreDisplayLocation == .sidebar
+            ? Self.summaryScoreBadgeByWorkspaceId(
+                summaryPriority: workspaceTabStore.summaryPriority,
+                selectedSort: workspaceTabStore.selectedSort
+            )
+            : [:]
         let allSelectedRemoteContextMenuTargetsConnecting = !selectedRemoteContextMenuTargets.isEmpty &&
             selectedRemoteContextMenuTargets.allSatisfy { $0.remoteConnectionState == .connecting }
         let allSelectedRemoteContextMenuTargetsDisconnected = !selectedRemoteContextMenuTargets.isEmpty &&
@@ -10075,7 +10083,7 @@ struct VerticalTabsSidebar: View {
             allSelectedRemoteContextMenuTargetsConnecting: allSelectedRemoteContextMenuTargetsConnecting,
             allSelectedRemoteContextMenuTargetsDisconnected: allSelectedRemoteContextMenuTargetsDisconnected,
             workspaceTerminalScrollBarHiddenById: workspaceTerminalScrollBarHiddenById,
-            summaryScoreBadgesById: summaryScoreBadgesById
+            summaryScoreBadgeById: summaryScoreBadgeById
         )
 
         VStack(spacing: 0) {
@@ -10334,7 +10342,7 @@ struct VerticalTabsSidebar: View {
             accessibilityWorkspaceCount: renderContext.workspaceCount,
             unreadCount: frozenPresentation?.unreadCount ?? liveUnreadCount,
             latestNotificationText: frozenPresentation?.latestNotificationText ?? liveLatestNotificationText,
-            summaryScoreBadge: renderContext.summaryScoreBadgesById[tab.id],
+            summaryScoreBadge: renderContext.summaryScoreBadgeById[tab.id],
             rowSpacing: tabRowSpacing,
             setSelectionToTabs: { selection = .tabs },
             selectedTabIds: $selectedTabIds,
@@ -10370,7 +10378,7 @@ struct VerticalTabsSidebar: View {
         .preference(key: SidebarWorkspaceRowIdsPreferenceKey.self, value: Set([tab.id]))
     }
 
-    private static func summaryScoreBadgesByWorkspaceId(
+    private static func summaryScoreBadgeByWorkspaceId(
         summaryPriority: WorkspaceSidebarSummaryPriorityState?,
         selectedSort: WorkspaceSidebarSummaryPrioritySort
     ) -> [UUID: WorkspaceSidebarScoreBadge] {
@@ -10387,6 +10395,7 @@ struct VerticalTabsSidebar: View {
             }
             let reason = dimensionScore.reason.trimmingCharacters(in: .whitespacesAndNewlines)
             result[workspaceId] = WorkspaceSidebarScoreBadge(
+                dimensionId: dimensionInfo.id,
                 dimensionLabel: dimensionInfo.label,
                 glyph: dimensionInfo.glyph,
                 score: Int(dimensionScore.rawScore.rounded()),
@@ -12547,17 +12556,32 @@ enum WorkspaceSidebarDisplayMode: String {
     case summaryPriority = "summary_priority"
 }
 
+enum WorkspaceSidebarScoreDisplayLocation: String {
+    static let storageKey = "workspaceTab.summaryPriority.scoreDisplayLocation"
+    static let defaultValue = WorkspaceSidebarScoreDisplayLocation.sidebar
+
+    case sidebar
+    case extensionColumn = "extension"
+
+    static func resolved(rawValue: String) -> WorkspaceSidebarScoreDisplayLocation {
+        WorkspaceSidebarScoreDisplayLocation(rawValue: rawValue) ?? defaultValue
+    }
+}
+
 struct WorkspaceSidebarDimensionScore: Codable, Equatable {
     let rawScore: Double
     let confidence: Double
     let reason: String
 }
 
-private struct WorkspaceSidebarScoreBadge: Equatable {
+private struct WorkspaceSidebarScoreBadge: Identifiable, Equatable {
+    let dimensionId: String
     let dimensionLabel: String
     let glyph: String
     let score: Int
     let reason: String?
+
+    var id: String { dimensionId }
 
     var helpText: String {
         var lines = ["\(dimensionLabel) \(score)"]
@@ -12763,7 +12787,7 @@ final class WorkspaceTabStore: ObservableObject {
     private static let selectedSortDefaultsKey = "workspaceTab.summaryPriority.selectedSort"
     private static let savedSortsDefaultsKey = "workspaceTab.summaryPriority.savedSorts"
     private static let socketQueue = DispatchQueue(label: "com.cmux.digest-socket-client", qos: .userInitiated)
-    private static let digestSocketTimeoutSeconds: TimeInterval = 120
+    private static let digestSocketTimeoutSeconds: TimeInterval = 420
     private static let digestSocketStartupWaitSeconds: TimeInterval = 2
     private static let maxRefreshRetryAttempts = 5
     private static let jsonEncoder = JSONEncoder()
@@ -18656,6 +18680,8 @@ struct ExtensionColumnOverlay: View {
     @EnvironmentObject var tabManager: TabManager
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
+    @AppStorage(WorkspaceSidebarScoreDisplayLocation.storageKey)
+    private var scoreDisplayLocationRaw = WorkspaceSidebarScoreDisplayLocation.defaultValue.rawValue
     @StateObject private var summaryProfileStore = WorkspaceSummaryProfileSettingsStore()
     @State private var isConfiguring = false
     @State private var quickPopoverOpen = false
@@ -18690,6 +18716,18 @@ struct ExtensionColumnOverlay: View {
             availableSortDimensions.contains(where: { $0.id == id }) ? id : nil
         }
         return resolved ?? availableSortDimensions.first?.id ?? "urgency"
+    }
+
+    private var scoreDisplayLocation: WorkspaceSidebarScoreDisplayLocation {
+        WorkspaceSidebarScoreDisplayLocation.resolved(rawValue: scoreDisplayLocationRaw)
+    }
+
+    private var scoresVisibleInExtension: Bool {
+        scoreDisplayLocation == .extensionColumn
+    }
+
+    private var scoresVisibleInSidebar: Bool {
+        scoreDisplayLocation == .sidebar
     }
 
     private var availableSortDimensions: [ExtensionColumnDimensionInfo] {
@@ -18793,6 +18831,7 @@ struct ExtensionColumnOverlay: View {
                 item: item,
                 contextSummary: row.contextSummary,
                 sortKey: sortKey,
+                showsScore: scoresVisibleInExtension,
                 isRefreshing: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
                 onRefresh: {
                     refreshSingle(row: row)
@@ -18858,6 +18897,7 @@ struct ExtensionColumnOverlay: View {
                     ExtensionRowDual(
                         row: row,
                         sortKey: sortKey,
+                        showsScore: scoresVisibleInExtension,
                         isHovered: workspaceSidebarLayoutMetricsStore.hoveredWorkspaceId == row.tabId,
                         isActive: tabManager.selectedTabId == row.tabId,
                         isLoading: workspaceTabStore.isLoading || workspaceTabStore.isRefreshingWorkspace(row.tabId),
@@ -18904,6 +18944,7 @@ struct ExtensionColumnOverlay: View {
             Spacer(minLength: 0)
             if !isConfiguring {
                 sortMenuButton
+                scoreLocationToggleButton
                 refreshButton
             }
             Button(action: onClose) {
@@ -19003,6 +19044,37 @@ struct ExtensionColumnOverlay: View {
                 onClose: { quickPopoverOpen = false }
             )
         }
+    }
+
+    private var scoreLocationToggleButton: some View {
+        Button {
+            scoreDisplayLocationRaw = scoresVisibleInSidebar
+                ? WorkspaceSidebarScoreDisplayLocation.extensionColumn.rawValue
+                : WorkspaceSidebarScoreDisplayLocation.sidebar.rawValue
+        } label: {
+            ZStack {
+                Text("\u{1F441}\u{FE0E}")
+                    .font(.system(size: 12, weight: .medium))
+                if scoresVisibleInExtension {
+                    Rectangle()
+                        .fill(Color.primary.opacity(0.72))
+                        .frame(width: 13, height: 1.4)
+                        .rotationEffect(.degrees(-18))
+                }
+            }
+            .foregroundColor(.primary.opacity(scoresVisibleInSidebar ? 0.78 : 0.46))
+            .frame(width: 20, height: 20)
+            .background(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .fill(Color.primary.opacity(scoresVisibleInSidebar ? 0.10 : 0.06))
+            )
+        }
+        .buttonStyle(.plain)
+        .safeHelp(
+            scoresVisibleInSidebar
+                ? String(localized: "extensionColumn.scoreDisplay.sidebar.tooltip", defaultValue: "Scores shown in sidebar")
+                : String(localized: "extensionColumn.scoreDisplay.extension.tooltip", defaultValue: "Scores shown in extension")
+        )
     }
 
     private var sortMenuLabel: some View {
@@ -19567,6 +19639,7 @@ private struct ExtensionRowDual: View {
 
     let row: ExtensionColumnRowData
     let sortKey: String
+    let showsScore: Bool
     let isHovered: Bool
     let isActive: Bool
     let isLoading: Bool
@@ -19668,7 +19741,7 @@ private struct ExtensionRowDual: View {
     private var trailingAffordance: some View {
         switch rowState {
         case .loaded:
-            if let score = scoreValue {
+            if showsScore, let score = scoreValue {
                 Text("\(score)")
                     .font(.system(size: 9.5, weight: .medium, design: .monospaced))
                     .foregroundColor(secondaryTextColor(0.74))
@@ -20023,6 +20096,7 @@ private struct L2TimelinePanel: View {
     let item: WorkspaceSidebarSummaryPriorityItem
     let contextSummary: WorkspaceTabContextSummary?
     let sortKey: String
+    let showsScore: Bool
     let isRefreshing: Bool
     let onRefresh: () -> Void
 
@@ -20084,7 +20158,9 @@ private struct L2TimelinePanel: View {
                 .foregroundColor(.primary)
                 .lineLimit(1)
             Spacer(minLength: 6)
-            scoreBadge
+            if showsScore {
+                scoreBadge
+            }
         }
     }
 

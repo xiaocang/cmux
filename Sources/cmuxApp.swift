@@ -287,25 +287,14 @@ struct cmuxApp: App {
     private var showSidebarDevBuildBanner = DevBuildBannerDebugSettings.defaultShowSidebarBanner
     @AppStorage(SocketControlSettings.appStorageKey) private var socketControlMode = SocketControlSettings.defaultMode.rawValue
     @AppStorage("digest.enabled") private var digestEnabled = false
-    @AppStorage("digest.daemonEnabled") private var digestDaemonEnabled = false
     @AppStorage("digest.provider") private var digestProvider = "heuristic"
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
-    @AppStorage("workspaceTab.displayMode") private var workspaceTabDisplayMode = "native"
-    @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
-    @AppStorage(ExtensionColumnSettings.openKey)
-    private var extensionColumnOpen = ExtensionColumnSettings.defaultOpen
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     private var browserToolbarAccessorySpacing: Int {
         BrowserToolbarAccessorySpacingDebugSettings.resolved(browserToolbarAccessorySpacingRaw)
-    }
-
-    private var shouldRunDigestDaemon: Bool {
-        digestDaemonEnabled
-            || digestEnabled
-            || (summaryPriorityEnabled && (workspaceTabDisplayMode == "summary_priority" || extensionColumnOpen))
     }
 
     init() {
@@ -480,7 +469,7 @@ struct cmuxApp: App {
 #endif
                     bootstrapMainWindowScene()
                     updateSocketController()
-                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.update(enabled: digestEnabled)
                 }
                 .onChange(of: appearanceMode) { _ in
                     applyAppearance()
@@ -488,29 +477,17 @@ struct cmuxApp: App {
                 .onChange(of: socketControlMode) { _ in
                     updateSocketController()
                 }
-                .onChange(of: digestDaemonEnabled) { _ in
-                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
-                }
                 .onChange(of: digestEnabled) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
                 }
                 .onChange(of: digestProvider) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
                 }
                 .onChange(of: digestModel) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
                 }
                 .onChange(of: digestClaudeCodeModel) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
-                }
-                .onChange(of: workspaceTabDisplayMode) { _ in
-                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
-                }
-                .onChange(of: summaryPriorityEnabled) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: shouldRunDigestDaemon)
-                }
-                .onChange(of: extensionColumnOpen) { _ in
-                    CmuxDigestDaemonSupervisor.shared.update(enabled: shouldRunDigestDaemon)
+                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -5666,6 +5643,7 @@ struct WorkspaceSummarySettingsProfile: Codable, Equatable {
 enum DigestProviderOption: String, CaseIterable, Identifiable {
     case heuristic
     case claudeCode = "claude-code"
+    case codex
     case openai
 
     var id: String { rawValue }
@@ -5681,6 +5659,11 @@ enum DigestProviderOption: String, CaseIterable, Identifiable {
             return String(
                 localized: "extensionColumn.configure.provider.claude",
                 defaultValue: "Claude Code"
+            )
+        case .codex:
+            return String(
+                localized: "extensionColumn.configure.provider.codex",
+                defaultValue: "Codex"
             )
         case .openai:
             return String(
@@ -5959,7 +5942,6 @@ struct SettingsView: View {
     @AppStorage("sidebarShowProgress") private var sidebarShowProgress = true
     @AppStorage("sidebarShowStatusPills") private var sidebarShowMetadata = true
     @AppStorage("digest.enabled") private var digestEnabled = false
-    @AppStorage("digest.daemonEnabled") private var digestDaemonEnabled = false
     @AppStorage("digest.provider") private var digestProvider = "heuristic"
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
@@ -5970,6 +5952,8 @@ struct SettingsView: View {
     @AppStorage("digest.sendFullDiffToLLM") private var digestSendFullDiffToLLM = false
     @AppStorage("digest.writeSidebarMetadata") private var digestWriteSidebarMetadata = true
     @AppStorage("workspaceTab.summaryPriority.enabled") private var summaryPriorityEnabled = true
+    @AppStorage(WorkspaceSidebarScoreDisplayLocation.storageKey)
+    private var workspaceScoreDisplayLocation = WorkspaceSidebarScoreDisplayLocation.defaultValue.rawValue
     @AppStorage(DigestGHPRIntegrationSettings.enabledKey)
     private var digestGHPRIntegrationEnabled = DigestGHPRIntegrationSettings.defaultEnabled
     @AppStorage(DigestGHPRIntegrationSettings.socketPathKey)
@@ -7450,6 +7434,21 @@ struct SettingsView: View {
                         SettingsCardDivider()
 
                         SettingsCardRow(
+                            configurationReview: .action,
+                            String(localized: "settings.digest.restartDaemon", defaultValue: "Restart Digest Daemon"),
+                            subtitle: String(localized: "settings.digest.restartDaemon.subtitle", defaultValue: "Restart the local digest service if summaries stop updating.")
+                        ) {
+                            Button(String(localized: "settings.digest.restartDaemon.button", defaultValue: "Restart")) {
+                                CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(!digestEnabled)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
                             configurationReview: .json("workspaceTab.summaryPriority.enabled"),
                             String(localized: "settings.summaryPriority.enabled", defaultValue: "Enable Summary Priority"),
                             subtitle: String(localized: "settings.summaryPriority.enabled.subtitle", defaultValue: "Rank workspace summaries in the extension column.")
@@ -8348,7 +8347,6 @@ struct SettingsView: View {
         sidebarShowProgress = true
         sidebarShowMetadata = true
         digestEnabled = false
-        digestDaemonEnabled = false
         digestProvider = "heuristic"
         digestModel = ""
         digestClaudeCodeModel = ""
@@ -8359,6 +8357,7 @@ struct SettingsView: View {
         digestSendFullDiffToLLM = false
         digestWriteSidebarMetadata = true
         summaryPriorityEnabled = true
+        workspaceScoreDisplayLocation = WorkspaceSidebarScoreDisplayLocation.defaultValue.rawValue
         digestGHPRIntegrationEnabled = DigestGHPRIntegrationSettings.defaultEnabled
         digestGHPRSocketPath = DigestGHPRIntegrationSettings.defaultSocketPath
         digestGHPRDisplayItems = DigestGHPRIntegrationSettings.defaultDisplayItemsText

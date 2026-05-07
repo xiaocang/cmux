@@ -82,7 +82,6 @@ final class CmuxSettingsFileStore {
         "automation.portBase",
         "automation.portRange",
         "digest.enabled",
-        "digest.daemonEnabled",
         "digest.provider",
         "digest.model",
         "digest.claudeCodeModel",
@@ -99,6 +98,7 @@ final class CmuxSettingsFileStore {
         "digest.ghpr.jiraBaseURL",
         "workspaceTab.displayMode",
         "workspaceTab.summaryPriority.enabled",
+        "workspaceTab.summaryPriority.scoreDisplayLocation",
         "workspaceTab.summaryPriority.sortMode",
         "workspaceTab.summaryPriority.sortDimensionId",
         "workspaceTab.summaryPriority.sortDirection",
@@ -781,9 +781,6 @@ final class CmuxSettingsFileStore {
         if let value = jsonBool(section["enabled"]) {
             snapshot.managedUserDefaults["digest.enabled"] = .bool(value)
         }
-        if let value = jsonBool(section["daemonEnabled"]) {
-            snapshot.managedUserDefaults["digest.daemonEnabled"] = .bool(value)
-        }
         if let raw = jsonString(section["provider"]) {
             snapshot.managedUserDefaults["digest.provider"] = .string(raw)
         }
@@ -879,6 +876,13 @@ final class CmuxSettingsFileStore {
         }
         if let value = jsonBool(summaryPriority["enabled"]) {
             snapshot.managedUserDefaults["workspaceTab.summaryPriority.enabled"] = .bool(value)
+        }
+        if let raw = jsonString(summaryPriority["scoreDisplayLocation"]) {
+            if raw == "sidebar" || raw == "extension" {
+                snapshot.managedUserDefaults[WorkspaceSidebarScoreDisplayLocation.storageKey] = .string(raw)
+            } else {
+                logInvalid("workspaceTab.summaryPriority.scoreDisplayLocation", sourcePath: sourcePath)
+            }
         }
         guard let sort = summaryPriority["defaultSort"] as? [String: Any] else {
             return

@@ -12,6 +12,10 @@ private struct DigestError: Error, CustomStringConvertible {
     let description: String
 }
 
+private struct DigestLLMTimeoutError: Error, CustomStringConvertible {
+    let description: String
+}
+
 private enum DigestTextLimits {
     static let summaryStep = 120
     static let truncationMarker = "..."
@@ -575,6 +579,7 @@ private struct DigestConfig {
     var apiBaseURL: String?
     var claudeCodePath: String?
     var claudeCodeModel: String?
+    var codexPath: String?
     var llmTimeoutSec: Int
     var maxConcurrentLLM: Int
     var currentWorkspaceMinIntervalSec: Int
@@ -618,7 +623,8 @@ private struct DigestConfig {
             apiBaseURL: env["CMUX_DIGEST_API_BASE"] ?? settings.string("apiBaseURL"),
             claudeCodePath: env["CMUX_DIGEST_CLAUDE_PATH"] ?? settings.string("claudeCodePath"),
             claudeCodeModel: env["CMUX_DIGEST_CLAUDE_MODEL"] ?? settings.string("claudeCodeModel"),
-            llmTimeoutSec: Int(env["CMUX_DIGEST_LLM_TIMEOUT"] ?? "") ?? settings.int("llmTimeoutSec") ?? 60,
+            codexPath: env["CMUX_DIGEST_CODEX_PATH"] ?? settings.string("codexPath"),
+            llmTimeoutSec: Int(env["CMUX_DIGEST_LLM_TIMEOUT"] ?? "") ?? settings.int("llmTimeoutSec") ?? 180,
             maxConcurrentLLM: max(1, Int(env["CMUX_DIGEST_MAX_CONCURRENT_LLM"] ?? "") ?? settings.int("maxConcurrentLLM") ?? 2),
             currentWorkspaceMinIntervalSec: Int(env["CMUX_DIGEST_CURRENT_INTERVAL"] ?? "") ?? settings.int("currentWorkspaceMinIntervalSec") ?? 45,
             backgroundMinIntervalSec: Int(env["CMUX_DIGEST_BACKGROUND_INTERVAL"] ?? "") ?? settings.int("backgroundMinIntervalSec") ?? 300,
@@ -788,6 +794,21 @@ private enum ClaudeCodeBinaryLocator {
             return path
         }
         return "claude"
+    }
+}
+
+private enum CodexBinaryLocator {
+    static func find() -> String {
+        let home = NSHomeDirectory()
+        let candidates = [
+            "\(home)/.local/bin/codex",
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex"
+        ]
+        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        return "codex"
     }
 }
 
@@ -2498,14 +2519,111 @@ private struct DimensionAssessmentLLMOutput: Decodable {
     var dimensions: [String: DimensionScore]
 }
 
+private final class DigestProcessOutputBuffer {
+    private let lock = NSLock()
+    private var storage = Data()
+
+    func append(_ data: Data) {
+        guard !data.isEmpty else { return }
+        lock.lock()
+        storage.append(data)
+        lock.unlock()
+    }
+
+    func data() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+}
+
+private final class DigestProcessWatchdog {
+    private let process: Process
+    private let providerName: String
+    private let timeoutSec: Int
+    private let deadline: Date
+    private let queue = DispatchQueue(label: "com.cmux.digest.process-watchdog")
+    private let terminateGraceSeconds: TimeInterval = 3
+    private var timer: DispatchSourceTimer?
+    private var terminateSentAt: Date?
+    private var killSent = false
+    private var lastOutputAt = Date()
+    private var timeoutDescription: String?
+
+    init(process: Process, providerName: String, timeoutSec: Int) {
+        self.process = process
+        self.providerName = providerName
+        self.timeoutSec = timeoutSec
+        self.deadline = Date().addingTimeInterval(TimeInterval(timeoutSec))
+    }
+
+    func start() {
+        queue.async {
+            guard self.timer == nil else { return }
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + 1, repeating: 1)
+            timer.setEventHandler { [weak self] in
+                self?.check()
+            }
+            self.timer = timer
+            timer.resume()
+        }
+    }
+
+    func markOutput() {
+        queue.async {
+            self.lastOutputAt = Date()
+        }
+    }
+
+    func finish() -> String? {
+        queue.sync {
+            timer?.setEventHandler {}
+            timer?.cancel()
+            timer = nil
+            return timeoutDescription
+        }
+    }
+
+    private func check() {
+        guard process.isRunning else {
+            timer?.cancel()
+            timer = nil
+            return
+        }
+
+        let now = Date()
+        if let terminateSentAt {
+            guard !killSent, now.timeIntervalSince(terminateSentAt) >= terminateGraceSeconds else {
+                return
+            }
+            kill(process.processIdentifier, SIGKILL)
+            killSent = true
+            timeoutDescription = (timeoutDescription ?? "\(providerName) CLI exceeded \(timeoutSec)s hard timeout")
+                + "; escalated to SIGKILL after \(Int(terminateGraceSeconds))s"
+            return
+        }
+
+        guard now >= deadline else { return }
+        let silenceSeconds = max(0, Int(now.timeIntervalSince(lastOutputAt)))
+        timeoutDescription = "\(providerName) CLI exceeded \(timeoutSec)s hard timeout; last CLI output \(silenceSeconds)s ago"
+        process.terminate()
+        terminateSentAt = now
+    }
+}
+
 private final class DigestLLMClient {
     private let config: DigestConfig
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
-    // Caps in-flight LLM/claude-code calls so a "refresh-all" burst doesn't
+    private static let timeoutCooldownSeconds: TimeInterval = 90
+    // Caps in-flight LLM/CLI calls so a "refresh-all" burst doesn't
     // fan out one subprocess per workspace and time-out under API rate limits.
     // Excess callers block on wait() and resume FIFO when a slot frees up.
     private let throttle: DispatchSemaphore
+    private let stateLock = NSLock()
+    private var suspendedUntil: Date?
+    private var suspendedReason: String?
 
     init(config: DigestConfig) {
         self.config = config
@@ -2601,6 +2719,10 @@ private final class DigestLLMClient {
         decode: (String) throws -> T
     ) -> T? {
         guard let requestTemplate = requestTemplate() else { return nil }
+        if let reason = llmSuspendedReason() {
+            fputs("cmux-digest: LLM digest skipped during cooldown, using heuristic fallback: \(reason)\n", stderr)
+            return nil
+        }
         var lastError: Error?
         for attempt in 0..<2 {
             do {
@@ -2613,6 +2735,10 @@ private final class DigestLLMClient {
                 return try decode(content)
             } catch {
                 lastError = error
+                if error is DigestLLMTimeoutError {
+                    suspendLLM(after: error)
+                    break
+                }
             }
         }
         if let lastError {
@@ -2621,9 +2747,49 @@ private final class DigestLLMClient {
         return nil
     }
 
+    private func llmSuspendedReason(now: Date = Date()) -> String? {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        guard let suspendedUntil else { return nil }
+        if now < suspendedUntil {
+            let remaining = max(1, Int(ceil(suspendedUntil.timeIntervalSince(now))))
+            let reason = suspendedReason ?? "recent timeout"
+            return "\(reason); retrying LLM calls in \(remaining)s"
+        }
+        self.suspendedUntil = nil
+        self.suspendedReason = nil
+        return nil
+    }
+
+    private func suspendLLM(after error: Error, now: Date = Date()) {
+        stateLock.lock()
+        suspendedUntil = now.addingTimeInterval(Self.timeoutCooldownSeconds)
+        suspendedReason = String(describing: error).truncated(240)
+        stateLock.unlock()
+    }
+
+    private enum CLIProviderKind {
+        case claudeCode
+        case codex
+    }
+
+    private struct CLIRequestTemplate {
+        var kind: CLIProviderKind
+        var providerName: String
+        var executable: String
+        var model: String?
+        var timeoutSec: Int
+    }
+
+    private struct CLIExecutionResult {
+        var stdoutData: Data
+        var stderrData: Data
+        var status: Int32
+    }
+
     private enum RequestTemplate {
-        case http(endpoint: URL, apiKey: String, model: String)
-        case claudeCode(executable: String, model: String, timeoutSec: Int)
+        case http(endpoint: URL, apiKey: String, model: String, timeoutSec: Int)
+        case cli(CLIRequestTemplate)
     }
 
     private func requestTemplate() -> RequestTemplate? {
@@ -2641,11 +2807,28 @@ private final class DigestLLMClient {
             let model = config.claudeCodeModel?.trimmedNonEmpty
                 ?? config.model?.trimmedNonEmpty
                 ?? "haiku"
-            return .claudeCode(
+            return .cli(CLIRequestTemplate(
+                kind: .claudeCode,
+                providerName: provider,
                 executable: executable,
                 model: model,
                 timeoutSec: max(config.llmTimeoutSec, 10)
-            )
+            ))
+        }
+        if provider == "codex" {
+            let executable = config.codexPath?.trimmedNonEmpty
+                ?? CodexBinaryLocator.find()
+            guard FileManager.default.isExecutableFile(atPath: executable) || !executable.contains("/") else {
+                fputs("cmux-digest: codex binary not found at \(executable); using heuristic fallback\n", stderr)
+                return nil
+            }
+            return .cli(CLIRequestTemplate(
+                kind: .codex,
+                providerName: provider,
+                executable: executable,
+                model: config.model?.trimmedNonEmpty,
+                timeoutSec: max(config.llmTimeoutSec, 10)
+            ))
         }
         guard let model = config.model?.trimmedNonEmpty else {
             fputs("cmux-digest: digest.model or CMUX_DIGEST_MODEL is required for provider \(provider); using heuristic fallback\n", stderr)
@@ -2668,21 +2851,35 @@ private final class DigestLLMClient {
             fputs("cmux-digest: invalid digest API base URL; using heuristic fallback\n", stderr)
             return nil
         }
-        return .http(endpoint: endpoint, apiKey: apiKey, model: model)
+        return .http(endpoint: endpoint, apiKey: apiKey, model: model, timeoutSec: max(config.llmTimeoutSec, 30))
     }
 
     private func performRequest(_ template: RequestTemplate, system: String, user: String, cwd: String?) throws -> String {
         throttle.wait()
         defer { throttle.signal() }
         switch template {
-        case let .http(endpoint, apiKey, model):
-            return try performHTTPRequest(endpoint: endpoint, apiKey: apiKey, model: model, system: system, user: user)
-        case let .claudeCode(executable, model, timeoutSec):
-            return try performClaudeCodeRequest(executable: executable, model: model, timeoutSec: timeoutSec, system: system, user: user, cwd: cwd)
+        case let .http(endpoint, apiKey, model, timeoutSec):
+            return try performHTTPRequest(
+                endpoint: endpoint,
+                apiKey: apiKey,
+                model: model,
+                timeoutSec: timeoutSec,
+                system: system,
+                user: user
+            )
+        case let .cli(template):
+            return try performCLIRequest(template: template, system: system, user: user, cwd: cwd)
         }
     }
 
-    private func performHTTPRequest(endpoint: URL, apiKey: String, model: String, system: String, user: String) throws -> String {
+    private func performHTTPRequest(
+        endpoint: URL,
+        apiKey: String,
+        model: String,
+        timeoutSec: Int,
+        system: String,
+        user: String
+    ) throws -> String {
         let payload: [String: Any] = [
             "model": model,
             "temperature": 0.1,
@@ -2695,7 +2892,7 @@ private final class DigestLLMClient {
         let body = try JSONSerialization.data(withJSONObject: payload)
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 30
+        request.timeoutInterval = TimeInterval(timeoutSec)
         request.httpBody = body
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -2711,7 +2908,11 @@ private final class DigestLLMClient {
             semaphore.signal()
         }
         task.resume()
-        semaphore.wait()
+        let waitResult = semaphore.wait(timeout: .now() + .seconds(timeoutSec + 5))
+        if waitResult == .timedOut {
+            task.cancel()
+            throw DigestLLMTimeoutError(description: "HTTP LLM exceeded \(timeoutSec)s hard timeout")
+        }
 
         if let responseError { throw responseError }
         guard let http = response as? HTTPURLResponse else {
@@ -2730,14 +2931,27 @@ private final class DigestLLMClient {
         return content
     }
 
-    private func performClaudeCodeRequest(
-        executable: String,
-        model: String,
-        timeoutSec: Int,
+    private func performCLIRequest(
+        template: CLIRequestTemplate,
         system: String,
         user: String,
         cwd: String?
     ) throws -> String {
+        switch template.kind {
+        case .claudeCode:
+            return try performClaudeCodeCLIRequest(template: template, system: system, user: user, cwd: cwd)
+        case .codex:
+            return try performCodexCLIRequest(template: template, system: system, user: user, cwd: cwd)
+        }
+    }
+
+    private func performClaudeCodeCLIRequest(
+        template: CLIRequestTemplate,
+        system: String,
+        user: String,
+        cwd: String?
+    ) throws -> String {
+        let model = template.model?.trimmedNonEmpty ?? "haiku"
         let arguments = [
             "-p", user,
             "--output-format", "json",
@@ -2746,7 +2960,88 @@ private final class DigestLLMClient {
             "--allowed-tools", "",
             "--model", model
         ]
+        let result = try runMonitoredCLI(
+            providerName: template.providerName,
+            executable: template.executable,
+            arguments: arguments,
+            cwd: cwd,
+            timeoutSec: template.timeoutSec
+        )
+        try requireSuccessfulCLIExit(result, providerName: template.providerName)
 
+        guard let envelope = try? JSONSerialization.jsonObject(with: result.stdoutData) as? [String: Any] else {
+            let raw = (String(data: result.stdoutData, encoding: .utf8) ?? "").truncated(400)
+            throw DigestError(description: "\(template.providerName) CLI stdout was not JSON: \(raw)")
+        }
+        if let isError = envelope["is_error"] as? Bool, isError {
+            let message = (envelope["result"] as? String)?.truncated(400)
+                ?? (envelope["error"] as? String)?.truncated(400)
+                ?? "unknown error"
+            throw DigestError(description: "\(template.providerName) CLI reported error: \(message)")
+        }
+        guard let resultText = envelope["result"] as? String, !resultText.isEmpty else {
+            throw DigestError(description: "\(template.providerName) CLI response did not contain non-empty result")
+        }
+        return resultText
+    }
+
+    private func performCodexCLIRequest(
+        template: CLIRequestTemplate,
+        system: String,
+        user: String,
+        cwd: String?
+    ) throws -> String {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-digest-codex-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+
+        var arguments = [
+            "exec",
+            "--output-last-message", outputURL.path,
+            "--config", "approval_policy=\"never\"",
+            "--sandbox", "read-only",
+            "--skip-git-repo-check",
+            "--ephemeral",
+            "--ignore-rules",
+            "--color", "never"
+        ]
+        if let model = template.model?.trimmedNonEmpty {
+            arguments += ["--model", model]
+        }
+        if let cwdPath = validDirectoryPath(cwd) {
+            arguments += ["--cd", cwdPath]
+        }
+
+        // Codex exec has no dedicated system-prompt flag, so keep the digest
+        // contract ahead of the user payload in the single noninteractive prompt.
+        arguments.append(system + "\n\n" + user)
+
+        let result = try runMonitoredCLI(
+            providerName: template.providerName,
+            executable: template.executable,
+            arguments: arguments,
+            cwd: cwd,
+            timeoutSec: template.timeoutSec
+        )
+        try requireSuccessfulCLIExit(result, providerName: template.providerName)
+
+        if let output = try? String(contentsOf: outputURL, encoding: .utf8),
+           let trimmed = output.trimmedNonEmpty {
+            return trimmed
+        }
+        if let stdout = String(data: result.stdoutData, encoding: .utf8)?.trimmedNonEmpty {
+            return stdout
+        }
+        throw DigestError(description: "\(template.providerName) CLI response did not contain non-empty final message")
+    }
+
+    private func runMonitoredCLI(
+        providerName: String,
+        executable: String,
+        arguments: [String],
+        cwd: String?,
+        timeoutSec: Int
+    ) throws -> CLIExecutionResult {
         let process = Process()
         if executable.contains("/") {
             process.executableURL = URL(fileURLWithPath: executable)
@@ -2756,16 +3051,10 @@ private final class DigestLLMClient {
             process.arguments = [executable] + arguments
         }
 
-        // Run claude-code in the workspace's dominant pane cwd so its tooling
-        // (git context, project config files, etc.) resolves the right repo.
-        // If the path is missing or not a directory, leave Process to inherit
-        // the daemon's cwd rather than crashing the whole digest pipeline.
-        if let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty {
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory),
-               isDirectory.boolValue {
-                process.currentDirectoryURL = URL(fileURLWithPath: cwd, isDirectory: true)
-            }
+        // Run the CLI in the workspace's dominant pane cwd so repository context
+        // resolves correctly. Missing paths fall back to the daemon's cwd.
+        if let cwdPath = validDirectoryPath(cwd) {
+            process.currentDirectoryURL = URL(fileURLWithPath: cwdPath, isDirectory: true)
         }
 
         let stdout = Pipe()
@@ -2773,44 +3062,83 @@ private final class DigestLLMClient {
         process.standardOutput = stdout
         process.standardError = stderr
 
-        try process.run()
-
-        let timeoutItem = DispatchWorkItem { [weak process] in
-            guard let process, process.isRunning else { return }
-            process.terminate()
+        let watchdog = DigestProcessWatchdog(process: process, providerName: providerName, timeoutSec: timeoutSec)
+        let stdoutBuffer = DigestProcessOutputBuffer()
+        let stderrBuffer = DigestProcessOutputBuffer()
+        stdout.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            stdoutBuffer.append(data)
+            watchdog.markOutput()
         }
-        DispatchQueue.global(qos: .utility).asyncAfter(
-            deadline: .now() + .seconds(timeoutSec),
-            execute: timeoutItem
-        )
+        stderr.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
+            stderrBuffer.append(data)
+            watchdog.markOutput()
+        }
+        defer {
+            stdout.fileHandleForReading.readabilityHandler = nil
+            stderr.fileHandleForReading.readabilityHandler = nil
+        }
 
+        do {
+            try process.run()
+        } catch {
+            throw DigestError(description: "\(providerName) CLI failed to start: \(error)")
+        }
+        watchdog.start()
         process.waitUntilExit()
-        timeoutItem.cancel()
 
-        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+        let timeoutDescription = watchdog.finish()
+        stdout.fileHandleForReading.readabilityHandler = nil
+        stderr.fileHandleForReading.readabilityHandler = nil
+        stdoutBuffer.append(stdout.fileHandleForReading.readDataToEndOfFile())
+        stderrBuffer.append(stderr.fileHandleForReading.readDataToEndOfFile())
+        let stdoutData = stdoutBuffer.data()
+        let stderrData = stderrBuffer.data()
 
-        guard process.terminationStatus == 0 else {
-            let message = (String(data: stderrData, encoding: .utf8) ?? "")
+        if let timeoutDescription {
+            let stderrMessage = (String(data: stderrData, encoding: .utf8) ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-                .truncated(400)
-            throw DigestError(description: "claude-code exited with status \(process.terminationStatus): \(message)")
+                .truncated(240)
+            let suffix = stderrMessage.isEmpty ? "" : ": \(stderrMessage)"
+            throw DigestLLMTimeoutError(description: "\(timeoutDescription)\(suffix)")
         }
 
-        guard let envelope = try? JSONSerialization.jsonObject(with: stdoutData) as? [String: Any] else {
-            let raw = (String(data: stdoutData, encoding: .utf8) ?? "").truncated(400)
-            throw DigestError(description: "claude-code stdout was not JSON: \(raw)")
+        return CLIExecutionResult(
+            stdoutData: stdoutData,
+            stderrData: stderrData,
+            status: process.terminationStatus
+        )
+    }
+
+    private func requireSuccessfulCLIExit(_ result: CLIExecutionResult, providerName: String) throws {
+        guard result.status == 0 else {
+            let stderrMessage = String(data: result.stderrData, encoding: .utf8)?.trimmedNonEmpty
+            let stdoutMessage = String(data: result.stdoutData, encoding: .utf8)?.trimmedNonEmpty
+            let message = (stderrMessage ?? stdoutMessage ?? "")
+                .truncated(400)
+            throw DigestError(description: "\(providerName) CLI exited with status \(result.status): \(message)")
         }
-        if let isError = envelope["is_error"] as? Bool, isError {
-            let message = (envelope["result"] as? String)?.truncated(400)
-                ?? (envelope["error"] as? String)?.truncated(400)
-                ?? "unknown error"
-            throw DigestError(description: "claude-code reported error: \(message)")
+    }
+
+    private func validDirectoryPath(_ cwd: String?) -> String? {
+        guard let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty else {
+            return nil
         }
-        guard let result = envelope["result"] as? String, !result.isEmpty else {
-            throw DigestError(description: "claude-code response did not contain non-empty result")
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return nil
         }
-        return result
+        return cwd
     }
 
     private func retryUserPrompt(_ user: String, attempt: Int, lastError: Error?) -> String {
