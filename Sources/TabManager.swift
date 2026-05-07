@@ -734,7 +734,7 @@ fileprivate func cmuxVsyncIOSurfaceTimelineCallback(
 
 @MainActor
 class TabManager: ObservableObject {
-    private enum WorkspacePullRequestSnapshot: Equatable {
+    private enum WorkspacePullRequestSnapshot: Equatable, Sendable {
         case deferred
         case unsupportedRepository
         case notFound
@@ -742,7 +742,7 @@ class TabManager: ObservableObject {
         case transientFailure
     }
 
-    private struct InitialWorkspaceGitMetadataSnapshot: Equatable {
+    private struct InitialWorkspaceGitMetadataSnapshot: Equatable, Sendable {
         let branch: String?
         let isDirty: Bool
         let pullRequest: WorkspacePullRequestSnapshot
@@ -852,7 +852,7 @@ class TabManager: ObservableObject {
         case transientFailure
     }
 
-    private enum WorkspacePullRequestBranchFetchResult: Sendable, Equatable {
+    private enum WorkspacePullRequestFetchResult: Sendable, Equatable {
         case found(GitHubPullRequestProbeItem)
         case notFound
         case rateLimited(until: Date)
@@ -2183,6 +2183,25 @@ class TabManager: ObservableObject {
         ]
     }
 
+    nonisolated static func detachedHeadPullRequestStateForTesting(
+        repoSlugs: [String],
+        commitSHA: String,
+        session: URLSession,
+        authHeader: String?
+    ) async -> SidebarPullRequestState? {
+        switch await detachedHeadPullRequestSnapshot(
+            repoSlugs: repoSlugs,
+            commitSHA: commitSHA,
+            session: session,
+            authHeader: authHeader
+        ) {
+        case .resolved(let state):
+            return state
+        case .deferred, .unsupportedRepository, .notFound, .transientFailure:
+            return nil
+        }
+    }
+
     private func trackedWorkspaceGitMetadataPollCandidatePanelIds(
         in workspace: Workspace,
         activeProbeKeys: Set<WorkspaceGitProbeKey>
@@ -2916,23 +2935,92 @@ class TabManager: ObservableObject {
     private nonisolated static func initialWorkspaceGitMetadataSnapshot(
         for directory: String
     ) async -> InitialWorkspaceGitMetadataSnapshot {
-        let branchOutput = await runGitCommand(directory: directory, arguments: ["branch", "--show-current"])
+        async let branchOutputTask = runGitCommand(directory: directory, arguments: ["branch", "--show-current"])
+        async let statusOutputTask = runGitCommand(directory: directory, arguments: ["status", "--porcelain", "-uno"])
+        let (branchOutput, statusOutput) = await (branchOutputTask, statusOutputTask)
         let branch = normalizedBranchName(branchOutput)
+        let isDirty = !(statusOutput?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+
         guard let branch else {
+            async let headOutputTask = runGitCommand(directory: directory, arguments: ["rev-parse", "HEAD"])
+            async let repoSlugsTask = githubRepositorySlugs(directory: directory)
+            let (headOutput, repoSlugs) = await (headOutputTask, repoSlugsTask)
+            let pullRequest: WorkspacePullRequestSnapshot
+            if let commitSHA = normalizedCommitSHA(headOutput) {
+                pullRequest = await detachedHeadPullRequestSnapshot(
+                    repoSlugs: repoSlugs,
+                    commitSHA: commitSHA
+                )
+            } else {
+                pullRequest = .notFound
+            }
             return InitialWorkspaceGitMetadataSnapshot(
                 branch: nil,
-                isDirty: false,
-                pullRequest: .notFound
+                isDirty: isDirty,
+                pullRequest: pullRequest
             )
         }
 
-        let statusOutput = await runGitCommand(directory: directory, arguments: ["status", "--porcelain", "-uno"])
-        let isDirty = !(statusOutput?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
         return InitialWorkspaceGitMetadataSnapshot(
             branch: branch,
             isDirty: isDirty,
             pullRequest: .deferred
         )
+    }
+
+    private nonisolated static func detachedHeadPullRequestSnapshot(
+        repoSlugs: [String],
+        commitSHA: String,
+        session: URLSession? = nil,
+        authHeader: String? = nil
+    ) async -> WorkspacePullRequestSnapshot {
+        let normalizedRepoSlugs = repoSlugs.compactMap(normalizedGitHubRepositorySlug)
+        guard !normalizedRepoSlugs.isEmpty else { return .unsupportedRepository }
+
+        let resolvedSession: URLSession
+        if let session {
+            resolvedSession = session
+        } else {
+            let configuration = URLSessionConfiguration.ephemeral
+            configuration.timeoutIntervalForRequest = max(Self.workspacePullRequestProbeTimeout, 8)
+            configuration.timeoutIntervalForResource = max(Self.workspacePullRequestProbeTimeout, 8)
+            resolvedSession = URLSession(configuration: configuration)
+        }
+
+        let resolvedAuthHeader: String?
+        if let authHeader {
+            resolvedAuthHeader = authHeader
+        } else {
+            resolvedAuthHeader = await workspacePullRequestAuthHeaderValue()
+        }
+
+        var latestRateLimitedUntil: Date?
+        var sawTransientFailure = false
+        for repoSlug in normalizedRepoSlugs {
+            switch await workspacePullRequestCommitFetchResult(
+                repoSlug: repoSlug,
+                commitSHA: commitSHA,
+                session: resolvedSession,
+                authHeader: resolvedAuthHeader
+            ) {
+            case .found(let pullRequest):
+                guard let state = sidebarPullRequestState(from: pullRequest, branch: nil) else {
+                    return .transientFailure
+                }
+                return .resolved(state)
+            case .notFound:
+                continue
+            case .rateLimited(let until):
+                latestRateLimitedUntil = max(latestRateLimitedUntil ?? .distantPast, until)
+            case .transientFailure:
+                sawTransientFailure = true
+            }
+        }
+
+        if latestRateLimitedUntil != nil || sawTransientFailure {
+            return .transientFailure
+        }
+        return .notFound
     }
 
     private nonisolated static func runGitCommand(directory: String, arguments: [String]) async -> String? {
@@ -3264,8 +3352,8 @@ class TabManager: ObservableObject {
         }
 
         let branchResults = await withTaskGroup(
-            of: (String, WorkspacePullRequestBranchFetchResult).self,
-            returning: [(String, WorkspacePullRequestBranchFetchResult)].self
+            of: (String, WorkspacePullRequestFetchResult).self,
+            returning: [(String, WorkspacePullRequestFetchResult)].self
         ) { group in
             for branch in candidateBranches {
                 group.addTask {
@@ -3279,7 +3367,7 @@ class TabManager: ObservableObject {
                 }
             }
 
-            var collected: [(String, WorkspacePullRequestBranchFetchResult)] = []
+            var collected: [(String, WorkspacePullRequestFetchResult)] = []
             for await result in group {
                 collected.append(result)
             }
@@ -3322,7 +3410,7 @@ class TabManager: ObservableObject {
         branch: String,
         session: URLSession,
         authHeader: String?
-    ) async -> WorkspacePullRequestBranchFetchResult {
+    ) async -> WorkspacePullRequestFetchResult {
         guard let endpoint = workspacePullRequestBranchEndpoint(
             repoSlug: repoSlug,
             branch: branch
@@ -3376,6 +3464,66 @@ class TabManager: ObservableObject {
         return .notFound
     }
 
+    private nonisolated static func workspacePullRequestCommitFetchResult(
+        repoSlug: String,
+        commitSHA: String,
+        session: URLSession,
+        authHeader: String?
+    ) async -> WorkspacePullRequestFetchResult {
+        guard let endpoint = workspacePullRequestCommitEndpoint(
+            repoSlug: repoSlug,
+            commitSHA: commitSHA
+        ) else {
+            return .transientFailure
+        }
+
+        guard let response = await performWorkspacePullRequestRequest(
+            session: session,
+            endpoint: endpoint,
+            authHeader: authHeader
+        ) else {
+#if DEBUG
+            cmuxDebugLog("workspace.gitProbe.detachedPR.fail repo=\(repoSlug) status=nil")
+#endif
+            return .transientFailure
+        }
+
+        if response.statusCode == 404 {
+            return .notFound
+        }
+        if response.statusCode != 200 {
+#if DEBUG
+            cmuxDebugLog(
+                "workspace.gitProbe.detachedPR.fail repo=\(repoSlug) status=\(response.statusCode)"
+            )
+#endif
+            switch classifyWorkspacePullRequestHTTPFailure(
+                statusCode: response.statusCode,
+                retryAfter: response.retryAfter,
+                rateLimitRemaining: response.rateLimitRemaining,
+                rateLimitReset: response.rateLimitReset,
+                body: response.data,
+                now: Date()
+            ) {
+            case .rateLimited(let retryAt):
+                return .rateLimited(until: retryAt)
+            case .transientFailure:
+                return .transientFailure
+            }
+        }
+
+        guard let pullRequests = decodeJSON([WorkspacePullRequestRESTItem].self, from: response.data) else {
+            return .transientFailure
+        }
+
+        if let preferredPullRequest = preferredPullRequest(
+            from: pullRequests.map(Self.workspacePullRequestProbeItem)
+        ) {
+            return .found(preferredPullRequest)
+        }
+        return .notFound
+    }
+
     private nonisolated static func workspacePullRequestBranchEndpoint(
         repoSlug: String,
         branch: String
@@ -3399,6 +3547,17 @@ class TabManager: ObservableObject {
             return nil
         }
         return "repos/\(repoSlug)/pulls?\(percentEncodedQuery)"
+    }
+
+    private nonisolated static func workspacePullRequestCommitEndpoint(
+        repoSlug: String,
+        commitSHA: String
+    ) -> String? {
+        guard let normalizedRepoSlug = normalizedGitHubRepositorySlug(repoSlug),
+              let normalizedSHA = normalizedCommitSHA(commitSHA) else {
+            return nil
+        }
+        return "repos/\(normalizedRepoSlug)/commits/\(normalizedSHA)/pulls"
     }
 
     private nonisolated static func workspacePullRequestProbeItem(
@@ -3607,6 +3766,25 @@ class TabManager: ObservableObject {
         }
 
         return pullRequestsByBranch
+    }
+
+    private nonisolated static func sidebarPullRequestState(
+        from pullRequest: GitHubPullRequestProbeItem,
+        branch: String?
+    ) -> SidebarPullRequestState? {
+        guard let status = pullRequestStatus(from: pullRequest.state),
+              let url = URL(string: pullRequest.url),
+              isSidebarPullRequestCandidate(pullRequest, now: Date()) else {
+            return nil
+        }
+        return SidebarPullRequestState(
+            number: pullRequest.number,
+            label: "PR",
+            url: url,
+            status: status,
+            branch: branch,
+            isStale: false
+        )
     }
 
     nonisolated static func preferredPullRequest(
@@ -4207,6 +4385,17 @@ class TabManager: ObservableObject {
     private nonisolated static func normalizedBranchName(_ branch: String?) -> String? {
         let trimmed = branch?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static let hexCharacterSet = CharacterSet(charactersIn: "0123456789abcdefABCDEF")
+
+    private nonisolated static func normalizedCommitSHA(_ rawSHA: String?) -> String? {
+        let trimmed = rawSHA?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !trimmed.isEmpty else { return nil }
+        guard trimmed.unicodeScalars.allSatisfy({ hexCharacterSet.contains($0) }) else {
+            return nil
+        }
+        return trimmed
     }
 
     nonisolated static func shouldSkipWorkspacePullRequestLookup(branch: String) -> Bool {

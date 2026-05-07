@@ -6651,7 +6651,7 @@ struct WorkspaceRemoteConfiguration: Equatable {
     }
 }
 
-enum SidebarPullRequestStatus: String {
+enum SidebarPullRequestStatus: String, Sendable {
     case open
     case merged
     case closed
@@ -6663,7 +6663,7 @@ private func normalizedSidebarBranchName(_ branch: String?) -> String? {
     return trimmed.isEmpty ? nil : trimmed
 }
 
-struct SidebarPullRequestState: Equatable {
+struct SidebarPullRequestState: Equatable, Sendable {
     let number: Int
     let label: String
     let url: URL

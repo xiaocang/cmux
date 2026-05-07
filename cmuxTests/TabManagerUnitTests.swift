@@ -40,6 +40,35 @@ private final class WorkspacePullRequestProbeTestURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
+private final class WorkspaceDetachedPullRequestProbeTestURLProtocol: URLProtocol {
+    static var requestedPaths: [String] = []
+    static var responseStatusCode = 200
+    static var responseBody = Data()
+
+    override class func canInit(with request: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        Self.requestedPaths.append(request.url?.path ?? "")
+        let response = HTTPURLResponse(
+            url: request.url ?? URL(string: "https://example.com")!,
+            statusCode: Self.responseStatusCode,
+            httpVersion: "HTTP/1.1",
+            headerFields: [:]
+        )!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.responseBody)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+}
+
 let lastSurfaceCloseShortcutDefaultsKey = "closeWorkspaceOnLastSurfaceShortcut"
 
 func drainMainQueue() {
@@ -741,6 +770,45 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
 
         XCTAssertEqual(result, .rateLimited(until: retryAt))
         XCTAssertEqual(WorkspacePullRequestProbeTestURLProtocol.requestCount, 0)
+    }
+
+    func testDetachedHeadPullRequestLookupUsesCommitAssociatedPullsEndpoint() async throws {
+        let commitSHA = "0123456789abcdef0123456789abcdef01234567"
+        WorkspaceDetachedPullRequestProbeTestURLProtocol.requestedPaths = []
+        WorkspaceDetachedPullRequestProbeTestURLProtocol.responseStatusCode = 200
+        WorkspaceDetachedPullRequestProbeTestURLProtocol.responseBody = Data(
+            """
+            [
+              {
+                "number": 3124,
+                "state": "open",
+                "html_url": "https://github.com/manaflow-ai/cmux/pull/3124",
+                "updated_at": "2026-05-06T16:00:00Z",
+                "merged_at": null,
+                "head": { "ref": "feature/detached-pr" },
+                "base": { "ref": "main" }
+              }
+            ]
+            """.utf8
+        )
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WorkspaceDetachedPullRequestProbeTestURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+
+        let state = await TabManager.detachedHeadPullRequestStateForTesting(
+            repoSlugs: ["manaflow-ai/cmux"],
+            commitSHA: commitSHA,
+            session: session,
+            authHeader: ""
+        )
+
+        XCTAssertEqual(
+            WorkspaceDetachedPullRequestProbeTestURLProtocol.requestedPaths,
+            ["/repos/manaflow-ai/cmux/commits/\(commitSHA)/pulls"]
+        )
+        XCTAssertEqual(state?.number, 3124)
+        XCTAssertEqual(state?.status, .open)
+        XCTAssertNil(state?.branch)
     }
 
     func testScheduleWorkspacePullRequestRefreshRunsImmediatelyWhenShellDebounceDisabled() {

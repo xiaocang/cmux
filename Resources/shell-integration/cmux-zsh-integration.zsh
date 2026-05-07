@@ -761,18 +761,30 @@ _cmux_report_pr_for_path() {
     [[ -n "$CMUX_TAB_ID" ]] || return 0
     [[ -n "$CMUX_PANEL_ID" ]] || return 0
 
-    local branch repo_slug="" gh_output="" gh_error="" err_file="" number state url status_opt="" gh_status
+    local branch commit_sha="" ref_key="" repo_slug="" gh_output="" gh_error="" err_file="" number state url status_opt="" gh_status
     local now="${EPOCHSECONDS:-$SECONDS}"
     local prefix="" branch_file="" repo_file="" result_file="" timestamp_file="" no_pr_branch_file=""
     local cache_branch="" cache_result="" cache_no_pr_branch=""
     local -a gh_repo_args
     gh_repo_args=()
-    branch="$(git -C "$repo_path" branch --show-current 2>/dev/null)"
-    if [[ -z "$branch" ]] || ! command -v gh >/dev/null 2>&1; then
+    if ! command -v gh >/dev/null 2>&1; then
         _cmux_pr_debug_log "$branch" "cache-miss:clear"
         _cmux_pr_cache_clear
         _cmux_clear_pr_for_panel
         return 0
+    fi
+    branch="$(git -C "$repo_path" branch --show-current 2>/dev/null)"
+    if [[ -n "$branch" ]]; then
+        ref_key="$branch"
+    else
+        commit_sha="$(git -C "$repo_path" rev-parse HEAD 2>/dev/null)"
+        if [[ -z "$commit_sha" ]]; then
+            _cmux_pr_debug_log "$branch" "cache-miss:clear"
+            _cmux_pr_cache_clear
+            _cmux_clear_pr_for_panel
+            return 0
+        fi
+        ref_key="commit:$commit_sha"
     fi
 
     prefix="$(_cmux_pr_cache_prefix 2>/dev/null || true)"
@@ -789,10 +801,10 @@ _cmux_report_pr_for_path() {
 
     _CMUX_PR_LAST_BRANCH="$cache_branch"
     _CMUX_PR_NO_PR_BRANCH="$cache_no_pr_branch"
-    if [[ "$cache_branch" == "$branch" && -n "$cache_result" ]]; then
-        _cmux_pr_debug_log "$branch" "cache-refresh"
+    if [[ "$cache_branch" == "$ref_key" && -n "$cache_result" ]]; then
+        _cmux_pr_debug_log "$ref_key" "cache-refresh"
     else
-        _cmux_pr_debug_log "$branch" "cache-miss"
+        _cmux_pr_debug_log "$ref_key" "cache-miss"
     fi
 
     repo_slug="$(_cmux_github_repo_slug_for_path "$repo_path")"
@@ -802,14 +814,29 @@ _cmux_report_pr_for_path() {
 
     err_file="$(/usr/bin/mktemp "${TMPDIR:-/tmp}/cmux-gh-pr-view.XXXXXX" 2>/dev/null || true)"
     [[ -n "$err_file" ]] || return 1
-    gh_output="$(
-        builtin cd "$repo_path" 2>/dev/null \
-            && gh pr view "$branch" \
-                "${gh_repo_args[@]}" \
-                --json number,state,url \
-                --jq '[.number, .state, .url] | @tsv' \
-                2>"$err_file"
-    )"
+    if [[ -n "$branch" ]]; then
+        gh_output="$(
+            builtin cd "$repo_path" 2>/dev/null \
+                && gh pr view "$branch" \
+                    "${gh_repo_args[@]}" \
+                    --json number,state,url \
+                    --jq '[.number, .state, .url] | @tsv' \
+                    2>"$err_file"
+        )"
+    else
+        local endpoint=""
+        if [[ -n "$repo_slug" ]]; then
+            endpoint="repos/${repo_slug}/commits/${commit_sha}/pulls"
+        else
+            endpoint="repos/{owner}/{repo}/commits/${commit_sha}/pulls"
+        fi
+        gh_output="$(
+            builtin cd "$repo_path" 2>/dev/null \
+                && gh api "$endpoint" \
+                    --jq '.[0] | select(. != null) | [.number, (if .merged_at then "MERGED" elif .state == "open" then "OPEN" elif .state == "closed" then "CLOSED" else (.state // "") end), .html_url] | @tsv' \
+                    2>"$err_file"
+        )"
+    fi
     gh_status=$?
     if [[ -f "$err_file" ]]; then
         gh_error="$("/bin/cat" -- "$err_file" 2>/dev/null || true)"
@@ -819,32 +846,32 @@ _cmux_report_pr_for_path() {
     if (( gh_status != 0 )) || [[ -z "$gh_output" ]]; then
         if (( gh_status == 0 )) && [[ -z "$gh_output" ]]; then
             if [[ -n "$prefix" ]]; then
-                print -r -- "$branch" >| "$branch_file"
+                print -r -- "$ref_key" >| "$branch_file"
                 print -r -- "$repo_path" >| "$repo_file"
                 print -r -- "$now" >| "$timestamp_file"
                 print -r -- "none" >| "$result_file"
-                print -r -- "$branch" >| "$no_pr_branch_file"
+                print -r -- "$ref_key" >| "$no_pr_branch_file"
             fi
-            _CMUX_PR_LAST_BRANCH="$branch"
-            _CMUX_PR_NO_PR_BRANCH="$branch"
+            _CMUX_PR_LAST_BRANCH="$ref_key"
+            _CMUX_PR_NO_PR_BRANCH="$ref_key"
             _cmux_clear_pr_for_panel
             return 0
         fi
         if _cmux_pr_output_indicates_no_pull_request "$gh_error"; then
             if [[ -n "$prefix" ]]; then
-                print -r -- "$branch" >| "$branch_file"
+                print -r -- "$ref_key" >| "$branch_file"
                 print -r -- "$repo_path" >| "$repo_file"
                 print -r -- "$now" >| "$timestamp_file"
                 print -r -- "none" >| "$result_file"
-                print -r -- "$branch" >| "$no_pr_branch_file"
+                print -r -- "$ref_key" >| "$no_pr_branch_file"
             fi
-            _CMUX_PR_LAST_BRANCH="$branch"
-            _CMUX_PR_NO_PR_BRANCH="$branch"
+            _CMUX_PR_LAST_BRANCH="$ref_key"
+            _CMUX_PR_NO_PR_BRANCH="$ref_key"
             _cmux_clear_pr_for_panel
             return 0
         fi
 
-        # Always scope PR detection to the exact current branch. When gh fails
+        # Always scope PR detection to the exact current branch or detached commit. When gh fails
         # transiently (auth hiccups, API lag, rate limiting), keep the last-known
         # badge and retry on the next poll instead of showing a mismatched PR.
         return 1
@@ -864,17 +891,21 @@ _cmux_report_pr_for_path() {
     esac
 
     if [[ -n "$prefix" ]]; then
-        print -r -- "$branch" >| "$branch_file"
+        print -r -- "$ref_key" >| "$branch_file"
         print -r -- "$repo_path" >| "$repo_file"
         print -r -- "$now" >| "$timestamp_file"
         printf '%s\t%s\t%s\t%s\n' "pr" "$number" "$state" "$url" >| "$result_file"
         /bin/rm -f -- "$no_pr_branch_file" >/dev/null 2>&1 || true
     fi
-    _CMUX_PR_LAST_BRANCH="$branch"
+    _CMUX_PR_LAST_BRANCH="$ref_key"
     _CMUX_PR_NO_PR_BRANCH=""
 
-    local quoted_branch="${branch//\"/\\\"}"
-    _cmux_send "report_pr $number $url $status_opt --branch=\"$quoted_branch\" --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+    if [[ -n "$branch" ]]; then
+        local quoted_branch="${branch//\"/\\\"}"
+        _cmux_send "report_pr $number $url $status_opt --branch=\"$quoted_branch\" --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+    else
+        _cmux_send "report_pr $number $url $status_opt --tab=$CMUX_TAB_ID --panel=$CMUX_PANEL_ID"
+    fi
 }
 
 _cmux_child_pids() {
