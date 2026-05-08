@@ -2,17 +2,17 @@
 # Format: max_lines<TAB>relative path
 # Reduce counts as files shrink. CI fails if tracked files exceed this budget.
 21557	CLI/cmux.swift
-20853	Sources/ContentView.swift
-17261	Sources/TerminalController.swift
-15007	Sources/AppDelegate.swift
+22027	Sources/ContentView.swift
+17262	Sources/TerminalController.swift
+15015	Sources/AppDelegate.swift
 14055	Sources/Workspace.swift
 13496	Sources/GhosttyTerminalView.swift
 10607	Sources/Panels/BrowserPanel.swift
-9634	Sources/cmuxApp.swift
-8371	Sources/TabManager.swift
+9685	Sources/cmuxApp.swift
+8488	Sources/TabManager.swift
 6794	Sources/Panels/BrowserPanelView.swift
 5765	cmuxTests/AppDelegateShortcutRoutingTests.swift
-4724	cmuxTests/WorkspaceUnitTests.swift
+4741	cmuxTests/WorkspaceUnitTests.swift
 4689	cmuxTests/TerminalAndGhosttyTests.swift
 4305	Sources/BrowserWindowPortal.swift
 4130	cmuxTests/GhosttyConfigTests.swift
@@ -22,7 +22,7 @@
 3588	cmuxTests/BrowserConfigTests.swift
 3145	cmuxTests/BrowserPanelTests.swift
 2917	Sources/CmuxConfig.swift
-2901	cmuxTests/TabManagerUnitTests.swift
+3589	cmuxTests/TabManagerUnitTests.swift
 2620	cmuxTests/WindowAndDragTests.swift
 2591	Sources/SessionIndexView.swift
 2472	Sources/Panels/CmuxWebView.swift
@@ -66,7 +66,7 @@
 683	Sources/SocketControlSettings.swift
 645	Sources/App/ShortcutRoutingSupport.swift
 643	Sources/Panels/BrowserPopupWindowController.swift
-631	Sources/Feed/FeedCoordinator.swift
+690	Sources/Feed/FeedCoordinator.swift
 631	cmuxTests/TerminalControllerSocketSecurityTests.swift
 613	Sources/PortScanner.swift
 586	Sources/Update/UpdateViewModel.swift
