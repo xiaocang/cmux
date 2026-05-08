@@ -7616,6 +7616,14 @@ struct ContentView: View {
                 when: { $0.bool(CommandPaletteContextKeys.hasWorkspace) }
             )
         )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.clearAllWorkspaceColors",
+                title: constant(String(localized: "command.clearAllWorkspaceColors.title", defaultValue: "Clear All Workspace Colors")),
+                subtitle: constant(String(localized: "command.clearAllWorkspaceColors.subtitle", defaultValue: "Workspace")),
+                keywords: ["workspace", "color", "clear", "all", "reset", "palette"]
+            )
+        )
         for entry in WorkspaceTabColorSettings.palette() {
             contributions.append(
                 CommandPaletteCommandContribution(
@@ -8414,6 +8422,9 @@ struct ContentView: View {
                 return
             }
             tabManager.applyWorkspaceColor(nil, toWorkspaceIds: [workspace.id])
+        }
+        registry.register(commandId: "palette.clearAllWorkspaceColors") {
+            AppDelegate.shared?.clearAllWorkspaceColors()
         }
         for entry in WorkspaceTabColorSettings.palette() {
             registry.register(commandId: commandPaletteWorkspaceColorCommandID(entry.name)) {

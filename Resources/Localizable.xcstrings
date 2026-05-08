@@ -16365,6 +16365,40 @@
         }
       }
     },
+    "command.clearAllWorkspaceColors.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペース"
+          }
+        }
+      }
+    },
+    "command.clearAllWorkspaceColors.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Clear All Workspace Colors"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "すべてのワークスペースカラーを消去"
+          }
+        }
+      }
+    },
     "command.clearWorkspaceDescription.title": {
       "extractionState": "manual",
       "localizations": {
