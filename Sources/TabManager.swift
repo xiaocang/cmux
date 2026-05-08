@@ -2136,7 +2136,6 @@ class TabManager: ObservableObject {
     /// Bypasses the per-key cooldown and repo-level cache so the next poll
     /// fetches fresh data from GitHub. Triggered by the sidebar refresh button.
     func forceRefreshAllWorkspacePullRequests() {
-        guard !workspacePullRequestNextPollAtByKey.isEmpty else { return }
         for key in workspacePullRequestNextPollAtByKey.keys {
             workspacePullRequestNextPollAtByKey[key] = .distantPast
         }

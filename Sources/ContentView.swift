@@ -10942,6 +10942,7 @@ struct VerticalTabsSidebar: View {
             WorkspaceSidebarModeHeader(
                 workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore,
                 onRefreshSidebarStatus: {
+                    tabManager.forceRefreshAllWorkspacePullRequests()
                     tabManager.refreshGHPRMetadataForSidebarPullRequests()
                 }
             )
