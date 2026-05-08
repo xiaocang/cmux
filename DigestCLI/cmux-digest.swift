@@ -159,6 +159,7 @@ private struct WorkspaceDigestDebug: Codable, Hashable {
     var tokenEstimate: Int?
     var summarySession: WorkspaceDigestCLISummarySession? = nil
     var inputSnapshot: WorkspaceDigestInputSnapshot? = nil
+    var budgetExpired: Bool? = nil
 }
 
 private struct WorkspaceDigest: Codable, Hashable {
@@ -677,6 +678,48 @@ private enum WorkspaceDigestRefreshLevel: String {
             return nil
         }
     }
+
+    var surfaceReadLimit: Int? {
+        switch self {
+        case .quickColdStart:
+            return 3
+        case .seed:
+            return 6
+        case .full:
+            return nil
+        }
+    }
+
+    var softBudgetSeconds: TimeInterval {
+        switch self {
+        case .quickColdStart:
+            return 3
+        case .seed:
+            return 6
+        case .full:
+            return 10
+        }
+    }
+}
+
+private struct DigestRefreshBudget {
+    let startedAt: Date
+    let deadline: Date
+
+    init(level: WorkspaceDigestRefreshLevel, now: Date = Date()) {
+        startedAt = now
+        deadline = now.addingTimeInterval(level.softBudgetSeconds)
+    }
+
+    var isExpired: Bool {
+        Date() >= deadline
+    }
+
+    func remainingTimeoutSeconds(minimum: Int = 1) -> Int? {
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > Double(minimum) else { return nil }
+        return max(minimum, Int(ceil(remaining)))
+    }
 }
 
 private struct DigestProgressSnapshot: Codable, Hashable {
@@ -703,6 +746,7 @@ private struct DigestConfig {
     var codexPath: String?
     var llmTimeoutSec: Int
     var maxConcurrentLLM: Int
+    var maxConcurrentWorkspacePipelines: Int
     var currentWorkspaceMinIntervalSec: Int
     var backgroundMinIntervalSec: Int
     var screenLines: Int
@@ -735,6 +779,16 @@ private struct DigestConfig {
             ?? env["GHPR_SOCKET_PATH"]?.trimmedNonEmpty
             ?? settings.string(in: "ghpr", key: "socketPath")?.trimmedNonEmpty
             ?? Self.defaultGHPRSocketPath()
+        let maxConcurrentLLM = max(
+            1,
+            Int(env["CMUX_DIGEST_MAX_CONCURRENT_LLM"] ?? "") ?? settings.int("maxConcurrentLLM") ?? 3
+        )
+        let maxConcurrentWorkspacePipelines = max(
+            maxConcurrentLLM,
+            Int(env["CMUX_DIGEST_MAX_CONCURRENT_WORKSPACES"] ?? "")
+                ?? settings.int("maxConcurrentWorkspacePipelines")
+                ?? max(12, maxConcurrentLLM * 4)
+        )
         return DigestConfig(
             appSupportDirectory: appSupport,
             cmuxPath: env["CMUX_DIGEST_CMUX"] ?? settings.string("cmuxPath") ?? CmuxBinaryLocator.find(),
@@ -745,7 +799,8 @@ private struct DigestConfig {
             claudeCodeModel: env["CMUX_DIGEST_CLAUDE_MODEL"] ?? settings.string("claudeCodeModel"),
             codexPath: env["CMUX_DIGEST_CODEX_PATH"] ?? settings.string("codexPath"),
             llmTimeoutSec: Int(env["CMUX_DIGEST_LLM_TIMEOUT"] ?? "") ?? settings.int("llmTimeoutSec") ?? 180,
-            maxConcurrentLLM: max(1, Int(env["CMUX_DIGEST_MAX_CONCURRENT_LLM"] ?? "") ?? settings.int("maxConcurrentLLM") ?? 3),
+            maxConcurrentLLM: maxConcurrentLLM,
+            maxConcurrentWorkspacePipelines: maxConcurrentWorkspacePipelines,
             currentWorkspaceMinIntervalSec: Int(env["CMUX_DIGEST_CURRENT_INTERVAL"] ?? "") ?? settings.int("currentWorkspaceMinIntervalSec") ?? 45,
             backgroundMinIntervalSec: Int(env["CMUX_DIGEST_BACKGROUND_INTERVAL"] ?? "") ?? settings.int("backgroundMinIntervalSec") ?? 300,
             screenLines: Int(env["CMUX_DIGEST_SCREEN_LINES"] ?? "") ?? settings.int("screenLines") ?? 160,
@@ -786,6 +841,57 @@ private struct DigestConfig {
 
     private static func defaultGHPRSocketPath() -> String {
         "/tmp/com.xiaocang.PRDashboard.\(getuid()).sock"
+    }
+}
+
+private enum DigestDebugLog {
+    private static let enabled: Bool = {
+        let env = ProcessInfo.processInfo.environment
+        if let raw = env["CMUX_DIGEST_DEBUG_LOG"] ?? env["CMUX_DIGEST_DEBUG"] {
+            return truthy(raw)
+        }
+#if DEBUG
+        return true
+#else
+        return false
+#endif
+    }()
+
+    static func event(_ name: String, fields: [String: Any] = [:]) {
+        guard enabled else { return }
+        let pairs = fields
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\(format($0.value))" }
+            .joined(separator: " ")
+        let suffix = pairs.isEmpty ? "" : " \(pairs)"
+        fputs("cmux-digest-debug ts=\(SharedISO8601.formatter.string(from: Date())) event=\(name)\(suffix)\n", stderr)
+    }
+
+    static func elapsedMs(since start: Date) -> Int {
+        max(0, Int(Date().timeIntervalSince(start) * 1_000))
+    }
+
+    static func remainingMs(until deadline: Date?) -> Int {
+        guard let deadline else { return -1 }
+        return max(0, Int(deadline.timeIntervalSinceNow * 1_000))
+    }
+
+    static func summaryChars(_ summary: DigestSummary) -> Int {
+        summary.short.count + summary.detailed.count
+    }
+
+    private static func truthy(_ raw: String) -> Bool {
+        ["1", "true", "yes", "on"].contains(raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+    }
+
+    private static func format(_ value: Any) -> String {
+        var output = String(describing: value)
+        output = output
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
+            .replacingOccurrences(of: " ", with: "_")
+        return output.truncated(240)
     }
 }
 
@@ -2873,40 +2979,88 @@ private final class DigestLLMClient {
     func surfaceDigests(
         requests: [SurfaceDigestLLMRequest],
         workspaceCwd: String?,
-        allSurfaces: [CmuxSurfaceRef]
+        allSurfaces: [CmuxSurfaceRef],
+        deadline: Date? = nil
     ) -> [String: SurfaceDigest] {
+        let startedAt = Date()
         var output: [String: SurfaceDigest] = [:]
         let context = surfaceBatchContext(
             requests: requests,
             workspaceCwd: workspaceCwd,
             allSurfaces: allSurfaces
         )
-        for batch in surfaceDigestBatches(requests, context: context) {
+        let batches = surfaceDigestBatches(requests, context: context)
+        DigestDebugLog.event("llm.surface.batch.start", fields: [
+            "requests": requests.count,
+            "batches": batches.count,
+            "deadlineRemainingMs": DigestDebugLog.remainingMs(until: deadline)
+        ])
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var skippedBatches = 0
+        for (batchIndex, batch) in batches.enumerated() {
             guard !batch.entries.isEmpty else { continue }
-            let batchOutput: [String: SurfaceDigest]? = requestJSON(
-                system: surfaceBatchSystemPrompt,
-                user: surfaceBatchUserPrompt(context: context, entries: batch.entries),
-                cwd: workspaceCwd ?? batch.entries.first?.request.surface.cwd
-            ) { content in
-                let data = try Self.jsonData(from: content)
-                let decoded = try JSONDecoder().decode(SurfaceDigestBatchLLMOutput.self, from: data)
-                var merged: [String: SurfaceDigest] = [:]
-                for entry in batch.entries {
-                    let request = entry.request
-                    guard let item = decoded.surfaces[request.surface.id] else { continue }
-                    do {
-                        try DigestSchemaValidator.validate(item)
-                        merged[request.surface.id] = Self.merge(item, into: request.fallback)
-                    } catch {
-                        continue
-                    }
-                }
-                return merged
+            let timeoutSec = Self.remainingTimeoutSeconds(until: deadline, minimum: 2)
+            if deadline != nil, timeoutSec == nil {
+                skippedBatches += 1
+                DigestDebugLog.event("llm.surface.batch.skip", fields: [
+                    "batch": batchIndex,
+                    "reason": "deadline",
+                    "entries": batch.entries.count
+                ])
+                continue
             }
-            if let batchOutput {
-                output.merge(batchOutput) { _, new in new }
+            group.enter()
+            DispatchQueue.global(qos: .utility).async {
+                defer { group.leave() }
+                let batchStartedAt = Date()
+                DigestDebugLog.event("llm.surface.batch.request.start", fields: [
+                    "batch": batchIndex,
+                    "entries": batch.entries.count,
+                    "timeoutSec": timeoutSec ?? self.config.llmTimeoutSec
+                ])
+                let batchOutput: [String: SurfaceDigest]? = self.requestJSON(
+                    system: self.surfaceBatchSystemPrompt,
+                    user: self.surfaceBatchUserPrompt(context: context, entries: batch.entries),
+                    cwd: workspaceCwd ?? batch.entries.first?.request.surface.cwd,
+                    timeoutSecOverride: timeoutSec
+                ) { content in
+                    let data = try Self.jsonData(from: content)
+                    let decoded = try JSONDecoder().decode(SurfaceDigestBatchLLMOutput.self, from: data)
+                    var merged: [String: SurfaceDigest] = [:]
+                    for entry in batch.entries {
+                        let request = entry.request
+                        guard let item = decoded.surfaces[request.surface.id] else { continue }
+                        do {
+                            try DigestSchemaValidator.validate(item)
+                            merged[request.surface.id] = Self.merge(item, into: request.fallback)
+                        } catch {
+                            continue
+                        }
+                    }
+                    return merged
+                }
+                DigestDebugLog.event("llm.surface.batch.request.finish", fields: [
+                    "batch": batchIndex,
+                    "entries": batch.entries.count,
+                    "returned": batchOutput?.count ?? 0,
+                    "durationMs": DigestDebugLog.elapsedMs(since: batchStartedAt)
+                ])
+                if let batchOutput {
+                    lock.lock()
+                    output.merge(batchOutput) { _, new in new }
+                    lock.unlock()
+                }
             }
         }
+        group.wait()
+        DigestDebugLog.event("llm.surface.batch.finish", fields: [
+            "requests": requests.count,
+            "batches": batches.count,
+            "skippedBatches": skippedBatches,
+            "returned": output.count,
+            "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+        ])
         return output
     }
 
@@ -2924,11 +3078,36 @@ private final class DigestLLMClient {
         inputSnapshot: WorkspaceDigestInputSnapshot,
         force: Bool,
         workspaceCwd: String?,
-        level: WorkspaceDigestRefreshLevel
+        level: WorkspaceDigestRefreshLevel,
+        deadline: Date? = nil
     ) -> WorkspaceDigest? {
-        guard let cliTemplate = requestTemplate() else { return nil }
+        let startedAt = Date()
+        DigestDebugLog.event("llm.workspace.start", fields: [
+            "workspace": workspace.id,
+            "level": level.rawValue,
+            "surfaces": surfaceDigests.count,
+            "sessions": sessionDigests.count,
+            "force": force,
+            "hasPrevious": previous != nil,
+            "deadlineRemainingMs": DigestDebugLog.remainingMs(until: deadline)
+        ])
+        guard let cliTemplate = requestTemplate() else {
+            DigestDebugLog.event("llm.workspace.skip", fields: [
+                "workspace": workspace.id,
+                "level": level.rawValue,
+                "reason": "missing_template",
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
+            return nil
+        }
         if let reason = llmSuspendedReason() {
             fputs("cmux-digest: CLI summary skipped during cooldown: \(reason)\n", stderr)
+            DigestDebugLog.event("llm.workspace.skip", fields: [
+                "workspace": workspace.id,
+                "level": level.rawValue,
+                "reason": "cooldown",
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
             return nil
         }
         if level.persistsSummarySession,
@@ -2940,7 +3119,21 @@ private final class DigestLLMClient {
            ),
            let previous,
            let previousSession = previous.debug?.summarySession {
+            guard let timeoutSec = Self.remainingTimeoutSeconds(until: deadline, minimum: 2) else {
+                DigestDebugLog.event("llm.workspace.skip", fields: [
+                    "workspace": workspace.id,
+                    "level": level.rawValue,
+                    "reason": "deadline_before_resume",
+                    "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+                ])
+                return nil
+            }
             do {
+                DigestDebugLog.event("llm.workspace.resume.start", fields: [
+                    "workspace": workspace.id,
+                    "level": level.rawValue,
+                    "timeoutSec": timeoutSec
+                ])
                 let response = try performRequest(
                     cliTemplate,
                     system: workspaceSystemPrompt,
@@ -2958,9 +3151,10 @@ private final class DigestLLMClient {
                         inputSnapshot: inputSnapshot
                     ),
                     cwd: workspaceCwd,
-                    cliMode: .resume(sessionId: previousSession.sessionId)
+                    cliMode: .resume(sessionId: previousSession.sessionId),
+                    timeoutSecOverride: timeoutSec
                 )
-                return try decodeWorkspaceDigest(
+                let digest = try decodeWorkspaceDigest(
                     response,
                     fallback: fallback,
                     model: cliTemplate.model,
@@ -2972,17 +3166,36 @@ private final class DigestLLMClient {
                     ),
                     inputSnapshot: inputSnapshot
                 )
+                DigestDebugLog.event("llm.workspace.resume.finish", fields: [
+                    "workspace": workspace.id,
+                    "level": level.rawValue,
+                    "durationMs": DigestDebugLog.elapsedMs(since: startedAt),
+                    "summaryChars": DigestDebugLog.summaryChars(digest.summary)
+                ])
+                return digest
             } catch {
                 if error is DigestLLMTimeoutError {
                     suspendLLM(after: error)
                     fputs("cmux-digest: incremental CLI summary timed out: \(error)\n", stderr)
+                    DigestDebugLog.event("llm.workspace.resume.timeout", fields: [
+                        "workspace": workspace.id,
+                        "level": level.rawValue,
+                        "durationMs": DigestDebugLog.elapsedMs(since: startedAt),
+                        "error": error
+                    ])
                     return nil
                 }
                 fputs("cmux-digest: incremental CLI summary resume failed, retrying full summary: \(error)\n", stderr)
+                DigestDebugLog.event("llm.workspace.resume.retryFull", fields: [
+                    "workspace": workspace.id,
+                    "level": level.rawValue,
+                    "durationMs": DigestDebugLog.elapsedMs(since: startedAt),
+                    "error": error
+                ])
             }
         }
 
-        return fullWorkspaceDigest(
+        let digest = fullWorkspaceDigest(
             cliTemplate: cliTemplate,
             workspace: workspace,
             surfaceDigests: surfaceDigests,
@@ -2996,8 +3209,17 @@ private final class DigestLLMClient {
             fallback: fallback,
             inputSnapshot: inputSnapshot,
             workspaceCwd: workspaceCwd,
-            level: level
+            level: level,
+            deadline: deadline
         )
+        DigestDebugLog.event("llm.workspace.finish", fields: [
+            "workspace": workspace.id,
+            "level": level.rawValue,
+            "durationMs": DigestDebugLog.elapsedMs(since: startedAt),
+            "result": digest == nil ? "nil" : "ok",
+            "summaryChars": digest.map { DigestDebugLog.summaryChars($0.summary) } ?? 0
+        ])
+        return digest
     }
 
     private func fullWorkspaceDigest(
@@ -3014,7 +3236,8 @@ private final class DigestLLMClient {
         fallback: WorkspaceDigest,
         inputSnapshot: WorkspaceDigestInputSnapshot,
         workspaceCwd: String?,
-        level: WorkspaceDigestRefreshLevel
+        level: WorkspaceDigestRefreshLevel,
+        deadline: Date? = nil
     ) -> WorkspaceDigest? {
         var lastError: Error?
         let user = workspaceUserPrompt(
@@ -3031,13 +3254,31 @@ private final class DigestLLMClient {
             level: level
         )
         for attempt in 0..<2 {
+            let attemptStartedAt = Date()
+            guard let timeoutSec = Self.remainingTimeoutSeconds(until: deadline, minimum: 2) else {
+                DigestDebugLog.event("llm.workspace.full.skip", fields: [
+                    "workspace": workspace.id,
+                    "level": level.rawValue,
+                    "reason": "deadline",
+                    "attempt": attempt
+                ])
+                return nil
+            }
             do {
+                DigestDebugLog.event("llm.workspace.full.request.start", fields: [
+                    "workspace": workspace.id,
+                    "level": level.rawValue,
+                    "attempt": attempt,
+                    "timeoutSec": timeoutSec,
+                    "persistSession": config.incrementalSummaryEnabled && level.persistsSummarySession
+                ])
                 let response = try performRequest(
                     cliTemplate,
                     system: workspaceSystemPrompt,
                     user: retryUserPrompt(user, attempt: attempt, lastError: lastError),
                     cwd: workspaceCwd,
-                    cliMode: .start(persistSession: config.incrementalSummaryEnabled && level.persistsSummarySession)
+                    cliMode: .start(persistSession: config.incrementalSummaryEnabled && level.persistsSummarySession),
+                    timeoutSecOverride: timeoutSec
                 )
                 let summarySession = level.persistsSummarySession
                     ? newSummarySession(
@@ -3046,15 +3287,30 @@ private final class DigestLLMClient {
                         inputSnapshot: inputSnapshot
                     )
                     : nil
-                return try decodeWorkspaceDigest(
+                let digest = try decodeWorkspaceDigest(
                     response,
                     fallback: fallback,
                     model: cliTemplate.model,
                     summarySession: summarySession,
                     inputSnapshot: inputSnapshot
                 )
+                DigestDebugLog.event("llm.workspace.full.request.finish", fields: [
+                    "workspace": workspace.id,
+                    "level": level.rawValue,
+                    "attempt": attempt,
+                    "durationMs": DigestDebugLog.elapsedMs(since: attemptStartedAt),
+                    "summaryChars": DigestDebugLog.summaryChars(digest.summary)
+                ])
+                return digest
             } catch {
                 lastError = error
+                DigestDebugLog.event("llm.workspace.full.request.failure", fields: [
+                    "workspace": workspace.id,
+                    "level": level.rawValue,
+                    "attempt": attempt,
+                    "durationMs": DigestDebugLog.elapsedMs(since: attemptStartedAt),
+                    "error": error
+                ])
                 if error is DigestLLMTimeoutError {
                     suspendLLM(after: error)
                     break
@@ -3152,7 +3408,20 @@ private final class DigestLLMClient {
         dimensionId: String,
         fallback: [String: DimensionScore]
     ) -> DimensionScore? {
+        let startedAt = Date()
+        DigestDebugLog.event("llm.dimension.start", fields: [
+            "workspace": digest.workspaceId,
+            "dimension": dimensionId,
+            "summaryChars": DigestDebugLog.summaryChars(digest.summary),
+            "fallback": fallback[dimensionId] != nil
+        ])
         guard let dimension = profile.dimensions.first(where: { $0.id == dimensionId && $0.enabled }) else {
+            DigestDebugLog.event("llm.dimension.skip", fields: [
+                "workspace": digest.workspaceId,
+                "dimension": dimensionId,
+                "reason": "dimension_disabled",
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
             return nil
         }
         let singleDimensionProfile = ScoringProfile(
@@ -3165,7 +3434,7 @@ private final class DigestLLMClient {
             confidence: 0.2,
             reason: "No CLI draft score was available."
         )]
-        return requestJSON(
+        let score: DimensionScore? = requestJSON(
             system: dimensionSystemPrompt,
             user: dimensionUserPrompt(digest: digest, profile: singleDimensionProfile, fallback: singleFallback),
             cwd: digest.workspaceFacts.cwd
@@ -3182,32 +3451,73 @@ private final class DigestLLMClient {
             }
             return score
         }
+        DigestDebugLog.event("llm.dimension.finish", fields: [
+            "workspace": digest.workspaceId,
+            "dimension": dimensionId,
+            "result": score == nil ? "nil" : "ok",
+            "rawScore": score?.rawScore ?? -1,
+            "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+        ])
+        return score
     }
 
     private func requestJSON<T>(
         system: String,
         user: String,
         cwd: String?,
+        timeoutSecOverride: Int? = nil,
         decode: (String) throws -> T
     ) -> T? {
-        guard let cliTemplate = requestTemplate() else { return nil }
+        let startedAt = Date()
+        guard let cliTemplate = requestTemplate() else {
+            DigestDebugLog.event("llm.request.skip", fields: [
+                "reason": "missing_template",
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
+            return nil
+        }
         if let reason = llmSuspendedReason() {
             fputs("cmux-digest: CLI score skipped during cooldown: \(reason)\n", stderr)
+            DigestDebugLog.event("llm.request.skip", fields: [
+                "provider": cliTemplate.providerName,
+                "reason": "cooldown",
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
             return nil
         }
         var lastError: Error?
         for attempt in 0..<2 {
+            let attemptStartedAt = Date()
             do {
+                DigestDebugLog.event("llm.request.start", fields: [
+                    "provider": cliTemplate.providerName,
+                    "model": cliTemplate.model ?? "",
+                    "attempt": attempt,
+                    "timeoutSec": timeoutSecOverride ?? cliTemplate.timeoutSec
+                ])
                 let content = try performRequest(
                     cliTemplate,
                     system: system,
                     user: retryUserPrompt(user, attempt: attempt, lastError: lastError),
                     cwd: cwd,
-                    cliMode: .start(persistSession: false)
+                    cliMode: .start(persistSession: false),
+                    timeoutSecOverride: timeoutSecOverride
                 ).content
-                return try decode(content)
+                let decoded = try decode(content)
+                DigestDebugLog.event("llm.request.finish", fields: [
+                    "provider": cliTemplate.providerName,
+                    "attempt": attempt,
+                    "durationMs": DigestDebugLog.elapsedMs(since: attemptStartedAt)
+                ])
+                return decoded
             } catch {
                 lastError = error
+                DigestDebugLog.event("llm.request.failure", fields: [
+                    "provider": cliTemplate.providerName,
+                    "attempt": attempt,
+                    "durationMs": DigestDebugLog.elapsedMs(since: attemptStartedAt),
+                    "error": error
+                ])
                 if error is DigestLLMTimeoutError {
                     suspendLLM(after: error)
                     break
@@ -3217,6 +3527,11 @@ private final class DigestLLMClient {
         if let lastError {
             fputs("cmux-digest: CLI score unavailable: \(lastError)\n", stderr)
         }
+        DigestDebugLog.event("llm.request.unavailable", fields: [
+            "provider": cliTemplate.providerName,
+            "durationMs": DigestDebugLog.elapsedMs(since: startedAt),
+            "error": lastError.map(String.init(describing:)) ?? "nil"
+        ])
         return nil
     }
 
@@ -3249,6 +3564,15 @@ private final class DigestLLMClient {
     private enum CLIRequestMode {
         case start(persistSession: Bool)
         case resume(sessionId: String)
+
+        var debugName: String {
+            switch self {
+            case .start(let persistSession):
+                return persistSession ? "start_persist" : "start"
+            case .resume:
+                return "resume"
+            }
+        }
     }
 
     private struct CLIRequestTemplate {
@@ -3316,11 +3640,66 @@ private final class DigestLLMClient {
         system: String,
         user: String,
         cwd: String?,
-        cliMode: CLIRequestMode
+        cliMode: CLIRequestMode,
+        timeoutSecOverride: Int? = nil
     ) throws -> LLMResponse {
+        let waitStartedAt = Date()
+        DigestDebugLog.event("llm.throttle.wait.start", fields: [
+            "provider": template.providerName,
+            "mode": cliMode.debugName,
+            "timeoutSec": timeoutSecOverride ?? template.timeoutSec
+        ])
         throttle.wait()
-        defer { throttle.signal() }
-        return try performCLIRequest(template: template, system: system, user: user, cwd: cwd, mode: cliMode)
+        let requestStartedAt = Date()
+        DigestDebugLog.event("llm.throttle.wait.finish", fields: [
+            "provider": template.providerName,
+            "mode": cliMode.debugName,
+            "waitMs": DigestDebugLog.elapsedMs(since: waitStartedAt)
+        ])
+        defer {
+            throttle.signal()
+            DigestDebugLog.event("llm.throttle.release", fields: [
+                "provider": template.providerName,
+                "mode": cliMode.debugName,
+                "heldMs": DigestDebugLog.elapsedMs(since: requestStartedAt)
+            ])
+        }
+        var requestTemplate = template
+        if let timeoutSecOverride {
+            requestTemplate.timeoutSec = max(1, timeoutSecOverride)
+        }
+        DigestDebugLog.event("llm.cli.start", fields: [
+            "provider": requestTemplate.providerName,
+            "mode": cliMode.debugName,
+            "model": requestTemplate.model ?? "",
+            "timeoutSec": requestTemplate.timeoutSec
+        ])
+        do {
+            let response = try performCLIRequest(template: requestTemplate, system: system, user: user, cwd: cwd, mode: cliMode)
+            DigestDebugLog.event("llm.cli.finish", fields: [
+                "provider": requestTemplate.providerName,
+                "mode": cliMode.debugName,
+                "durationMs": DigestDebugLog.elapsedMs(since: requestStartedAt),
+                "contentChars": response.content.count,
+                "hasSession": response.sessionId != nil
+            ])
+            return response
+        } catch {
+            DigestDebugLog.event("llm.cli.failure", fields: [
+                "provider": requestTemplate.providerName,
+                "mode": cliMode.debugName,
+                "durationMs": DigestDebugLog.elapsedMs(since: requestStartedAt),
+                "error": error
+            ])
+            throw error
+        }
+    }
+
+    private static func remainingTimeoutSeconds(until deadline: Date?, minimum: Int) -> Int? {
+        guard let deadline else { return nil }
+        let remaining = deadline.timeIntervalSinceNow
+        guard remaining > Double(minimum) else { return nil }
+        return max(minimum, Int(ceil(remaining)))
     }
 
     private func performCLIRequest(
@@ -4046,7 +4425,8 @@ private final class DigestLLMClient {
                 surfaceDigestIds: fallback.debug?.surfaceDigestIds ?? [],
                 tokenEstimate: fallback.debug?.tokenEstimate,
                 summarySession: summarySession,
-                inputSnapshot: inputSnapshot
+                inputSnapshot: inputSnapshot,
+                budgetExpired: fallback.debug?.budgetExpired
             )
         )
     }
@@ -4897,36 +5277,74 @@ private final class DigestController {
 
     private func runLimited<Input, Output>(
         _ inputs: [Input],
+        label: String,
         _ work: @escaping (Input) throws -> Output
     ) throws -> [Output] {
         guard !inputs.isEmpty else { return [] }
 
-        let throttle = DispatchSemaphore(value: max(1, config.maxConcurrentLLM))
+        let startedAt = Date()
+        let workerCount = min(inputs.count, max(1, config.maxConcurrentWorkspacePipelines))
         let group = DispatchGroup()
         let lock = NSLock()
         var results = Array<Output?>(repeating: nil, count: inputs.count)
         var firstError: Error?
+        var nextIndex = 0
 
-        for (index, input) in inputs.enumerated() {
-            throttle.wait()
+        DigestDebugLog.event("workspace.pipeline.start", fields: [
+            "label": label,
+            "inputs": inputs.count,
+            "workers": workerCount,
+            "llmSlots": config.maxConcurrentLLM
+        ])
+
+        for workerIndex in 0..<workerCount {
             group.enter()
             DispatchQueue.global(qos: .utility).async {
-                defer {
-                    throttle.signal()
-                    group.leave()
-                }
+                defer { group.leave() }
 
-                do {
-                    let result = try work(input)
+                while true {
                     lock.lock()
-                    results[index] = result
-                    lock.unlock()
-                } catch {
-                    lock.lock()
-                    if firstError == nil {
-                        firstError = error
+                    let index: Int?
+                    if nextIndex < inputs.count {
+                        index = nextIndex
+                        nextIndex += 1
+                    } else {
+                        index = nil
                     }
                     lock.unlock()
+
+                    guard let index else { return }
+                    let itemStartedAt = Date()
+                    DigestDebugLog.event("workspace.pipeline.item.start", fields: [
+                        "label": label,
+                        "worker": workerIndex,
+                        "index": index
+                    ])
+                    do {
+                        let result = try work(inputs[index])
+                        lock.lock()
+                        results[index] = result
+                        lock.unlock()
+                        DigestDebugLog.event("workspace.pipeline.item.finish", fields: [
+                            "label": label,
+                            "worker": workerIndex,
+                            "index": index,
+                            "durationMs": DigestDebugLog.elapsedMs(since: itemStartedAt)
+                        ])
+                    } catch {
+                        lock.lock()
+                        if firstError == nil {
+                            firstError = error
+                        }
+                        lock.unlock()
+                        DigestDebugLog.event("workspace.pipeline.item.failure", fields: [
+                            "label": label,
+                            "worker": workerIndex,
+                            "index": index,
+                            "durationMs": DigestDebugLog.elapsedMs(since: itemStartedAt),
+                            "error": error
+                        ])
+                    }
                 }
             }
         }
@@ -4944,6 +5362,12 @@ private final class DigestController {
         guard compacted.count == inputs.count else {
             throw DigestError(description: "Parallel digest refresh produced an incomplete result set")
         }
+        DigestDebugLog.event("workspace.pipeline.finish", fields: [
+            "label": label,
+            "inputs": inputs.count,
+            "workers": workerCount,
+            "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+        ])
         return compacted
     }
 
@@ -4955,7 +5379,7 @@ private final class DigestController {
             progress.setWorkspace(workspaceId, stage: "queue", owner: progressOwner)
         }
         defer { progress.clearWorkspaces(workspaceIds, owner: progressOwner) }
-        let output = try runLimited(workspaces) { workspace in
+        let output = try runLimited(workspaces, label: "refreshAll") { workspace in
             try self.refresh(workspace: workspace, force: force, level: .full, progressOwner: progressOwner)
         }
         return output.sorted(by: DigestSort.precedes)
@@ -5086,8 +5510,23 @@ private final class DigestController {
         level: WorkspaceDigestRefreshLevel = .full,
         sort requestedSort: SummaryPrioritySort? = nil
     ) throws -> SummaryPriorityWorkspaceItem {
+        let startedAt = Date()
+        DigestDebugLog.event("summaryPriority.workspace.start", fields: [
+            "workspace": workspaceId,
+            "level": level.rawValue,
+            "force": force,
+            "requestedSort": requestedSort?.mode.rawValue ?? "nil",
+            "requestedDimension": requestedSort?.dimensionId ?? "nil"
+        ])
         let progressOwner = progress.makeOwner()
-        defer { progress.clearWorkspace(workspaceId, owner: progressOwner) }
+        defer {
+            progress.clearWorkspace(workspaceId, owner: progressOwner)
+            DigestDebugLog.event("summaryPriority.workspace.finish", fields: [
+                "workspace": workspaceId,
+                "level": level.rawValue,
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
+        }
         let native = try nativeState()
         guard let nativeWorkspace = native.workspaces.first(where: { $0.workspaceId == workspaceId }) else {
             throw DigestError(description: "Workspace not found: \(workspaceId)")
@@ -5098,18 +5537,28 @@ private final class DigestController {
         let digest = try refresh(workspace: workspace, force: force, level: level, progressOwner: progressOwner)
         let profile = store.getScoringProfile(id: nil)
         let sort = requestedSort ?? store.getSummaryPrioritySort()
+        let budgetExpired = digest.debug?.budgetExpired == true
         let item = try summaryPriorityItem(
             nativeWorkspace: nativeWorkspace,
             digest: digest,
             profile: profile,
             sort: sort,
-            stale: level != .full,
-            useWorkspacePriorityScore: level == .quickColdStart,
+            stale: level != .full || budgetExpired,
+            useWorkspacePriorityScore: level != .full || budgetExpired,
             progressOwner: progressOwner
         )
         progress.setWorkspace(workspaceId, stage: "saving", owner: progressOwner)
         try store.putSummaryPriorityItem(item, profileId: profile.id, sort: sort)
         progress.setWorkspace(workspaceId, stage: "done", owner: progressOwner)
+        DigestDebugLog.event("summaryPriority.workspace.saved", fields: [
+            "workspace": workspaceId,
+            "level": level.rawValue,
+            "sort": sort.mode.rawValue,
+            "dimension": sort.dimensionId ?? "nil",
+            "score": SummaryPriorityScoringEngine.activeScore(item: item, sort: sort),
+            "stale": item.stale == true,
+            "budgetExpired": budgetExpired
+        ])
         return item
     }
 
@@ -5117,7 +5566,18 @@ private final class DigestController {
         workspaceId: String,
         sort requestedSort: SummaryPrioritySort? = nil
     ) throws -> SummaryPriorityWorkspaceItem {
+        let startedAt = Date()
+        DigestDebugLog.event("summaryPriority.scoreOnly.start", fields: [
+            "workspace": workspaceId,
+            "requestedSort": requestedSort?.mode.rawValue ?? "nil",
+            "requestedDimension": requestedSort?.dimensionId ?? "nil"
+        ])
         guard let digest = store.getWorkspaceDigest(workspaceId: workspaceId) else {
+            DigestDebugLog.event("summaryPriority.scoreOnly.fallbackQuick", fields: [
+                "workspace": workspaceId,
+                "reason": "missing_workspace_digest",
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
             return try refreshSummaryPriorityWorkspace(
                 workspaceId: workspaceId,
                 force: false,
@@ -5127,7 +5587,13 @@ private final class DigestController {
         }
 
         let progressOwner = progress.makeOwner()
-        defer { progress.clearWorkspace(workspaceId, owner: progressOwner) }
+        defer {
+            progress.clearWorkspace(workspaceId, owner: progressOwner)
+            DigestDebugLog.event("summaryPriority.scoreOnly.finish", fields: [
+                "workspace": workspaceId,
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
+        }
         let native = try nativeState()
         guard let nativeWorkspace = native.workspaces.first(where: { $0.workspaceId == workspaceId }) else {
             throw DigestError(description: "Workspace not found: \(workspaceId)")
@@ -5148,6 +5614,13 @@ private final class DigestController {
         progress.setWorkspace(workspaceId, stage: "saving", owner: progressOwner)
         try store.putSummaryPriorityItem(item, profileId: profile.id, sort: sort)
         progress.setWorkspace(workspaceId, stage: "done", owner: progressOwner)
+        DigestDebugLog.event("summaryPriority.scoreOnly.saved", fields: [
+            "workspace": workspaceId,
+            "sort": sort.mode.rawValue,
+            "dimension": sort.dimensionId ?? "nil",
+            "score": SummaryPriorityScoringEngine.activeScore(item: item, sort: sort),
+            "stale": item.stale == true
+        ])
         return item
     }
 
@@ -5182,11 +5655,38 @@ private final class DigestController {
         force: Bool = false,
         sort requestedSort: SummaryPrioritySort?
     ) throws -> SummaryPriorityViewState {
+        let startedAt = Date()
+        if !force {
+            let sort = requestedSort ?? store.getSummaryPrioritySort()
+            DigestDebugLog.event("summaryPriority.state.cached.start", fields: [
+                "workspaces": native.workspaces.count,
+                "sort": sort.mode.rawValue,
+                "dimension": sort.dimensionId ?? "nil"
+            ])
+            let state = try cachedSummaryPriorityState(
+                native: native,
+                profileId: profileId,
+                sort: sort
+            )
+            DigestDebugLog.event("summaryPriority.state.cached.finish", fields: [
+                "workspaces": native.workspaces.count,
+                "items": state.items.count,
+                "staleDigestCount": state.stats.staleDigestCount,
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
+            return state
+        }
+
         let progressOwner = progress.makeOwner()
         progress.setSummaryPriority("queue", owner: progressOwner)
         let now = ISO8601DateFormatter().string(from: Date())
         let profile = store.getScoringProfile(id: profileId)
         let sort = requestedSort ?? store.getSummaryPrioritySort()
+        DigestDebugLog.event("summaryPriority.state.force.start", fields: [
+            "workspaces": native.workspaces.count,
+            "sort": sort.mode.rawValue,
+            "dimension": sort.dimensionId ?? "nil"
+        ])
         let workspaceById = Dictionary(
             uniqueKeysWithValues: ((try? cmux.listWorkspaces()) ?? []).map { ($0.id, $0) }
         )
@@ -5216,26 +5716,40 @@ private final class DigestController {
             progress.clearSummaryPriority(owner: progressOwner)
             progress.clearWorkspaces(workspaceIds, owner: progressOwner)
         }
-        let items = try runLimited(candidates) { candidate in
+        DigestDebugLog.event("summaryPriority.state.force.candidates", fields: [
+            "candidates": candidates.count,
+            "missingDigest": staleDigestCount
+        ])
+        let items = try runLimited(candidates, label: "summaryPriorityForceQuick") { candidate in
             let workspaceId = candidate.nativeWorkspace.workspaceId
+            let candidateStartedAt = Date()
+            DigestDebugLog.event("summaryPriority.state.force.workspace.start", fields: [
+                "workspace": workspaceId,
+                "hasWorkspaceRef": candidate.workspace != nil
+            ])
             let digest: WorkspaceDigest
             if let workspace = candidate.workspace {
                 digest = try self.refresh(
                     workspace: workspace,
-                    force: candidate.coldStart ? false : force,
-                    level: candidate.coldStart ? .quickColdStart : .full,
+                    force: false,
+                    level: .quickColdStart,
                     progressOwner: progressOwner
                 )
             } else {
-                digest = try self.refresh(workspaceId: workspaceId, force: force, progressOwner: progressOwner)
+                digest = try self.refresh(workspaceId: workspaceId, force: false, progressOwner: progressOwner)
             }
+            DigestDebugLog.event("summaryPriority.state.force.workspace.digest", fields: [
+                "workspace": workspaceId,
+                "durationMs": DigestDebugLog.elapsedMs(since: candidateStartedAt),
+                "budgetExpired": digest.debug?.budgetExpired == true
+            ])
             let item = try self.summaryPriorityItem(
                 nativeWorkspace: candidate.nativeWorkspace,
                 digest: digest,
                 profile: profile,
                 sort: sort,
-                stale: candidate.coldStart,
-                useWorkspacePriorityScore: candidate.coldStart,
+                stale: true,
+                useWorkspacePriorityScore: true,
                 progressOwner: progressOwner
             )
             self.progress.setWorkspace(workspaceId, stage: "saving", owner: progressOwner)
@@ -5246,6 +5760,11 @@ private final class DigestController {
         progress.setSummaryPriority("sorting", owner: progressOwner)
         let sorted = SummaryPriorityScoringEngine.sort(items, sort: sort)
         let topScore = sorted.map { SummaryPriorityScoringEngine.activeScore(item: $0, sort: sort) }.max() ?? 0
+        DigestDebugLog.event("summaryPriority.state.force.finish", fields: [
+            "items": sorted.count,
+            "topScore": topScore,
+            "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+        ])
         return SummaryPriorityViewState(
             profileId: profile.id,
             sort: sort,
@@ -5353,23 +5872,33 @@ private final class DigestController {
         useWorkspacePriorityScore: Bool = false,
         progressOwner: String? = nil
     ) throws -> SummaryPriorityWorkspaceItem {
+        let startedAt = Date()
         let override = store.getOverride(workspaceId: nativeWorkspace.workspaceId)
         let fallback = SummaryPriorityScoringEngine.localDimensionDrafts(digest: digest, profile: profile)
         let selectedDimension = selectedDimensionId(sort: sort, profile: profile)
+        DigestDebugLog.event("summaryPriority.item.score.start", fields: [
+            "workspace": nativeWorkspace.workspaceId,
+            "sort": sort.mode.rawValue,
+            "dimension": selectedDimension,
+            "quickScore": useWorkspacePriorityScore,
+            "fallbackDimensions": fallback.count,
+            "stale": stale
+        ])
         let score: DimensionScore
         if useWorkspacePriorityScore {
             score = workspacePriorityScore(digest: digest, fallback: fallback, dimensionId: selectedDimension)
         } else {
             progress.setWorkspace(nativeWorkspace.workspaceId, stage: "scoring", owner: progressOwner)
-            guard let llmScore = llm.dimensionScore(
+            if let llmScore = llm.dimensionScore(
                 digest: digest,
                 profile: profile,
                 dimensionId: selectedDimension,
                 fallback: fallback
-            ) else {
-                throw DigestError(description: "CLI score unavailable for workspace \(nativeWorkspace.workspaceId)")
+            ) {
+                score = llmScore
+            } else {
+                score = workspacePriorityScore(digest: digest, fallback: fallback, dimensionId: selectedDimension)
             }
-            score = llmScore
         }
         let assessed = [selectedDimension: score]
         var historicalDimensions = store.getSummaryPriorityItem(
@@ -5386,7 +5915,7 @@ private final class DigestController {
         let nextAction = digest.state.nextActions.first.map {
             SummaryPriorityNextAction(label: $0, detail: nil, risk: digest.state.currentStatus == .blocked ? "high" : nil)
         }
-        return SummaryPriorityWorkspaceItem(
+        let item = SummaryPriorityWorkspaceItem(
             workspaceId: nativeWorkspace.workspaceId,
             nativeOrder: nativeWorkspace.order,
             title: nativeWorkspace.title,
@@ -5409,6 +5938,15 @@ private final class DigestController {
             generatedAt: digest.generatedAt,
             inputHash: digest.inputHash
         )
+        DigestDebugLog.event("summaryPriority.item.score.finish", fields: [
+            "workspace": nativeWorkspace.workspaceId,
+            "sort": sort.mode.rawValue,
+            "dimension": selectedDimension,
+            "score": SummaryPriorityScoringEngine.activeScore(item: item, sort: sort),
+            "dimensions": item.scores.dimensions.count,
+            "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+        ])
+        return item
     }
 
     private func workspacePriorityScore(
@@ -5513,7 +6051,15 @@ private final class DigestController {
         level: WorkspaceDigestRefreshLevel,
         progressOwner: String? = nil
     ) throws -> WorkspaceDigest {
+        let startedAt = Date()
+        DigestDebugLog.event("workspace.refresh.start", fields: [
+            "workspace": workspace.id,
+            "level": level.rawValue,
+            "force": force,
+            "budgetSec": level.softBudgetSeconds
+        ])
         progress.setWorkspace(workspace.id, stage: "reading", owner: progressOwner)
+        let budget = DigestRefreshBudget(level: level)
         agentSessions.invalidateCaches()
         let now = ISO8601DateFormatter().string(from: Date())
         let screenLines = screenLines(for: level)
@@ -5527,21 +6073,41 @@ private final class DigestController {
         let gitFacts = git.facts(cwd: cwd)
         let ghprContext = ghpr.context(fromSidebarState: sidebarState)
         let terminalSurfaces = surfaces.filter { $0.type == "terminal" }
+        let inputSurfaces = Self.workspaceInputSurfaces(terminalSurfaces, level: level)
+        DigestDebugLog.event("workspace.refresh.input", fields: [
+            "workspace": workspace.id,
+            "level": level.rawValue,
+            "surfacesTotal": terminalSurfaces.count,
+            "surfacesRead": inputSurfaces.count,
+            "screenLines": screenLines,
+            "notifications": notifications.count,
+            "hasGit": gitFacts != nil,
+            "hasGHPR": ghprContext != nil
+        ])
         let sessionDigests = level == .full
             ? terminalSurfaces.flatMap { surface in
                 agentSessions.digests(workspaceId: workspace.id, surfaceId: surface.id, cwd: cwd, now: now)
             }
             : []
+        DigestDebugLog.event("workspace.refresh.sessions", fields: [
+            "workspace": workspace.id,
+            "level": level.rawValue,
+            "sessions": sessionDigests.count
+        ])
         let workspaceLLMCwd = Self.dominantCwd(among: terminalSurfaces) ?? cwd
 
         var surfaceDigestsById: [String: SurfaceDigest] = [:]
         var surfaceDigestOrder: [String] = []
         var pendingSurfaceLLMRequests: [SurfaceDigestLLMRequest] = []
-        for surface in terminalSurfaces {
+        var surfaceReadFailures = 0
+        var surfaceCacheHits = 0
+        var localSurfaceDrafts = 0
+        for surface in inputSurfaces {
             let screen: String
             do {
                 screen = try cmux.readScreen(workspaceId: workspace.id, surfaceId: surface.id, lines: screenLines)
             } catch {
+                surfaceReadFailures += 1
                 continue
             }
             surfaceDigestOrder.append(surface.id)
@@ -5562,6 +6128,7 @@ private final class DigestController {
                 inputHash: surfaceInputHash
                ) {
                 surfaceDigestsById[surface.id] = cached
+                surfaceCacheHits += 1
                 continue
             }
             let fallback = LocalDigestDraftEngine.surfaceDigest(
@@ -5580,19 +6147,45 @@ private final class DigestController {
                 ))
             } else {
                 surfaceDigestsById[surface.id] = fallback
+                localSurfaceDrafts += 1
             }
         }
+        DigestDebugLog.event("workspace.refresh.surfaces.local", fields: [
+            "workspace": workspace.id,
+            "level": level.rawValue,
+            "read": surfaceDigestOrder.count,
+            "readFailures": surfaceReadFailures,
+            "cacheHits": surfaceCacheHits,
+            "pendingLLM": pendingSurfaceLLMRequests.count,
+            "localDrafts": localSurfaceDrafts,
+            "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+        ])
 
         if level.usesSurfaceLLM, !pendingSurfaceLLMRequests.isEmpty {
             progress.setWorkspace(workspace.id, stage: "surfaces", owner: progressOwner)
-            let llmSurfaceDigests = llm.surfaceDigests(
-                requests: pendingSurfaceLLMRequests,
-                workspaceCwd: workspaceLLMCwd,
-                allSurfaces: terminalSurfaces
-            )
+            let surfaceLLMStartedAt = Date()
+            let surfaceBudgetExpiredBefore = budget.isExpired
+            let llmSurfaceDigests = surfaceBudgetExpiredBefore
+                ? [:]
+                : llm.surfaceDigests(
+                    requests: pendingSurfaceLLMRequests,
+                    workspaceCwd: workspaceLLMCwd,
+                    allSurfaces: terminalSurfaces,
+                    deadline: budget.deadline
+                )
+            DigestDebugLog.event("workspace.refresh.surfaces.llm", fields: [
+                "workspace": workspace.id,
+                "level": level.rawValue,
+                "requested": pendingSurfaceLLMRequests.count,
+                "returned": llmSurfaceDigests.count,
+                "budgetExpiredBefore": surfaceBudgetExpiredBefore,
+                "durationMs": DigestDebugLog.elapsedMs(since: surfaceLLMStartedAt)
+            ])
             for request in pendingSurfaceLLMRequests {
                 let digest = llmSurfaceDigests[request.surface.id] ?? request.fallback
-                try store.putSurfaceDigest(digest)
+                if llmSurfaceDigests[request.surface.id] != nil {
+                    try store.putSurfaceDigest(digest)
+                }
                 surfaceDigestsById[request.surface.id] = digest
             }
         }
@@ -5650,6 +6243,11 @@ private final class DigestController {
            previous.debug?.summarySession != nil,
            !needsSeedSession {
             progress.setWorkspace(workspace.id, stage: "done", owner: progressOwner)
+            DigestDebugLog.event("workspace.refresh.cacheHit", fields: [
+                "workspace": workspace.id,
+                "level": level.rawValue,
+                "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+            ])
             return previous
         }
 
@@ -5667,7 +6265,9 @@ private final class DigestController {
             now: now,
             model: config.model
         )
-        guard var next = llm.workspaceDigest(
+        let workspaceLLMStartedAt = Date()
+        let workspaceBudgetExpiredBefore = budget.isExpired
+        let llmDigest = workspaceBudgetExpiredBefore ? nil : llm.workspaceDigest(
             workspace: workspace,
             surfaceDigests: promptSurfaceDigests,
             sessionDigests: sessionDigests,
@@ -5681,9 +6281,27 @@ private final class DigestController {
             inputSnapshot: inputSnapshot,
             force: force,
             workspaceCwd: workspaceLLMCwd,
-            level: level
-        ) else {
-            throw DigestError(description: "CLI summary unavailable for workspace \(workspace.id)")
+            level: level,
+            deadline: budget.deadline
+        )
+        DigestDebugLog.event("workspace.refresh.workspaceLLM", fields: [
+            "workspace": workspace.id,
+            "level": level.rawValue,
+            "result": llmDigest == nil ? "fallback_local" : "llm",
+            "budgetExpiredBefore": workspaceBudgetExpiredBefore,
+            "budgetExpiredAfter": budget.isExpired,
+            "durationMs": DigestDebugLog.elapsedMs(since: workspaceLLMStartedAt)
+        ])
+        var next = llmDigest ?? localDraft
+        if llmDigest == nil {
+            var debug = next.debug ?? WorkspaceDigestDebug(
+                model: config.model,
+                promptVersion: "cmux-digest.local-draft.v1",
+                surfaceDigestIds: surfaceDigests.map(\.id),
+                tokenEstimate: nil
+            )
+            debug.budgetExpired = budget.isExpired || level == .full
+            next.debug = debug
         }
         next = stabilizeTopic(previous: previous, next: next)
         progress.setWorkspace(workspace.id, stage: "saving", owner: progressOwner)
@@ -5691,6 +6309,16 @@ private final class DigestController {
         progress.setWorkspace(workspace.id, stage: "updating", owner: progressOwner)
         cmux.setDigestStatus(next)
         progress.setWorkspace(workspace.id, stage: "done", owner: progressOwner)
+        DigestDebugLog.event("workspace.refresh.finish", fields: [
+            "workspace": workspace.id,
+            "level": level.rawValue,
+            "source": llmDigest == nil ? "local" : "llm",
+            "budgetExpired": next.debug?.budgetExpired == true,
+            "summaryChars": DigestDebugLog.summaryChars(next.summary),
+            "surfaceDigests": surfaceDigests.count,
+            "promptSurfaces": promptSurfaceDigests.count,
+            "durationMs": DigestDebugLog.elapsedMs(since: startedAt)
+        ])
         return next
     }
 
@@ -5703,6 +6331,24 @@ private final class DigestController {
         case .full:
             return config.screenLines
         }
+    }
+
+    private static func workspaceInputSurfaces(
+        _ surfaces: [CmuxSurfaceRef],
+        level: WorkspaceDigestRefreshLevel
+    ) -> [CmuxSurfaceRef] {
+        guard let limit = level.surfaceReadLimit,
+              surfaces.count > limit else {
+            return surfaces
+        }
+        return surfaces.sorted { lhs, rhs in
+            if lhs.focused != rhs.focused { return lhs.focused }
+            let lhsHasCwd = lhs.cwd?.isEmpty == false
+            let rhsHasCwd = rhs.cwd?.isEmpty == false
+            if lhsHasCwd != rhsHasCwd { return lhsHasCwd }
+            if lhs.title != rhs.title { return lhs.title < rhs.title }
+            return lhs.id < rhs.id
+        }.prefix(limit).map { $0 }
     }
 
     private func parseSidebarValue(_ key: String, from text: String) -> String? {
@@ -6702,6 +7348,7 @@ private final class DigestSocketDaemon {
 
         Self.installSocketCleanup(at: socketPath)
         fputs("cmux-digest daemon listening on unix:\(socketPath)\n", stderr)
+        DigestDebugLog.event("socket.daemon.listening", fields: ["socket": socketPath])
 
         while true {
             let client = accept(fd, nil, nil)
@@ -6730,6 +7377,24 @@ private final class DigestSocketDaemon {
 
         let (commandName, jsonBlob) = splitCommand(trimmed)
         let body = parseBody(jsonBlob)
+        let commandStartedAt = Date()
+        var commandOutcome = "ok"
+        DigestDebugLog.event("socket.command.start", fields: [
+            "command": commandName,
+            "workspace": (body["workspaceId"] as? String) ?? "nil",
+            "force": (body["force"] as? Bool) ?? false,
+            "refinement": (body["refinement"] as? String) ?? "nil",
+            "sort": parseSort(body: body)?.mode.rawValue ?? "nil",
+            "dimension": parseSort(body: body)?.dimensionId ?? "nil"
+        ])
+        defer {
+            DigestDebugLog.event("socket.command.finish", fields: [
+                "command": commandName,
+                "workspace": (body["workspaceId"] as? String) ?? "nil",
+                "outcome": commandOutcome,
+                "durationMs": DigestDebugLog.elapsedMs(since: commandStartedAt)
+            ])
+        }
 
         do {
             switch commandName {
@@ -6743,6 +7408,7 @@ private final class DigestSocketDaemon {
             case "set_workspace_tab_mode":
                 let raw = (body["displayMode"] as? String) ?? "native"
                 guard let mode = WorkspaceTabDisplayMode(rawValue: raw) else {
+                    commandOutcome = "invalid_displayMode"
                     writeError(client, "invalid displayMode")
                     return
                 }
@@ -6763,6 +7429,7 @@ private final class DigestSocketDaemon {
 
             case "set_summary_priority_sort":
                 guard let sort = parseSort(body: body) else {
+                    commandOutcome = "missing_sort"
                     writeError(client, "missing sort")
                     return
                 }
@@ -6770,6 +7437,7 @@ private final class DigestSocketDaemon {
 
             case "refresh_summary_priority_workspace":
                 guard let id = (body["workspaceId"] as? String), !id.isEmpty else {
+                    commandOutcome = "missing_workspaceId"
                     writeError(client, "missing workspaceId")
                     return
                 }
@@ -6786,6 +7454,7 @@ private final class DigestSocketDaemon {
 
             case "score_summary_priority_workspace":
                 guard let id = (body["workspaceId"] as? String), !id.isEmpty else {
+                    commandOutcome = "missing_workspaceId"
                     writeError(client, "missing workspaceId")
                     return
                 }
@@ -6796,6 +7465,7 @@ private final class DigestSocketDaemon {
 
             case "set_summary_priority_override":
                 guard let id = (body["workspaceId"] as? String), !id.isEmpty else {
+                    commandOutcome = "missing_workspaceId"
                     writeError(client, "missing workspaceId")
                     return
                 }
@@ -6814,6 +7484,7 @@ private final class DigestSocketDaemon {
 
             case "show_digest":
                 guard let id = (body["workspaceId"] as? String), !id.isEmpty else {
+                    commandOutcome = "missing_workspaceId"
                     writeError(client, "missing workspaceId")
                     return
                 }
@@ -6825,6 +7496,7 @@ private final class DigestSocketDaemon {
 
             case "refresh_digest":
                 guard let id = (body["workspaceId"] as? String), !id.isEmpty else {
+                    commandOutcome = "missing_workspaceId"
                     writeError(client, "missing workspaceId")
                     return
                 }
@@ -6833,6 +7505,7 @@ private final class DigestSocketDaemon {
 
             case "refresh_ghpr_metadata":
                 guard let id = (body["workspaceId"] as? String), !id.isEmpty else {
+                    commandOutcome = "missing_workspaceId"
                     writeError(client, "missing workspaceId")
                     return
                 }
@@ -6840,6 +7513,7 @@ private final class DigestSocketDaemon {
 
             case "handoff_workspace":
                 guard let id = (body["workspaceId"] as? String), !id.isEmpty else {
+                    commandOutcome = "missing_workspaceId"
                     writeError(client, "missing workspaceId")
                     return
                 }
@@ -6847,9 +7521,16 @@ private final class DigestSocketDaemon {
                 writeOK(client, encoded: ["prompt": prompt])
 
             default:
+                commandOutcome = "unknown_command"
                 writeError(client, "unknown command: \(commandName)")
             }
         } catch {
+            commandOutcome = "error"
+            DigestDebugLog.event("socket.command.error", fields: [
+                "command": commandName,
+                "workspace": (body["workspaceId"] as? String) ?? "nil",
+                "error": error
+            ])
             writeError(client, String(describing: error))
         }
     }

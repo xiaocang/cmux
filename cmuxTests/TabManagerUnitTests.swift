@@ -708,6 +708,51 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
 
         XCTAssertFalse(workspaceRefreshRequests.contains("full"))
     }
+
+    func testWorkspaceRefreshRunsQuickThenSeedThenFullProgressively() throws {
+        let manager = TabManager()
+        let first = try XCTUnwrap(manager.selectedWorkspace)
+        let store = WorkspaceTabStore()
+        var workspaceRefreshRequests: [(workspaceId: String, force: Bool, refinement: String?)] = []
+        store.refreshWorkspaceInterceptorForTesting = { workspaceId, force, refinement, completion in
+            workspaceRefreshRequests.append((workspaceId, force, refinement))
+            completion(summaryPriorityItem(
+                workspace: first,
+                nativeOrder: 0,
+                scores: ["urgency": 70],
+                stale: refinement != "full"
+            ))
+            return true
+        }
+        store.summaryPriority = WorkspaceSidebarSummaryPriorityState(
+            profileId: "default",
+            sort: .dimension(id: "urgency"),
+            items: [],
+            dimensions: WorkspaceSidebarDimensionDefinition.builtinDefaults,
+            stats: WorkspaceSidebarSummaryPriorityStats(
+                total: 1,
+                needsAttention: 0,
+                topScore: 0,
+                staleDigestCount: 1
+            ),
+            generatedAt: "2026-05-07T12:00:00Z"
+        )
+
+        store.refreshWorkspace(workspaceId: first.id.uuidString)
+
+        XCTAssertTrue(waitForCondition(timeout: 1.0) {
+            workspaceRefreshRequests.count == 3
+        })
+        XCTAssertEqual(workspaceRefreshRequests.map(\.workspaceId), [
+            first.id.uuidString,
+            first.id.uuidString,
+            first.id.uuidString
+        ])
+        XCTAssertEqual(workspaceRefreshRequests.map(\.force), [false, false, false])
+        XCTAssertEqual(workspaceRefreshRequests.map(\.refinement), ["quick", "seed", "full"])
+        XCTAssertEqual(store.summaryPriority?.items.first?.workspaceId, first.id.uuidString)
+        XCTAssertEqual(store.summaryPriority?.items.first?.stale, false)
+    }
 #endif
 
     func testNativeSummaryPrioritySortDoesNotRequestWorkspaceReorder() throws {

@@ -13642,8 +13642,16 @@ final class WorkspaceTabStore: ObservableObject {
 
     private static let selectedSortDefaultsKey = "workspaceTab.summaryPriority.selectedSort"
     private static let savedSortsDefaultsKey = "workspaceTab.summaryPriority.savedSorts"
-    private static let socketQueue = DispatchQueue(label: "com.cmux.digest-socket-client", qos: .userInitiated)
+    private static let socketQueue = DispatchQueue(
+        label: "com.cmux.digest-socket-client",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
     private static let progressSocketQueue = DispatchQueue(label: "com.cmux.digest-progress-socket-client", qos: .utility)
+    // Keep this wider than the daemon LLM throttle. The app queue only prevents
+    // unbounded socket pileups; expensive CLI calls are limited inside cmux-digest
+    // at each LLM request, not for an entire workspace refresh lifecycle.
+    private static let maxConcurrentWorkspaceDigestRequests = 12
     private static let digestSocketTimeoutSeconds: TimeInterval = 420
     private static let digestProgressSocketTimeoutSeconds: TimeInterval = 5
     private static let digestSocketStartupWaitSeconds: TimeInterval = 2
@@ -13655,9 +13663,18 @@ final class WorkspaceTabStore: ObservableObject {
     private var didLoadForExtension = false
     private var trackedExtensionWorkspaceIds: Set<UUID> = []
     private var workspaceRefreshesInFlight: Set<String> = []
+    private var activeWorkspaceDigestRequestCount = 0
+    private var queuedWorkspaceDigestRequests: [WorkspaceDigestRequest] = []
     private var agentOperationRefreshCounter = WorkspaceAgentOperationRefreshCounter()
     private var progressPollTimer: Timer?
     private var progressPollInFlight = false
+
+    private struct WorkspaceDigestRequest {
+        let command: String
+        let workspaceId: String
+        let payload: [String: Any]
+        let onResult: (Result<WorkspaceSidebarSummaryPriorityItem, Error>) -> Void
+    }
 #if DEBUG
     var refreshSummaryPriorityInterceptorForTesting: ((Bool, WorkspaceSidebarSummaryPrioritySort?) -> Bool)?
     var refreshWorkspaceInterceptorForTesting:
@@ -13744,7 +13761,7 @@ final class WorkspaceTabStore: ObservableObject {
 #if DEBUG
         cmuxDebugLog("summaryPriority.agentOperation.refresh workspace=\(workspaceKey.prefix(8)) threshold=4")
 #endif
-        refreshWorkspace(workspaceId: workspaceKey, force: true, refinement: nil, completion: nil)
+        refreshWorkspaceProgressively(workspaceId: workspaceKey)
     }
 
     func refreshStageLabel(for workspaceId: UUID) -> String? {
@@ -14070,6 +14087,11 @@ final class WorkspaceTabStore: ObservableObject {
 #endif
                 self.summaryPriority = decoded
                 self.mergeContextSummaries(items: decoded.items)
+                self.refreshMissingWorkspaceItems(
+                    currentItems: decoded.items,
+                    sort: decoded.sort,
+                    requestGeneration: requestGeneration
+                )
                 self.refineColdStartItems(decoded.items)
             }
         }
@@ -14300,7 +14322,74 @@ final class WorkspaceTabStore: ObservableObject {
     }
 
     func refreshWorkspace(workspaceId: String) {
-        refreshWorkspace(workspaceId: workspaceId, force: true, refinement: nil, completion: nil)
+        refreshWorkspaceProgressively(workspaceId: workspaceId)
+    }
+
+    private func refreshMissingWorkspaceItems(
+        currentItems: [WorkspaceSidebarSummaryPriorityItem],
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        requestGeneration: Int
+    ) {
+        guard !trackedExtensionWorkspaceIds.isEmpty else { return }
+        let coveredWorkspaceIds = Set(currentItems.map(\.workspaceId))
+        let missingWorkspaceIds = trackedExtensionWorkspaceIds
+            .map(\.uuidString)
+            .filter { !coveredWorkspaceIds.contains($0) }
+        guard !missingWorkspaceIds.isEmpty else { return }
+
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.missingItems.refresh gen=\(requestGeneration) " +
+            "sort=\(Self.debugSortDescription(sort)) workspaces=\(missingWorkspaceIds.count)"
+        )
+#endif
+        for (index, workspaceId) in missingWorkspaceIds.enumerated() {
+            refreshWorkspaceProgressively(
+                workspaceId: workspaceId,
+                sort: sort,
+                requestGeneration: requestGeneration,
+                refinementDelay: Double(index) * 0.15
+            )
+        }
+    }
+
+    private func refreshWorkspaceProgressively(
+        workspaceId: String,
+        sort: WorkspaceSidebarSummaryPrioritySort? = nil,
+        requestGeneration: Int? = nil,
+        refinementDelay: TimeInterval = 0
+    ) {
+        let effectiveSort = sort ?? selectedSort
+        let effectiveGeneration = requestGeneration ?? sortRequestGeneration
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.workspace.progressive.start workspace=\(workspaceId.prefix(8)) " +
+            "gen=\(effectiveGeneration) sort=\(Self.debugSortDescription(effectiveSort))"
+        )
+#endif
+        refreshWorkspace(
+            workspaceId: workspaceId,
+            force: false,
+            refinement: "quick",
+            sort: effectiveSort,
+            requestGeneration: effectiveGeneration
+        ) { [weak self] item in
+            guard let self,
+                  self.isCurrentSortRequest(effectiveSort, generation: effectiveGeneration),
+                  item?.stale == true else { return }
+#if DEBUG
+            cmuxDebugLog(
+                "summaryPriority.workspace.progressive.refine workspace=\(workspaceId.prefix(8)) " +
+                "gen=\(effectiveGeneration) reason=stale"
+            )
+#endif
+            self.refineStaleWorkspace(
+                workspaceId: workspaceId,
+                delay: refinementDelay,
+                sort: effectiveSort,
+                requestGeneration: effectiveGeneration
+            )
+        }
     }
 
     private func refineColdStartItems(_ items: [WorkspaceSidebarSummaryPriorityItem]) {
@@ -14311,6 +14400,9 @@ final class WorkspaceTabStore: ObservableObject {
 
         let sort = summaryPriority?.sort ?? selectedSort
         let requestGeneration = sortRequestGeneration
+#if DEBUG
+        cmuxDebugLog("summaryPriority.coldStart.refine workspaces=\(staleWorkspaceIds.count) gen=\(requestGeneration)")
+#endif
         for (index, workspaceId) in staleWorkspaceIds.enumerated() {
             refineStaleWorkspace(
                 workspaceId: workspaceId,
@@ -14327,9 +14419,26 @@ final class WorkspaceTabStore: ObservableObject {
         sort: WorkspaceSidebarSummaryPrioritySort,
         requestGeneration: Int
     ) {
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.workspace.refine.schedule workspace=\(workspaceId.prefix(8)) " +
+            "gen=\(requestGeneration) delay=\(String(format: "%.2f", delay)) sort=\(Self.debugSortDescription(sort))"
+        )
+#endif
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self,
-                  self.isCurrentSortRequest(sort, generation: requestGeneration) else { return }
+                  self.isCurrentSortRequest(sort, generation: requestGeneration) else {
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.workspace.refine.dropBeforeSeed workspace=\(workspaceId.prefix(8)) " +
+                    "gen=\(requestGeneration)"
+                )
+#endif
+                return
+            }
+#if DEBUG
+            cmuxDebugLog("summaryPriority.workspace.refine.seed.start workspace=\(workspaceId.prefix(8)) gen=\(requestGeneration)")
+#endif
             self.refreshWorkspace(
                 workspaceId: workspaceId,
                 force: false,
@@ -14339,7 +14448,18 @@ final class WorkspaceTabStore: ObservableObject {
             ) { [weak self] item in
                 guard let self,
                       self.isCurrentSortRequest(sort, generation: requestGeneration),
-                      item?.stale == true else { return }
+                      item?.stale == true else {
+#if DEBUG
+                    cmuxDebugLog(
+                        "summaryPriority.workspace.refine.stopAfterSeed workspace=\(workspaceId.prefix(8)) " +
+                        "gen=\(requestGeneration) stale=\(item?.stale == true ? 1 : 0)"
+                    )
+#endif
+                    return
+                }
+#if DEBUG
+                cmuxDebugLog("summaryPriority.workspace.refine.full.start workspace=\(workspaceId.prefix(8)) gen=\(requestGeneration)")
+#endif
                 self.refreshWorkspace(
                     workspaceId: workspaceId,
                     force: false,
@@ -14358,12 +14478,34 @@ final class WorkspaceTabStore: ObservableObject {
         requestGeneration: Int,
         refinementDelay: TimeInterval
     ) {
-        guard isCurrentSortRequest(sort, generation: requestGeneration) else { return }
+        guard isCurrentSortRequest(sort, generation: requestGeneration) else {
+#if DEBUG
+            cmuxDebugLog(
+                "summaryPriority.scoreOnly.dropBeforeStart workspace=\(workspaceId.prefix(8)) " +
+                "gen=\(requestGeneration) sort=\(Self.debugSortDescription(sort))"
+            )
+#endif
+            return
+        }
 
         let handleScoreCompletion: (WorkspaceSidebarSummaryPriorityItem?) -> Void = { [weak self] item in
             guard let self,
-                  self.isCurrentSortRequest(sort, generation: requestGeneration) else { return }
+                  self.isCurrentSortRequest(sort, generation: requestGeneration) else {
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.scoreOnly.dropCompletion workspace=\(workspaceId.prefix(8)) " +
+                    "gen=\(requestGeneration)"
+                )
+#endif
+                return
+            }
             guard let item else {
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.scoreOnly.fallbackQuick workspace=\(workspaceId.prefix(8)) " +
+                    "gen=\(requestGeneration)"
+                )
+#endif
                 self.refreshWorkspace(
                     workspaceId: workspaceId,
                     force: false,
@@ -14384,6 +14526,12 @@ final class WorkspaceTabStore: ObservableObject {
                 return
             }
 
+#if DEBUG
+            cmuxDebugLog(
+                "summaryPriority.scoreOnly.apply workspace=\(workspaceId.prefix(8)) " +
+                "gen=\(requestGeneration) stale=\(item.stale == true ? 1 : 0)"
+            )
+#endif
             self.applyRefreshedWorkspaceItem(item)
             guard item.stale == true else { return }
             self.refineStaleWorkspace(
@@ -14400,6 +14548,12 @@ final class WorkspaceTabStore: ObservableObject {
         }
 #endif
 
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.scoreOnly.request workspace=\(workspaceId.prefix(8)) " +
+            "gen=\(requestGeneration) sort=\(Self.debugSortDescription(sort))"
+        )
+#endif
         let payload: [String: Any] = [
             "workspaceId": workspaceId,
             "sort": sort.requestPayload
@@ -14413,9 +14567,21 @@ final class WorkspaceTabStore: ObservableObject {
                   self.isCurrentSortRequest(sort, generation: requestGeneration) else { return }
             switch result {
             case .failure(let error):
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.scoreOnly.failure workspace=\(workspaceId.prefix(8)) " +
+                    "gen=\(requestGeneration) error=\(Self.displayMessage(for: error))"
+                )
+#endif
                 self.errorMessage = Self.displayMessage(for: error)
                 handleScoreCompletion(nil)
             case .success(let item):
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.scoreOnly.success workspace=\(workspaceId.prefix(8)) " +
+                    "gen=\(requestGeneration) stale=\(item.stale == true ? 1 : 0)"
+                )
+#endif
                 handleScoreCompletion(item)
             }
         }
@@ -14443,7 +14609,7 @@ final class WorkspaceTabStore: ObservableObject {
 #if DEBUG
         cmuxDebugLog("summaryPriority.agentOperation.pendingRefresh workspace=\(workspaceId.prefix(8))")
 #endif
-        refreshWorkspace(workspaceId: workspaceId, force: true, refinement: nil, completion: nil)
+        refreshWorkspaceProgressively(workspaceId: workspaceId)
     }
 
     private func performWorkspaceRequest(
@@ -14452,25 +14618,103 @@ final class WorkspaceTabStore: ObservableObject {
         payload: [String: Any],
         onResult: @escaping (Result<WorkspaceSidebarSummaryPriorityItem, Error>) -> Void
     ) {
-        guard workspaceRefreshesInFlight.insert(workspaceId).inserted else { return }
+        guard workspaceRefreshesInFlight.insert(workspaceId).inserted else {
+#if DEBUG
+            cmuxDebugLog(
+                "summaryPriority.workspaceQueue.dedupe command=\(command) workspace=\(workspaceId.prefix(8)) " +
+                "active=\(activeWorkspaceDigestRequestCount) queued=\(queuedWorkspaceDigestRequests.count)"
+            )
+#endif
+            return
+        }
         errorMessage = nil
         setRefreshingWorkspace(workspaceId, refreshing: true)
-        workspaceRefreshStages[workspaceId] = "connecting"
+        workspaceRefreshStages[workspaceId] = "queue"
         startProgressPolling()
-        sendDigestCommand(
-            command,
+        let request = WorkspaceDigestRequest(
+            command: command,
+            workspaceId: workspaceId,
             payload: payload,
+            onResult: onResult
+        )
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.workspaceQueue.enqueue command=\(command) workspace=\(workspaceId.prefix(8)) " +
+            "active=\(activeWorkspaceDigestRequestCount) queued=\(queuedWorkspaceDigestRequests.count)"
+        )
+#endif
+        if activeWorkspaceDigestRequestCount < Self.maxConcurrentWorkspaceDigestRequests {
+            startWorkspaceDigestRequest(request)
+        } else {
+            queuedWorkspaceDigestRequests.append(request)
+#if DEBUG
+            cmuxDebugLog(
+                "summaryPriority.workspaceQueue.queued command=\(command) workspace=\(workspaceId.prefix(8)) " +
+                "active=\(activeWorkspaceDigestRequestCount) queued=\(queuedWorkspaceDigestRequests.count)"
+            )
+#endif
+        }
+    }
+
+    private func startWorkspaceDigestRequest(_ request: WorkspaceDigestRequest) {
+        activeWorkspaceDigestRequestCount += 1
+        workspaceRefreshStages[request.workspaceId] = "connecting"
+        startProgressPolling()
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.workspaceQueue.start command=\(request.command) workspace=\(request.workspaceId.prefix(8)) " +
+            "active=\(activeWorkspaceDigestRequestCount) queued=\(queuedWorkspaceDigestRequests.count)"
+        )
+#endif
+        sendDigestCommand(
+            request.command,
+            payload: request.payload,
             decoding: WorkspaceSidebarSummaryPriorityItem.self
         ) { [weak self] result in
             guard let self else { return }
-            self.workspaceRefreshesInFlight.remove(workspaceId)
-            let shouldRunPendingAgentRefresh = self.agentOperationRefreshCounter.refreshDidFinish(workspaceId: workspaceId)
-            self.setRefreshingWorkspace(workspaceId, refreshing: false)
-            self.workspaceRefreshStages.removeValue(forKey: workspaceId)
+            self.activeWorkspaceDigestRequestCount = max(0, self.activeWorkspaceDigestRequestCount - 1)
+            self.workspaceRefreshesInFlight.remove(request.workspaceId)
+            let shouldRunPendingAgentRefresh = self.agentOperationRefreshCounter.refreshDidFinish(workspaceId: request.workspaceId)
+            self.setRefreshingWorkspace(request.workspaceId, refreshing: false)
+            self.workspaceRefreshStages.removeValue(forKey: request.workspaceId)
             self.stopProgressPollingIfIdle()
-            onResult(result)
-            self.runPendingAgentRefreshIfNeeded(shouldRunPendingAgentRefresh, workspaceId: workspaceId)
+#if DEBUG
+            switch result {
+            case .success(let item):
+                cmuxDebugLog(
+                    "summaryPriority.workspaceQueue.success command=\(request.command) workspace=\(request.workspaceId.prefix(8)) " +
+                    "stale=\(item.stale == true ? 1 : 0) active=\(self.activeWorkspaceDigestRequestCount) " +
+                    "queued=\(self.queuedWorkspaceDigestRequests.count)"
+                )
+            case .failure(let error):
+                cmuxDebugLog(
+                    "summaryPriority.workspaceQueue.failure command=\(request.command) workspace=\(request.workspaceId.prefix(8)) " +
+                    "active=\(self.activeWorkspaceDigestRequestCount) queued=\(self.queuedWorkspaceDigestRequests.count) " +
+                    "error=\(Self.displayMessage(for: error))"
+                )
+            }
+#endif
+            request.onResult(result)
+            self.runPendingAgentRefreshIfNeeded(shouldRunPendingAgentRefresh, workspaceId: request.workspaceId)
+            self.drainWorkspaceDigestRequestQueue()
         }
+    }
+
+    private func drainWorkspaceDigestRequestQueue() {
+        let queuedBefore = queuedWorkspaceDigestRequests.count
+        while activeWorkspaceDigestRequestCount < Self.maxConcurrentWorkspaceDigestRequests,
+              !queuedWorkspaceDigestRequests.isEmpty {
+            let request = queuedWorkspaceDigestRequests.removeFirst()
+            startWorkspaceDigestRequest(request)
+        }
+#if DEBUG
+        if queuedBefore != queuedWorkspaceDigestRequests.count {
+            cmuxDebugLog(
+                "summaryPriority.workspaceQueue.drain active=\(activeWorkspaceDigestRequestCount) " +
+                "queuedBefore=\(queuedBefore) queuedAfter=\(queuedWorkspaceDigestRequests.count)"
+            )
+        }
+#endif
     }
 
     private func refreshWorkspace(
@@ -14484,6 +14728,12 @@ final class WorkspaceTabStore: ObservableObject {
         let effectiveSort = sort ?? selectedSort
         if let requestGeneration,
            !isCurrentSortRequest(effectiveSort, generation: requestGeneration) {
+#if DEBUG
+            cmuxDebugLog(
+                "summaryPriority.workspaceRefresh.dropBeforeRequest workspace=\(workspaceId.prefix(8)) " +
+                "gen=\(requestGeneration) refinement=\(refinement ?? "full") sort=\(Self.debugSortDescription(effectiveSort))"
+            )
+#endif
             completion?(nil)
             return
         }
@@ -14504,6 +14754,13 @@ final class WorkspaceTabStore: ObservableObject {
         if let refinement {
             payload["refinement"] = refinement
         }
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.workspaceRefresh.request workspace=\(workspaceId.prefix(8)) " +
+            "force=\(force ? 1 : 0) refinement=\(refinement ?? "full") " +
+            "gen=\(requestGeneration.map { String($0) } ?? "nil") sort=\(Self.debugSortDescription(effectiveSort))"
+        )
+#endif
         performWorkspaceRequest(
             command: "refresh_summary_priority_workspace",
             workspaceId: workspaceId,
@@ -14512,14 +14769,32 @@ final class WorkspaceTabStore: ObservableObject {
             guard let self else { return }
             if let requestGeneration,
                !self.isCurrentSortRequest(effectiveSort, generation: requestGeneration) {
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.workspaceRefresh.dropCompletion workspace=\(workspaceId.prefix(8)) " +
+                    "gen=\(requestGeneration) refinement=\(refinement ?? "full")"
+                )
+#endif
                 completion?(nil)
                 return
             }
             switch result {
             case .failure(let error):
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.workspaceRefresh.failure workspace=\(workspaceId.prefix(8)) " +
+                    "refinement=\(refinement ?? "full") error=\(Self.displayMessage(for: error))"
+                )
+#endif
                 self.errorMessage = Self.displayMessage(for: error)
                 completion?(nil)
             case .success(let item):
+#if DEBUG
+                cmuxDebugLog(
+                    "summaryPriority.workspaceRefresh.apply workspace=\(workspaceId.prefix(8)) " +
+                    "refinement=\(refinement ?? "full") stale=\(item.stale == true ? 1 : 0)"
+                )
+#endif
                 self.applyRefreshedWorkspaceItem(item)
                 completion?(item)
             }
@@ -14543,6 +14818,9 @@ final class WorkspaceTabStore: ObservableObject {
         var items = current.items
         let existingIndex = items.firstIndex(where: { $0.workspaceId == item.workspaceId })
         if let index = existingIndex, items[index] == item {
+#if DEBUG
+            cmuxDebugLog("summaryPriority.item.apply.noop workspace=\(item.workspaceId.prefix(8))")
+#endif
             return
         }
         let existingWasStale = existingIndex.map { items[$0].stale == true } ?? false
@@ -14578,6 +14856,13 @@ final class WorkspaceTabStore: ObservableObject {
             generatedAt: Self.iso8601Formatter.string(from: Date())
         )
         mergeContextSummaries(items: [item])
+#if DEBUG
+        cmuxDebugLog(
+            "summaryPriority.item.apply.updated workspace=\(item.workspaceId.prefix(8)) " +
+            "items=\(sortedItems.count) stale=\(item.stale == true ? 1 : 0) " +
+            "wasStale=\(existingWasStale ? 1 : 0) sort=\(Self.debugSortDescription(current.sort))"
+        )
+#endif
     }
 
     private static func sortedSummaryPriorityItems(

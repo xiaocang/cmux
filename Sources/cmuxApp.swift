@@ -90,6 +90,9 @@ final class CmuxDigestDaemonSupervisor {
                 .replacingOccurrences(of: ".", with: "-")
             environment["CMUX_TAG"] = String(tag)
         }
+#if DEBUG
+        environment["CMUX_DIGEST_DEBUG_LOG"] = "1"
+#endif
         process.environment = environment
 
 #if DEBUG
