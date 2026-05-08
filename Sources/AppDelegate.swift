@@ -4375,6 +4375,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
     }
 
+    func clearAllWorkspaceColors() {
+        tabManager?.clearWorkspaceColors()
+        for context in mainWindowContexts.values {
+            context.tabManager.clearWorkspaceColors()
+        }
+    }
+
     private func clearCommandPalettePendingOpen(for window: NSWindow?) {
         guard let window,
               let windowId = mainWindowId(for: window) else { return }

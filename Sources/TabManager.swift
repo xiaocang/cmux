@@ -4875,6 +4875,11 @@ class TabManager: ObservableObject {
         }
     }
 
+    func clearWorkspaceColors() {
+        let ids = tabs.compactMap { $0.customColor != nil ? $0.id : nil }
+        applyWorkspaceColor(nil, toWorkspaceIds: ids)
+    }
+
     func applyWorkspacePaletteColor(named name: String, toWorkspaceIds workspaceIds: [UUID]) {
         guard let color = WorkspaceTabColorSettings.currentColorHex(named: name) else { return }
         applyWorkspaceColor(color, toWorkspaceIds: workspaceIds)

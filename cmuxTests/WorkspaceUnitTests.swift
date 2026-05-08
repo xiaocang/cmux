@@ -2598,6 +2598,23 @@ final class WorkspaceTabColorSettingsTests: XCTestCase {
         XCTAssertEqual(WorkspaceTabColorSettings.palette(defaults: defaults), WorkspaceTabColorSettings.defaultPalette)
     }
 
+    @MainActor
+    func testClearWorkspaceColorsClearsOnlyColoredWorkspaces() {
+        let manager = TabManager()
+        guard let coloredWorkspace = manager.tabs.first else {
+            XCTFail("Expected TabManager to initialise with a workspace")
+            return
+        }
+        let uncoloredWorkspace = manager.addWorkspace(select: false)
+
+        manager.setTabColor(tabId: coloredWorkspace.id, color: "#C0392B")
+
+        manager.clearWorkspaceColors()
+
+        XCTAssertNil(coloredWorkspace.customColor)
+        XCTAssertNil(uncoloredWorkspace.customColor)
+    }
+
     func testSetColorRoundTripFallsBackWhenResetToBase() {
         let suiteName = "WorkspaceTabColorSettingsTests.SetColor.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suiteName) else {
