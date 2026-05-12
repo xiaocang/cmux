@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import CMUXPluginAPI
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -401,6 +402,44 @@ final class CommandPaletteRequestRoutingTests: XCTestCase {
                 mainWindow: makeWindow()
             )
         )
+    }
+}
+
+final class CommandPalettePluginCommandContributionTests: XCTestCase {
+    func testPluginCommandsMapToSanitizedPaletteContributions() throws {
+        let commands = [
+            CMUXCommandContribution(
+                id: "palette.newWorkspace",
+                title: "Duplicate Built-In",
+                subtitle: "Plugin",
+                keywords: ["duplicate"]
+            ) {},
+            CMUXCommandContribution(
+                id: "plugin.valid",
+                title: " \u{202E}Plugin Command ",
+                subtitle: " \u{200B}Plugin ",
+                keywords: ["alpha"],
+                dismissOnRun: false
+            ) {},
+            CMUXCommandContribution(
+                id: "plugin.blank",
+                title: " \u{200B} ",
+                subtitle: "Plugin"
+            ) {},
+        ]
+
+        let contributions = ContentView.commandPalettePluginCommandContributions(
+            commands,
+            existingCommandIds: ["palette.newWorkspace"]
+        )
+
+        XCTAssertEqual(contributions.map(\.commandId), ["plugin.valid"])
+        let contribution = try XCTUnwrap(contributions.first)
+        let snapshot = ContentView.CommandPaletteContextSnapshot()
+        XCTAssertEqual(contribution.title(snapshot), "Plugin Command")
+        XCTAssertEqual(contribution.subtitle(snapshot), "Plugin")
+        XCTAssertEqual(contribution.keywords, ["alpha", "plugin.valid"])
+        XCTAssertFalse(contribution.dismissOnRun)
     }
 }
 

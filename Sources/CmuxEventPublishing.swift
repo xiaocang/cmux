@@ -367,6 +367,8 @@ extension CmuxEventBus {
             workspaceId: event.workspaceId,
             payload: payload
         )
+        CMUXPluginSystem.shared.activate(trigger: .onAgentEvent)
+        CMUXEnhancementSystem.shared.activate(trigger: .onAgentEvent)
 
         publish(
             name: "feed.item.\(phase)",

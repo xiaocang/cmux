@@ -4,326 +4,6 @@ import Darwin
 import Bonsplit
 import UniformTypeIdentifiers
 
-final class CmuxDigestDaemonSupervisor {
-    static let shared = CmuxDigestDaemonSupervisor()
-
-    private var process: Process?
-#if DEBUG
-    private var logHandle: FileHandle?
-#endif
-
-    static func digestSocketPath() -> String {
-        let env = ProcessInfo.processInfo.environment
-        if let bundleIdentifier = Bundle.main.bundleIdentifier,
-           bundleIdentifier.hasPrefix("com.cmuxterm.app.debug.") {
-            let tag = bundleIdentifier
-                .dropFirst("com.cmuxterm.app.debug.".count)
-                .replacingOccurrences(of: ".", with: "-")
-            return "/tmp/cmux-digest-\(tag).sock"
-        }
-        if let envTag = env["CMUX_TAG"]?.trimmingCharacters(in: .whitespacesAndNewlines), !envTag.isEmpty {
-            let safeTag = envTag.replacingOccurrences(of: "[^A-Za-z0-9_-]", with: "-", options: .regularExpression)
-            return "/tmp/cmux-digest-\(safeTag).sock"
-        }
-        return "/tmp/cmux-digest.sock"
-    }
-
-    func update(enabled: Bool) {
-        if enabled {
-            startIfNeeded()
-        } else {
-            stop()
-        }
-    }
-
-    func reload(enabled: Bool) {
-        guard enabled else {
-            stop()
-            return
-        }
-        stop(waitUntilExit: true)
-        startIfNeeded()
-    }
-
-    func restartIfRunning() {
-        guard process?.isRunning == true else { return }
-        stop()
-        startIfNeeded()
-    }
-
-    func shutdown() {
-        stop(waitUntilExit: true)
-    }
-
-    private func startIfNeeded() {
-        guard process?.isRunning != true else { return }
-        guard let resources = Bundle.main.resourceURL else { return }
-        let digestURL = resources.appendingPathComponent("bin/cmux-digest")
-        guard FileManager.default.isExecutableFile(atPath: digestURL.path) else { return }
-
-#if DEBUG
-        Self.terminateStaleDebugDaemons(at: digestURL)
-#endif
-
-        let digestSocket = Self.digestSocketPath()
-        // The daemon binds the socket itself; just clear any stale file from a
-        // previous run so bind() doesn't trip on EADDRINUSE.
-        unlink(digestSocket)
-
-        let process = Process()
-        process.executableURL = digestURL
-        process.arguments = ["daemon"]
-        var environment = ProcessInfo.processInfo.environment
-        environment["CMUX_DIGEST_SOCKET_PATH"] = digestSocket
-        let cmuxURL = resources.appendingPathComponent("bin/cmux")
-        if FileManager.default.isExecutableFile(atPath: cmuxURL.path) {
-            environment["CMUX_DIGEST_CMUX"] = cmuxURL.path
-        }
-        Self.applyDigestPreferences(to: &environment)
-        let socketPath = SocketControlSettings.socketPath()
-        environment["CMUX_SOCKET_PATH"] = socketPath
-        environment["CMUX_SOCKET"] = socketPath
-        if let bundleIdentifier = Bundle.main.bundleIdentifier,
-           bundleIdentifier.hasPrefix("com.cmuxterm.app.debug.") {
-            let tag = bundleIdentifier
-                .dropFirst("com.cmuxterm.app.debug.".count)
-                .replacingOccurrences(of: ".", with: "-")
-            environment["CMUX_TAG"] = String(tag)
-        }
-#if DEBUG
-        environment["CMUX_DIGEST_DEBUG_LOG"] = "1"
-#endif
-        process.environment = environment
-
-#if DEBUG
-        var daemonLogHandle: FileHandle?
-        let daemonLogURL = Self.daemonLogURL(environment: environment, socketPath: digestSocket)
-        // Truncate on every launch so the per-tag log doesn't grow unbounded across reloads.
-        FileManager.default.createFile(atPath: daemonLogURL.path, contents: nil)
-        if let handle = try? FileHandle(forWritingTo: daemonLogURL) {
-            handle.write(Data("cmux-app: starting cmux-digest socket=\(digestSocket) cmuxSocket=\(socketPath) cli=\(environment["CMUX_DIGEST_CMUX"] ?? "nil")\n".utf8))
-            process.standardOutput = handle
-            process.standardError = handle
-            daemonLogHandle = handle
-            cmuxDebugLog("digest.daemon.start socket=\(digestSocket) cmuxSocket=\(socketPath) log=\(daemonLogURL.path)")
-        }
-#endif
-
-        do {
-            try process.run()
-            self.process = process
-#if DEBUG
-            self.logHandle = daemonLogHandle
-#endif
-        } catch {
-#if DEBUG
-            daemonLogHandle?.closeFile()
-#endif
-            NSLog("Failed to launch cmux-digest daemon: %@", error.localizedDescription)
-        }
-    }
-
-    private static func applyDigestPreferences(to environment: inout [String: String]) {
-        let defaults = UserDefaults.standard
-        let digestEnabled = defaults.bool(forKey: "digest.enabled")
-        environment["CMUX_DIGEST_ENABLED"] = digestEnabled ? "1" : "0"
-        let ghprEnabled = ghprMetadataRefreshEnabled(defaults: defaults)
-
-        let rawProvider = defaults.string(forKey: "digest.provider")?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let rawProvider, !rawProvider.isEmpty {
-            environment["CMUX_DIGEST_PROVIDER"] = DigestProviderOption.normalizedRawValue(rawProvider)
-        }
-
-        if let model = defaults.string(forKey: "digest.model")?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-           !model.isEmpty {
-            environment["CMUX_DIGEST_MODEL"] = model
-        } else if let legacyModel = defaults.string(forKey: "digest.claudeCodeModel")?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !legacyModel.isEmpty {
-            environment["CMUX_DIGEST_CLAUDE_MODEL"] = legacyModel
-        }
-
-        if let value = defaults.object(forKey: "digest.currentWorkspaceMinIntervalSec") as? Int {
-            environment["CMUX_DIGEST_CURRENT_INTERVAL"] = "\(value)"
-        }
-        if let value = defaults.object(forKey: "digest.backgroundMinIntervalSec") as? Int {
-            environment["CMUX_DIGEST_BACKGROUND_INTERVAL"] = "\(value)"
-        }
-        if let value = defaults.object(forKey: "digest.screenLines") as? Int {
-            environment["CMUX_DIGEST_SCREEN_LINES"] = "\(value)"
-        }
-        if let value = defaults.object(forKey: "digest.includeDiffStat") as? Bool {
-            environment["CMUX_DIGEST_INCLUDE_DIFF_STAT"] = value ? "1" : "0"
-        }
-        if let value = defaults.object(forKey: "digest.maxConcurrentLLM") as? Int {
-            environment["CMUX_DIGEST_MAX_CONCURRENT_LLM"] = "\(value)"
-        }
-
-        environment["CMUX_DIGEST_WRITE_SIDEBAR"] = writesSidebarMetadata(
-            digestEnabled: digestEnabled,
-            ghprEnabled: ghprEnabled,
-            defaults: defaults
-        ) ? "1" : "0"
-
-        environment["CMUX_DIGEST_GHPR_ENABLED"] = ghprEnabled ? "1" : "0"
-        let ghprSocketPath = defaults.string(forKey: DigestGHPRIntegrationSettings.socketPathKey)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if let ghprSocketPath, !ghprSocketPath.isEmpty {
-            environment["CMUX_DIGEST_GHPR_SOCKET_PATH"] = ghprSocketPath
-        } else {
-            environment["CMUX_DIGEST_GHPR_SOCKET_PATH"] = DigestGHPRIntegrationSettings.defaultSocketPath
-        }
-        environment["CMUX_DIGEST_GHPR_DISPLAY_ITEMS"] = defaults.string(
-            forKey: DigestGHPRIntegrationSettings.displayItemsKey
-        ) ?? DigestGHPRIntegrationSettings.defaultDisplayItemsText
-        if let jiraBaseURL = defaults.string(forKey: DigestGHPRIntegrationSettings.jiraBaseURLKey),
-           !jiraBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            environment["CMUX_DIGEST_GHPR_JIRA_BASE_URL"] = jiraBaseURL
-        }
-    }
-
-#if DEBUG
-    private static func daemonLogURL(environment: [String: String], socketPath: String) -> URL {
-        let tag = environment["CMUX_TAG"] ?? URL(fileURLWithPath: socketPath)
-            .deletingPathExtension()
-            .lastPathComponent
-        let safeTag = tag.replacingOccurrences(
-            of: "[^A-Za-z0-9_-]",
-            with: "-",
-            options: .regularExpression
-        )
-        return URL(fileURLWithPath: "/tmp/cmux-digest-\(safeTag).log")
-    }
-
-    private static func terminateStaleDebugDaemons(at digestURL: URL) {
-        let cleanup = Process()
-        cleanup.executableURL = URL(fileURLWithPath: "/usr/bin/pkill")
-        cleanup.arguments = ["-f", "\(digestURL.path) daemon"]
-        cleanup.standardOutput = FileHandle.nullDevice
-        cleanup.standardError = FileHandle.nullDevice
-        do {
-            try cleanup.run()
-            cleanup.waitUntilExit()
-            if cleanup.terminationStatus == 0 {
-                cmuxDebugLog("digest.daemon.cleanup path=\(digestURL.path)")
-            }
-        } catch {
-            cmuxDebugLog("digest.daemon.cleanup.failed error=\(error.localizedDescription)")
-        }
-    }
-#endif
-
-    private func stop(waitUntilExit: Bool = false) {
-        guard let process else { return }
-        if process.isRunning {
-            process.terminate()
-            if waitUntilExit {
-                process.waitUntilExit()
-            }
-        }
-        self.process = nil
-#if DEBUG
-        logHandle?.closeFile()
-        logHandle = nil
-#endif
-    }
-
-    private static let ghprRefreshDebounceQueue = DispatchQueue(
-        label: "com.cmux.digest-ghpr-refresh-debounce"
-    )
-    private static var ghprRefreshPending: Set<String> = []
-    private static let ghprRefreshDebounceInterval: TimeInterval = 1.5
-    private static let ghprRefreshSocketTimeoutSeconds: TimeInterval = 5
-
-    /// Coalesced ghpr-only refresh nudge sent to the digest daemon when a PR
-    /// shell refresh resolves. Hits the lightweight `refresh_ghpr_metadata`
-    /// command (no LLM, diff-only sidebar writes) instead of forcing a full
-    /// digest refresh, and dedupes bursts within the debounce window so a
-    /// single workspace can't fan out N concurrent force-refreshes.
-    static func requestRefresh(workspaceId: String) {
-        let defaults = UserDefaults.standard
-        guard ghprMetadataRefreshEnabled(defaults: defaults) else {
-#if DEBUG
-            cmuxDebugLog("digest.ghpr.refresh.skip workspace=\(workspaceId) reason=ghprDisabled")
-#endif
-            return
-        }
-        shared.update(enabled: true)
-#if DEBUG
-        cmuxDebugLog("digest.ghpr.refresh.request workspace=\(workspaceId)")
-#endif
-        ghprRefreshDebounceQueue.async {
-            if ghprRefreshPending.contains(workspaceId) { return }
-            ghprRefreshPending.insert(workspaceId)
-            ghprRefreshDebounceQueue.asyncAfter(
-                deadline: .now() + ghprRefreshDebounceInterval
-            ) {
-                ghprRefreshPending.remove(workspaceId)
-                Self.dispatchGHPRMetadataRefresh(workspaceId: workspaceId)
-            }
-        }
-    }
-
-    static func ghprMetadataRefreshEnabled(defaults: UserDefaults = .standard) -> Bool {
-        (defaults.object(forKey: DigestGHPRIntegrationSettings.enabledKey) as? Bool)
-            ?? DigestGHPRIntegrationSettings.defaultEnabled
-    }
-
-    static func writesSidebarMetadata(
-        digestEnabled: Bool,
-        ghprEnabled: Bool,
-        defaults: UserDefaults = .standard
-    ) -> Bool {
-        let defaultValue = digestEnabled || ghprEnabled
-        guard let storedValue = defaults.object(forKey: "digest.writeSidebarMetadata") as? Bool else {
-            return defaultValue
-        }
-        return storedValue && defaultValue
-    }
-
-    private static func dispatchGHPRMetadataRefresh(workspaceId: String) {
-        let socketPath = digestSocketPath()
-        let escaped = workspaceId
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
-        DispatchQueue.global(qos: .utility).async {
-            let client = CmuxSocketClient(
-                path: socketPath,
-                timeoutSeconds: ghprRefreshSocketTimeoutSeconds
-            )
-            do {
-                try client.connect()
-                let response = try client.send(
-                    command: "refresh_ghpr_metadata {\"workspaceId\":\"\(escaped)\"}"
-                )
-#if DEBUG
-                cmuxDebugLog(
-                    "digest.ghpr.refresh.response workspace=\(workspaceId) response=\(debugResponseSummary(response))"
-                )
-#endif
-            } catch {
-#if DEBUG
-                cmuxDebugLog(
-                    "digest.ghpr.refresh.failed workspace=\(workspaceId) error=\(error.localizedDescription)"
-                )
-#endif
-            }
-        }
-    }
-
-#if DEBUG
-    private static func debugResponseSummary(_ response: String) -> String {
-        let singleLine = response
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "")
-        guard singleLine.count > 240 else { return singleLine }
-        return String(singleLine.prefix(240)) + "..."
-    }
-#endif
-}
-
 @main
 struct cmuxApp: App {
     @StateObject private var tabManager: TabManager
@@ -343,6 +23,8 @@ struct cmuxApp: App {
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.openWindow) private var openWindow
+    private let pluginSystem: CMUXPluginLifecycleManaging & CMUXPluginSettingsManaging = CMUXPluginSystem.shared
+    private let enhancementSystem: CMUXEnhancementAppProviding = CMUXEnhancementSystem.shared
 
     private var browserToolbarAccessorySpacing: Int {
         BrowserToolbarAccessorySpacingDebugSettings.resolved(browserToolbarAccessorySpacingRaw)
@@ -529,7 +211,8 @@ struct cmuxApp: App {
 #endif
                     bootstrapMainWindowScene()
                     updateSocketController()
-                    CmuxDigestDaemonSupervisor.shared.update(enabled: digestEnabled)
+                    enhancementSystem.start()
+                    pluginSystem.start()
                 }
                 .onChange(of: appearanceMode) { _ in
                     applyAppearance()
@@ -538,16 +221,20 @@ struct cmuxApp: App {
                     updateSocketController()
                 }
                 .onChange(of: digestEnabled) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
+                    pluginSystem.reloadDigest(enabled: digestEnabled)
                 }
                 .onChange(of: digestProvider) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
+                    pluginSystem.reloadDigest(enabled: digestEnabled)
                 }
                 .onChange(of: digestModel) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
+                    pluginSystem.reloadDigest(enabled: digestEnabled)
                 }
                 .onChange(of: digestClaudeCodeModel) { _ in
-                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
+                    pluginSystem.reloadDigest(enabled: digestEnabled)
+                }
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    enhancementSystem.shutdown()
+                    pluginSystem.shutdown()
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -5862,6 +5549,8 @@ struct SettingsView: View {
     private let notificationSoundControlWidth: CGFloat = 280
     private let shortcutChordsDocsURL = URL(string: "https://cmux.com/docs/keyboard-shortcuts#shortcut-chords")!
     private let settingsJSONDocsURL = URL(string: "https://cmux.com/docs/configuration#cmux-json")!
+    private let tmuxPrefixService: CMUXTmuxPrefixService
+    private let pluginSettings: CMUXPluginSettingsManaging
     @Environment(\.openWindow) private var openWindow
     @State private var highlightedSearchAnchorID: String?
     @State private var searchHighlightToken = 0
@@ -5971,14 +5660,14 @@ struct SettingsView: View {
     private var summaryPriorityEnabled = WorkspaceSummaryPrioritySettings.defaultEnabled
     @AppStorage(WorkspaceSidebarScoreDisplayLocation.storageKey)
     private var workspaceScoreDisplayLocation = WorkspaceSidebarScoreDisplayLocation.defaultValue.rawValue
-    @AppStorage(DigestGHPRIntegrationSettings.enabledKey)
-    private var digestGHPRIntegrationEnabled = DigestGHPRIntegrationSettings.defaultEnabled
-    @AppStorage(DigestGHPRIntegrationSettings.socketPathKey)
-    private var digestGHPRSocketPath = DigestGHPRIntegrationSettings.defaultSocketPath
-    @AppStorage(DigestGHPRIntegrationSettings.displayItemsKey)
-    private var digestGHPRDisplayItems = DigestGHPRIntegrationSettings.defaultDisplayItemsText
-    @AppStorage(DigestGHPRIntegrationSettings.jiraBaseURLKey)
-    private var digestGHPRJiraBaseURL = DigestGHPRIntegrationSettings.defaultJiraBaseURL
+    @AppStorage(CMUXGHPRIntegrationSettings.enabledKey)
+    private var digestGHPRIntegrationEnabled = CMUXGHPRIntegrationSettings.defaultEnabled
+    @AppStorage(CMUXGHPRIntegrationSettings.socketPathKey)
+    private var digestGHPRSocketPath = CMUXGHPRIntegrationSettings.defaultSocketPath
+    @AppStorage(CMUXGHPRIntegrationSettings.displayItemsKey)
+    private var digestGHPRDisplayItems = CMUXGHPRIntegrationSettings.defaultDisplayItemsText
+    @AppStorage(CMUXGHPRIntegrationSettings.jiraBaseURLKey)
+    private var digestGHPRJiraBaseURL = CMUXGHPRIntegrationSettings.defaultJiraBaseURL
     @AppStorage("sidebarTintHex") private var sidebarTintHex = SidebarTintDefaults.hex
     @AppStorage("sidebarTintHexLight") private var sidebarTintHexLight: String?
     @AppStorage("sidebarTintHexDark") private var sidebarTintHexDark: String?
@@ -6017,6 +5706,15 @@ struct SettingsView: View {
     @StateObject private var summaryProfileStore = WorkspaceSummaryProfileSettingsStore()
     @State private var newSummaryDimensionId = ""
     @State private var newSummaryDimensionLabel = ""
+
+    init(
+        tmuxPrefixService: CMUXTmuxPrefixService = CMUXEnhancementSystem.shared.tmuxPrefix,
+        pluginSettings: CMUXPluginSettingsManaging = CMUXPluginSystem.shared
+    ) {
+        self.tmuxPrefixService = tmuxPrefixService
+        self.pluginSettings = pluginSettings
+    }
+
 
     private var selectedWorkspacePlacement: NewWorkspacePlacement {
         NewWorkspacePlacement(rawValue: newWorkspacePlacement) ?? WorkspacePlacementSettings.defaultPlacement
@@ -6621,6 +6319,24 @@ struct SettingsView: View {
     var body: some View {
         let _ = keyboardShortcutSettingsObserver.revision
         let _ = Self.validateBypassedSettingsConfigurationReviews()
+        let digestSettingsSection = PluginSettingsSectionDescriptor.resolve(
+            id: CMUXBuiltinSettingsContributionID.digest,
+            settings: pluginSettings,
+            defaultTitle: String(localized: "settings.section.digest", defaultValue: "Workspace Digest"),
+            defaultAnchorID: SettingsSearchIndex.settingID(for: .enhancements, idSuffix: "workspace-digest")
+        )
+        let ghprSettingsSection = PluginSettingsSectionDescriptor.resolve(
+            id: CMUXBuiltinSettingsContributionID.ghpr,
+            settings: pluginSettings,
+            defaultTitle: String(localized: "settings.section.ghpr", defaultValue: "ghpr"),
+            defaultAnchorID: SettingsSearchIndex.settingID(for: .enhancements, idSuffix: "ghpr")
+        )
+        let tmuxPrefixSettingsSection = PluginSettingsSectionDescriptor.resolve(
+            id: CMUXBuiltinSettingsContributionID.tmuxPrefix,
+            settings: pluginSettings,
+            defaultTitle: String(localized: "settings.section.tmuxPrefix", defaultValue: "tmux Prefix"),
+            defaultAnchorID: SettingsSearchIndex.settingID(for: .keyboardShortcuts, idSuffix: "tmux-prefix")
+        )
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
@@ -7264,7 +6980,8 @@ struct SettingsView: View {
                         dockEnabled: $rightSidebarDockEnabled
                     )
 
-                    SettingsSectionHeader(title: String(localized: "settings.section.digest", defaultValue: "Workspace Digest"))
+                    SettingsSectionHeader(title: digestSettingsSection.title)
+                        .settingsSearchAnchor(digestSettingsSection.anchorID)
                     SettingsCard {
                         SettingsCardRow(
                             configurationReview: .json("digest.enabled"),
@@ -7317,7 +7034,10 @@ struct SettingsView: View {
                                 subtitle: String(localized: "settings.digest.restartDaemon.subtitle", defaultValue: "Restart the local digest service if summaries stop updating.")
                             ) {
                                 Button(String(localized: "settings.digest.restartDaemon.button", defaultValue: "Restart")) {
-                                    CmuxDigestDaemonSupervisor.shared.reload(enabled: digestEnabled)
+                                    DigestSettingsBehavior.reloadDigest(
+                                        settings: pluginSettings,
+                                        enabled: digestEnabled
+                                    )
                                 }
                                 .buttonStyle(.bordered)
                                 .controlSize(.small)
@@ -7329,15 +7049,18 @@ struct SettingsView: View {
                         SettingsCardRow(
                             configurationReview: .json("workspaceTab.summaryPriority.enabled"),
                             String(localized: "settings.summaryPriority.enabled", defaultValue: "Enable Summary Priority"),
-                            subtitle: String(localized: "settings.summaryPriority.enabled.subtitle", defaultValue: "Rank workspace summaries in the extension column.")
+                            subtitle: String(localized: "settings.summaryPriority.enabled.subtitle", defaultValue: "Rank workspace summaries in the extension column."),
+                            searchAnchorID: SettingsSearchIndex.settingID(for: .enhancements, idSuffix: "summary-priority")
                         ) {
                             Toggle("", isOn: $summaryPriorityEnabled)
                                 .labelsHidden()
                                 .controlSize(.small)
                         }
+                    }
 
-                        SettingsCardDivider()
-
+                    SettingsSectionHeader(title: ghprSettingsSection.title)
+                        .settingsSearchAnchor(ghprSettingsSection.anchorID)
+                    SettingsCard {
                         SettingsCardRow(
                             configurationReview: .json("digest.ghpr.enabled"),
                             String(localized: "settings.digest.ghpr.enabled", defaultValue: "Enable ghpr Integration"),
@@ -7355,7 +7078,7 @@ struct SettingsView: View {
                             String(localized: "settings.digest.ghpr.socketPath", defaultValue: "ghpr Socket Path"),
                             subtitle: String(localized: "settings.digest.ghpr.socketPath.subtitle", defaultValue: "Unix socket used by PRDashboard. Leave the default unless you run a custom socket.")
                         ) {
-                            TextField(DigestGHPRIntegrationSettings.defaultSocketPath, text: $digestGHPRSocketPath)
+                            TextField(CMUXGHPRIntegrationSettings.defaultSocketPath, text: $digestGHPRSocketPath)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 260)
                         }
@@ -7368,7 +7091,7 @@ struct SettingsView: View {
                             String(localized: "settings.digest.ghpr.displayItems", defaultValue: "ghpr Display Items"),
                             subtitle: String(localized: "settings.digest.ghpr.displayItems.subtitle", defaultValue: "Comma-separated sidebar items, such as ci, review, unresolved, jira, title, draft, conflicts.")
                         ) {
-                            TextField(DigestGHPRIntegrationSettings.defaultDisplayItemsText, text: $digestGHPRDisplayItems)
+                            TextField(CMUXGHPRIntegrationSettings.defaultDisplayItemsText, text: $digestGHPRDisplayItems)
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 220)
                         }
@@ -7389,6 +7112,40 @@ struct SettingsView: View {
                                 .frame(width: 260)
                         }
                         .disabled(!digestGHPRIntegrationEnabled)
+                    }
+
+                    SettingsSectionHeader(title: String(localized: "settings.section.enhancements", defaultValue: "Enhancements"))
+                        .settingsSearchAnchor(SettingsSearchIndex.sectionID(for: .enhancements))
+                    SettingsCard {
+                        SettingsCardRow(
+                            configurationReview: .json("automation.sidebarPullRequestShellDebounceEnabled"),
+                            String(localized: "settings.enhancements.github.pullRequestShellDebounce", defaultValue: "GitHub PR Refresh Delay"),
+                            subtitle: sidebarPullRequestShellDebounceEnabled
+                                ? String(localized: "settings.enhancements.github.pullRequestShellDebounce.subtitleOn", defaultValue: "Shell-triggered sidebar pull request refreshes are delayed and coalesced before checking GitHub.")
+                                : String(localized: "settings.enhancements.github.pullRequestShellDebounce.subtitleOff", defaultValue: "Shell-triggered sidebar pull request refreshes check GitHub immediately.")
+                        ) {
+                            Toggle("", isOn: $sidebarPullRequestShellDebounceEnabled)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("automation.sidebarPullRequestShellDebounceSeconds"),
+                            String(localized: "settings.enhancements.github.pullRequestShellDebounce.delay", defaultValue: "PR Refresh Delay"),
+                            subtitle: String(localized: "settings.enhancements.github.pullRequestShellDebounce.delay.subtitle", defaultValue: "Delay shell-triggered pull request refreshes by this many seconds before checking GitHub."),
+                            controlWidth: pickerColumnWidth
+                        ) {
+                            TextField("", value: $sidebarPullRequestShellDebounceDelaySeconds, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing)
+                                .disabled(!sidebarPullRequestShellDebounceEnabled)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardNote(String(localized: "settings.enhancements.github.pullRequestShellDebounce.note", defaultValue: "Applies to shell prompt and command-hint pull request refreshes. Matching repo and branch targets share one queued refresh window."))
                     }
 
                     SettingsSectionHeader(title: String(localized: "settings.section.automation", defaultValue: "Automation"))
@@ -7527,38 +7284,6 @@ struct SettingsView: View {
                         SettingsCardDivider()
 
                         SettingsCardNote(String(localized: "settings.automation.gemini.note", defaultValue: "Hooks must be installed with `cmux hooks gemini install`. They no-op outside cmux terminals."))
-                    }
-
-                    SettingsCard {
-                        SettingsCardRow(
-                            configurationReview: .json("automation.sidebarPullRequestShellDebounceEnabled"),
-                            String(localized: "settings.automation.pullRequestShellDebounce", defaultValue: "Delay Shell PR Refreshes"),
-                            subtitle: sidebarPullRequestShellDebounceEnabled
-                                ? String(localized: "settings.automation.pullRequestShellDebounce.subtitleOn", defaultValue: "Shell-triggered sidebar pull request refreshes are delayed and coalesced before checking GitHub.")
-                                : String(localized: "settings.automation.pullRequestShellDebounce.subtitleOff", defaultValue: "Shell-triggered sidebar pull request refreshes check GitHub immediately.")
-                        ) {
-                            Toggle("", isOn: $sidebarPullRequestShellDebounceEnabled)
-                                .labelsHidden()
-                                .controlSize(.small)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardRow(
-                            configurationReview: .json("automation.sidebarPullRequestShellDebounceSeconds"),
-                            String(localized: "settings.automation.pullRequestShellDebounce.delay", defaultValue: "PR Refresh Delay"),
-                            subtitle: String(localized: "settings.automation.pullRequestShellDebounce.delay.subtitle", defaultValue: "Delay shell-triggered pull request refreshes by this many seconds before checking GitHub."),
-                            controlWidth: pickerColumnWidth
-                        ) {
-                            TextField("", value: $sidebarPullRequestShellDebounceDelaySeconds, format: .number)
-                                .textFieldStyle(.roundedBorder)
-                                .multilineTextAlignment(.trailing)
-                                .disabled(!sidebarPullRequestShellDebounceEnabled)
-                        }
-
-                        SettingsCardDivider()
-
-                        SettingsCardNote(String(localized: "settings.automation.pullRequestShellDebounce.note", defaultValue: "Applies to shell prompt and command-hint pull request refreshes. Matching repo and branch targets share one queued refresh window."))
                     }
 
                     SettingsCard {
@@ -7872,7 +7597,10 @@ struct SettingsView: View {
 
                     GlobalHotkeySection()
 
-                    LeaderKeySettingsSection()
+                    TmuxPrefixSettingsSection(
+                        tmuxPrefixService: tmuxPrefixService,
+                        sectionDescriptor: tmuxPrefixSettingsSection
+                    )
                         .id(leaderKeyResetToken)
 
                     SettingsSectionHeader(title: String(localized: "settings.section.keyboardShortcuts", defaultValue: "Keyboard Shortcuts"))
@@ -8209,7 +7937,7 @@ struct SettingsView: View {
             sidebarPullRequestShellDebounceDelaySeconds = SidebarPullRequestShellDebounceSettings.defaultDelaySeconds
         }
         .onChange(of: digestGHPRIntegrationEnabled) { _, _ in
-            CmuxDigestDaemonSupervisor.shared.restartIfRunning()
+            DigestSettingsBehavior.reloadGHPRIntegration(settings: pluginSettings)
         }
         .onChange(of: browserInsecureHTTPAllowlist) { oldValue, newValue in
             // Keep draft in sync with external changes unless the user has local unsaved edits.
@@ -8416,10 +8144,10 @@ struct SettingsView: View {
         digestWriteSidebarMetadata = true
         summaryPriorityEnabled = true
         workspaceScoreDisplayLocation = WorkspaceSidebarScoreDisplayLocation.defaultValue.rawValue
-        digestGHPRIntegrationEnabled = DigestGHPRIntegrationSettings.defaultEnabled
-        digestGHPRSocketPath = DigestGHPRIntegrationSettings.defaultSocketPath
-        digestGHPRDisplayItems = DigestGHPRIntegrationSettings.defaultDisplayItemsText
-        digestGHPRJiraBaseURL = DigestGHPRIntegrationSettings.defaultJiraBaseURL
+        digestGHPRIntegrationEnabled = CMUXGHPRIntegrationSettings.defaultEnabled
+        digestGHPRSocketPath = CMUXGHPRIntegrationSettings.defaultSocketPath
+        digestGHPRDisplayItems = CMUXGHPRIntegrationSettings.defaultDisplayItemsText
+        digestGHPRJiraBaseURL = CMUXGHPRIntegrationSettings.defaultJiraBaseURL
         summaryProfileStore.resetToDefaults()
         newSummaryDimensionId = ""
         newSummaryDimensionLabel = ""
@@ -8436,7 +8164,7 @@ struct SettingsView: View {
         refreshDetectedImportBrowsers()
         SystemWideHotkeySettings.reset()
         KeyboardShortcutSettings.resetAll()
-        LeaderKeySettings.resetAll()
+        tmuxPrefixService.resetSettings()
         leaderKeyResetToken = UUID()
         WorkspaceTabColorSettings.reset()
         reloadWorkspaceTabColorSettings()
@@ -9291,14 +9019,29 @@ private struct GlobalHotkeySection: View {
     }
 }
 
-private struct LeaderKeySettingsSection: View {
-    @AppStorage(LeaderKeySettings.enabledKey) private var leaderKeyEnabled = LeaderKeySettings.enabledDefault
-    @AppStorage(LeaderKeySettings.timeoutKey) private var leaderKeyTimeout = LeaderKeySettings.timeoutDefault
-    @AppStorage(LeaderKeySettings.workspaceTagsEnabledKey) private var workspaceTagsEnabled = LeaderKeySettings.workspaceTagsEnabledDefault
+private struct TmuxPrefixSettingsSection: View {
+    @AppStorage(CMUXTmuxPrefixService.enabledSettingsKey) private var leaderKeyEnabled = CMUXTmuxPrefixService.enabledDefault
+    @AppStorage(CMUXTmuxPrefixService.timeoutSettingsKey) private var leaderKeyTimeout = CMUXTmuxPrefixService.timeoutDefault
+    @AppStorage(CMUXTmuxPrefixService.workspaceTagsEnabledSettingsKey) private var workspaceTagsEnabled = CMUXTmuxPrefixService.workspaceTagsEnabledDefault
+
+    private let tmuxPrefixService: CMUXTmuxPrefixService
+    private let sectionDescriptor: PluginSettingsSectionDescriptor
+
+    init(
+        tmuxPrefixService: CMUXTmuxPrefixService = CMUXEnhancementSystem.shared.tmuxPrefix,
+        sectionDescriptor: PluginSettingsSectionDescriptor = .fallback(
+            title: String(localized: "settings.section.tmuxPrefix", defaultValue: "tmux Prefix"),
+            anchorID: SettingsSearchIndex.settingID(for: .keyboardShortcuts, idSuffix: "tmux-prefix")
+        )
+    ) {
+        self.tmuxPrefixService = tmuxPrefixService
+        self.sectionDescriptor = sectionDescriptor
+    }
 
     var body: some View {
-        SettingsSectionHeader(title: String(localized: "settings.section.leaderKey", defaultValue: "Leader Key"))
+        SettingsSectionHeader(title: sectionDescriptor.title)
             .accessibilityIdentifier("SettingsLeaderKeySection")
+            .settingsSearchAnchor(sectionDescriptor.anchorID)
         SettingsCard {
             SettingsCardRow(
                 configurationReview: .settingsOnly,
@@ -9307,7 +9050,7 @@ private struct LeaderKeySettingsSection: View {
                     ? String(localized: "settings.leaderKey.enabled.subtitleOn", defaultValue: "Press the leader key prefix, then a sub-key to trigger an action.")
                     : String(localized: "settings.leaderKey.enabled.subtitleOff", defaultValue: "Leader key is disabled. The prefix key will pass through to the terminal.")
             ) {
-                Toggle("", isOn: $leaderKeyEnabled)
+                Toggle("", isOn: leaderKeyEnabledBinding)
                     .labelsHidden()
                     .controlSize(.small)
                     .accessibilityLabel(
@@ -9324,7 +9067,7 @@ private struct LeaderKeySettingsSection: View {
                     subtitle: String(localized: "settings.leaderKey.timeout.subtitle", defaultValue: "Seconds to wait for the sub-key before cancelling leader mode.")
                 ) {
                     HStack(spacing: 8) {
-                        Slider(value: $leaderKeyTimeout, in: 0.2...3.0, step: 0.1)
+                        Slider(value: leaderKeyTimeoutBinding, in: CMUXTmuxPrefixService.timeoutRange, step: 0.1)
                             .frame(width: 120)
                         Text(String(format: String(localized: "settings.leaderKey.timeout.value", defaultValue: "%.1fs"), leaderKeyTimeout))
                             .font(.system(.body, design: .monospaced))
@@ -9334,9 +9077,9 @@ private struct LeaderKeySettingsSection: View {
 
                 SettingsCardDivider()
 
-                let actions = LeaderKeySettings.configurableActions
+                let actions = tmuxPrefixService.configurableLeaderActions()
                 ForEach(Array(actions.enumerated()), id: \.element.id) { index, action in
-                    LeaderBindingRow(action: action)
+                    LeaderBindingRow(action: action, tmuxPrefixService: tmuxPrefixService)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 9)
                     if index < actions.count - 1 {
@@ -9354,24 +9097,129 @@ private struct LeaderKeySettingsSection: View {
                     ? String(localized: "settings.app.workspaceTags.subtitleOn", defaultValue: "Workspace tags are shown as [tag] prefix in the workspace switcher and tab bar.")
                     : String(localized: "settings.app.workspaceTags.subtitleOff", defaultValue: "Workspace tag display and assignment are disabled.")
             ) {
-                Toggle("", isOn: $workspaceTagsEnabled)
+                Toggle("", isOn: workspaceTagsEnabledBinding)
                     .labelsHidden()
                     .controlSize(.small)
                     .accessibilityLabel(
                         String(localized: "settings.app.workspaceTags", defaultValue: "Workspace Tags")
                     )
             }
+            .settingsSearchAnchor(SettingsSearchIndex.settingID(for: .keyboardShortcuts, idSuffix: "workspace-tags"))
         }
+    }
+
+    private var leaderKeyEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { leaderKeyEnabled },
+            set: { newValue in
+                leaderKeyEnabled = TmuxPrefixSettingsBehavior.setLeaderKeyEnabled(
+                    newValue,
+                    service: tmuxPrefixService
+                )
+            }
+        )
+    }
+
+    private var leaderKeyTimeoutBinding: Binding<Double> {
+        Binding(
+            get: { leaderKeyTimeout },
+            set: { newValue in
+                leaderKeyTimeout = TmuxPrefixSettingsBehavior.setLeaderKeyTimeout(
+                    newValue,
+                    service: tmuxPrefixService
+                )
+            }
+        )
+    }
+
+    private var workspaceTagsEnabledBinding: Binding<Bool> {
+        Binding(
+            get: { workspaceTagsEnabled },
+            set: { newValue in
+                workspaceTagsEnabled = TmuxPrefixSettingsBehavior.setWorkspaceTagsEnabled(
+                    newValue,
+                    service: tmuxPrefixService
+                )
+            }
+        )
+    }
+}
+
+enum DigestSettingsBehavior {
+    static func reloadDigest(
+        settings: CMUXPluginSettingsManaging,
+        enabled: Bool
+    ) {
+        settings.reloadDigest(enabled: enabled)
+    }
+
+    static func reloadGHPRIntegration(settings: CMUXPluginSettingsManaging) {
+        settings.reloadGHPRIntegration()
+    }
+}
+
+struct PluginSettingsSectionDescriptor: Equatable {
+    let title: String
+    let anchorID: String?
+
+    static func fallback(title: String, anchorID: String?) -> PluginSettingsSectionDescriptor {
+        PluginSettingsSectionDescriptor(title: title, anchorID: anchorID)
+    }
+
+    static func resolve(
+        id: String,
+        settings: CMUXPluginSettingsManaging,
+        defaultTitle: String,
+        defaultAnchorID: String?
+    ) -> PluginSettingsSectionDescriptor {
+        guard let contribution = settings.settingsContribution(id: id) else {
+            return fallback(title: defaultTitle, anchorID: defaultAnchorID)
+        }
+        return PluginSettingsSectionDescriptor(
+            title: contribution.title,
+            anchorID: contribution.anchorID ?? defaultAnchorID
+        )
+    }
+}
+
+enum TmuxPrefixSettingsBehavior {
+    static func setLeaderKeyEnabled(
+        _ enabled: Bool,
+        service: CMUXTmuxPrefixService
+    ) -> Bool {
+        service.setEnabled(enabled)
+        return service.isEnabled()
+    }
+
+    static func setLeaderKeyTimeout(
+        _ timeout: Double,
+        service: CMUXTmuxPrefixService
+    ) -> Double {
+        service.setTimeout(timeout)
+        return service.timeout()
+    }
+
+    static func setWorkspaceTagsEnabled(
+        _ enabled: Bool,
+        service: CMUXTmuxPrefixService
+    ) -> Bool {
+        service.setWorkspaceTagsEnabled(enabled)
+        return service.workspaceTagsEnabled()
     }
 }
 
 private struct LeaderBindingRow: View {
-    let action: LeaderKeySettings.LeaderAction
+    let action: CMUXTmuxPrefixAction
+    let tmuxPrefixService: CMUXTmuxPrefixService
     @State private var currentKey: String
 
-    init(action: LeaderKeySettings.LeaderAction) {
+    init(
+        action: CMUXTmuxPrefixAction,
+        tmuxPrefixService: CMUXTmuxPrefixService = CMUXEnhancementSystem.shared.tmuxPrefix
+    ) {
         self.action = action
-        _currentKey = State(initialValue: LeaderKeySettings.key(for: action))
+        self.tmuxPrefixService = tmuxPrefixService
+        _currentKey = State(initialValue: tmuxPrefixService.key(for: action))
     }
 
     var body: some View {
@@ -9382,15 +9230,16 @@ private struct LeaderBindingRow: View {
                 .frame(width: 120)
         }
         .onChange(of: currentKey) { newValue in
-            LeaderKeySettings.setKey(newValue, for: action)
+            tmuxPrefixService.setKey(newValue, for: action)
         }
         .onReceive(NotificationCenter.default.publisher(for: UserDefaults.didChangeNotification)) { _ in
-            let latest = LeaderKeySettings.key(for: action)
+            let latest = tmuxPrefixService.key(for: action)
             if latest != currentKey {
                 currentKey = latest
             }
         }
     }
+
 }
 
 private struct LeaderKeyRecorderButton: NSViewRepresentable {
