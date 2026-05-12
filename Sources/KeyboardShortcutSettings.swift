@@ -15,6 +15,34 @@ enum KeyboardShortcutSettings {
     static var shortcutLookupObserver: ((Action) -> Void)?
     #endif
 
+    static var publicShortcutActions: [Action] {
+        Action.allCases.filter(\.isPublicShortcutAction)
+    }
+
+    static var settingsVisibleActions: [Action] {
+        orderedSettingsVisibleActions(
+            from: publicShortcutActions.filter { $0 != .showHideAllWindows }
+        )
+    }
+
+    private static func orderedSettingsVisibleActions(from actions: [Action]) -> [Action] {
+        let colocatedSidebarActions = [
+            .focusRightSidebar,
+            .toggleRightSidebar,
+            .findInDirectory,
+        ].filter(actions.contains)
+        let actionSet = Set(colocatedSidebarActions)
+        let baseActions = actions.filter { !actionSet.contains($0) }
+
+        guard let anchorIndex = baseActions.firstIndex(of: .jumpToUnread) else {
+            return colocatedSidebarActions + baseActions
+        }
+
+        var orderedActions = baseActions
+        orderedActions.insert(contentsOf: colocatedSidebarActions, at: anchorIndex + 1)
+        return orderedActions
+    }
+
     enum ShortcutRecordingRejection: Equatable {
         case bareKeyNotAllowed
         case conflictsWithAction(Action)
@@ -87,7 +115,7 @@ enum KeyboardShortcutSettings {
         case splitBrowserDown
 
         // File Explorer
-        case toggleFileExplorer
+        case toggleRightSidebar = "toggleFileExplorer"
         case toggleExtensionColumn
 
         // Panels
@@ -124,7 +152,7 @@ enum KeyboardShortcutSettings {
             case .closeWindow: return String(localized: "shortcut.closeWindow.label", defaultValue: "Close Window")
             case .toggleFullScreen: return String(localized: "command.toggleFullScreen.title", defaultValue: "Toggle Full Screen")
             case .quit: return String(localized: "menu.quitCmux", defaultValue: "Quit cmux")
-            case .toggleSidebar: return String(localized: "shortcut.toggleSidebar.label", defaultValue: "Toggle Sidebar")
+            case .toggleSidebar: return String(localized: "shortcut.toggleLeftSidebar.label", defaultValue: "Toggle Left Sidebar")
             case .newTab: return String(localized: "shortcut.newWorkspace.label", defaultValue: "New Workspace")
             case .openFolder: return String(localized: "shortcut.openFolder.label", defaultValue: "Open Folder")
             case .reopenPreviousSession: return String(localized: "shortcut.reopenPreviousSession.label", defaultValue: "Reopen Previous Session")
@@ -135,7 +163,7 @@ enum KeyboardShortcutSettings {
             case .sendFeedback: return String(localized: "sidebar.help.sendFeedback", defaultValue: "Send Feedback")
             case .showNotifications: return String(localized: "shortcut.showNotifications.label", defaultValue: "Show Notifications")
             case .jumpToUnread: return String(localized: "shortcut.jumpToUnread.label", defaultValue: "Jump to Latest Unread")
-            case .focusRightSidebar: return String(localized: "shortcut.focusRightSidebar.label", defaultValue: "Focus Right Sidebar")
+            case .focusRightSidebar: return String(localized: "shortcut.focusRightSidebar.label", defaultValue: "Toggle Right Sidebar Focus")
             case .switchRightSidebarToFiles: return String(localized: "shortcut.switchRightSidebarToFiles.label", defaultValue: "Show Sidebar Files")
             case .switchRightSidebarToFind: return String(localized: "shortcut.switchRightSidebarToFind.label", defaultValue: "Show Sidebar Find")
             case .switchRightSidebarToSessions: return String(localized: "shortcut.switchRightSidebarToSessions.label", defaultValue: "Show Sidebar Vault")
@@ -167,7 +195,7 @@ enum KeyboardShortcutSettings {
             case .equalizeSplits: return String(localized: "shortcut.equalizeSplits.label", defaultValue: "Equalize Splits")
             case .splitBrowserRight: return String(localized: "shortcut.splitBrowserRight.label", defaultValue: "Split Browser Right")
             case .splitBrowserDown: return String(localized: "shortcut.splitBrowserDown.label", defaultValue: "Split Browser Down")
-            case .toggleFileExplorer: return String(localized: "shortcut.toggleFileExplorer.label", defaultValue: "Toggle File Explorer")
+            case .toggleRightSidebar: return String(localized: "shortcut.toggleRightSidebar.label", defaultValue: "Toggle Right Sidebar")
             case .toggleExtensionColumn: return String(localized: "shortcut.toggleExtensionColumn.label", defaultValue: "Toggle Extension Column")
             case .saveFilePreview: return String(localized: "shortcut.saveFilePreview.label", defaultValue: "Save File Preview")
             case .openBrowser: return String(localized: "shortcut.openBrowser.label", defaultValue: "Open Browser")
@@ -192,6 +220,19 @@ enum KeyboardShortcutSettings {
         }
 
         var defaultsKey: String { "shortcut.\(rawValue)" }
+
+        var isPublicShortcutAction: Bool {
+            switch self {
+            case .switchRightSidebarToFiles,
+                 .switchRightSidebarToFind,
+                 .switchRightSidebarToSessions,
+                 .switchRightSidebarToFeed,
+                 .switchRightSidebarToDock:
+                return false
+            default:
+                return true
+            }
+        }
 
         var defaultShortcut: StoredShortcut {
             switch self {
@@ -296,7 +337,7 @@ enum KeyboardShortcutSettings {
                 return StoredShortcut(key: "m", command: true, shift: true, option: false, control: false)
             case .selectWorkspaceByNumber:
                 return StoredShortcut(key: "1", command: true, shift: false, option: false, control: false)
-            case .toggleFileExplorer:
+            case .toggleRightSidebar:
                 return StoredShortcut(key: "b", command: true, shift: false, option: true, control: false)
             case .toggleExtensionColumn:
                 return StoredShortcut(key: "e", command: true, shift: true, option: false, control: false)

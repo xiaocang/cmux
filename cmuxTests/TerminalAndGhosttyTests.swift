@@ -83,6 +83,25 @@ final class GhosttyPasteboardHelperTests: XCTestCase {
         )
     }
 
+    /// Regression test for https://github.com/manaflow-ai/cmux/issues/3910.
+    /// Some editors expose a lossy plain-text flavor where CJK scalars are
+    /// replaced with literal "?" characters, while the HTML flavor preserves the
+    /// original text. The terminal paste path should recover the faithful text.
+    func testPrefersFaithfulRichTextWhenPlainTextReplacesChineseWithQuestionMarks() {
+        let pasteboard = NSPasteboard(name: .init("cmux-test-lossy-chinese-plain-\(UUID().uuidString)"))
+        pasteboard.clearContents()
+
+        let chineseText = "您好~"
+        pasteboard.declareTypes([.string, .html], owner: nil)
+        pasteboard.setString("??~", forType: .string)
+        pasteboard.setString("<p>\(chineseText)</p>", forType: .html)
+
+        XCTAssertEqual(
+            cmuxPasteboardStringContentsForTesting(pasteboard),
+            chineseText
+        )
+    }
+
     /// Fallback-loop coverage: when *only* a legacy / unknown plain-text
     /// type is present and no UTF-8 variant exists, the helper should still
     /// return whatever string the pasteboard does expose (best-effort).
@@ -509,6 +528,66 @@ final class GhosttyPasteboardHelperTests: XCTestCase {
         XCTAssertTrue(text.contains("clipboard-"))
         XCTAssertTrue(text.hasSuffix(".png"))
         XCTAssertTrue(FileManager.default.fileExists(atPath: localPath))
+    }
+
+    func testLocalImageFileURLPastePlanUsesSinglePastePayload() throws {
+        let imageDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux local image paste \(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: imageDirectory) }
+
+        let firstURL = imageDirectory.appendingPathComponent("first image.png")
+        let secondURL = imageDirectory.appendingPathComponent("second image.png")
+        try make1x1PNG(color: .systemRed).write(to: firstURL)
+        try make1x1PNG(color: .systemGreen).write(to: secondURL)
+
+        let plan = TerminalImageTransferPlanner.plan(
+            fileURLs: [firstURL, secondURL],
+            target: .local
+        )
+
+        guard case .insertText(let text) = plan else {
+            return XCTFail("expected one local insert plan for image paths, got \(plan)")
+        }
+
+        XCTAssertEqual(
+            text,
+            [firstURL, secondURL]
+                .map(\.path)
+                .map(TerminalImageTransferPlanner.escapeForShell)
+                .joined(separator: " ")
+        )
+    }
+
+    func testLocalImageFileURLDropPlanUsesDelayedPasteSegments() throws {
+        let imageDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux local image drop \(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: imageDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: imageDirectory) }
+
+        let firstURL = imageDirectory.appendingPathComponent("first image.png")
+        let secondURL = imageDirectory.appendingPathComponent("second image.png")
+        try make1x1PNG(color: .systemRed).write(to: firstURL)
+        try make1x1PNG(color: .systemGreen).write(to: secondURL)
+
+        let plan = TerminalImageTransferPlanner.plan(
+            fileURLs: [firstURL, secondURL],
+            target: .local,
+            mode: .drop
+        )
+
+        guard case .insertTextSegments(let segments, let delay) = plan else {
+            return XCTFail("expected delayed local image paste segments, got \(plan)")
+        }
+
+        XCTAssertEqual(
+            segments,
+            [
+                TerminalImageTransferPlanner.escapeForShell(firstURL.path),
+                " " + TerminalImageTransferPlanner.escapeForShell(secondURL.path)
+            ]
+        )
+        XCTAssertEqual(delay, 2.0)
     }
 
     func testRemoteImagePastePlanUploadsMaterializedFile() throws {
@@ -2353,6 +2432,54 @@ final class WindowTerminalHostViewTests: XCTestCase {
         XCTAssertNil(
             secondFixture.host.performHitTest(at: secondFixture.pointInHost, currentEvent: secondEvent),
             "Terminal portal should defer to the minimal tab strip in later-created windows just below the titlebar interaction band"
+        )
+    }
+
+    func testHostViewKeepsTerminalTopRowClickableWhenTabStripRegionOverlapsContent() {
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 260),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        defer { window.orderOut(nil) }
+        guard let contentView = window.contentView,
+              let container = contentView.superview else {
+            XCTFail("Expected window content container")
+            return
+        }
+
+        let hostFrame = container.convert(contentView.bounds, from: contentView)
+        let host = WindowTerminalHostView(frame: hostFrame)
+        host.autoresizingMask = [.width, .height]
+
+        let terminalFrame = host.bounds.insetBy(dx: 0, dy: 32)
+        let hostedView = makeHostedTerminalView(frame: terminalFrame)
+        host.addSubview(hostedView)
+        container.addSubview(host, positioned: .above, relativeTo: contentView)
+
+        let tabStripOverlap: CGFloat = 2
+        let terminalTopInContent = contentView.convert(hostedView.frame, from: host).maxY
+        let tabStrip = FakeTabBarBackgroundNSView(
+            frame: NSRect(
+                x: 0,
+                y: terminalTopInContent - tabStripOverlap,
+                width: contentView.bounds.width,
+                height: 44
+            )
+        )
+        tabStrip.autoresizingMask = [.width, .minYMargin]
+        contentView.addSubview(tabStrip)
+
+        let pointInHostedView = NSPoint(x: hostedView.bounds.midX, y: hostedView.bounds.maxY - 0.5)
+        let pointInWindow = hostedView.convert(pointInHostedView, to: nil)
+        let pointInHost = host.convert(pointInWindow, from: nil)
+        let event = makeMouseDownEvent(at: pointInWindow, window: window)
+
+        assertHitFallsInsideHostedTerminal(
+            host.performHitTest(at: pointInHost, currentEvent: event),
+            hostedView: hostedView,
+            message: "The absolute top row of terminal content should own mouse-down hit-testing even if chrome hit regions overlap it"
         )
     }
 
