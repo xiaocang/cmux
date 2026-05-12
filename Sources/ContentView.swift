@@ -1,5 +1,6 @@
 import AppKit
 import Bonsplit
+import CMUXPluginAPI
 import Combine
 import Darwin
 import ImageIO
@@ -2025,6 +2026,7 @@ private final class SelectedWorkspaceDirectoryObserver: ObservableObject {
 struct ContentView: View {
     @ObservedObject var updateViewModel: UpdateViewModel
     let windowId: UUID
+    let pluginSystem: CMUXPluginAppProviding
     @EnvironmentObject var tabManager: TabManager
     @EnvironmentObject var notificationStore: TerminalNotificationStore
     @EnvironmentObject var sidebarState: SidebarState
@@ -2046,7 +2048,7 @@ struct ContentView: View {
     @StateObject private var fileExplorerStore = FileExplorerStore()
     @StateObject private var sessionIndexStore = SessionIndexStore()
     @StateObject private var selectedWorkspaceDirectoryObserver = SelectedWorkspaceDirectoryObserver()
-    @StateObject private var workspaceTabStore = WorkspaceTabStore()
+    @StateObject private var workspaceTabStore: WorkspaceTabStore
     @StateObject private var workspaceSidebarLayoutMetricsStore = WorkspaceSidebarLayoutMetricsStore()
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
@@ -2109,6 +2111,19 @@ struct ContentView: View {
     @State private var commandPaletteShouldFocusWorkspaceDescriptionEditor = false
     @FocusState private var isCommandPaletteSearchFocused: Bool
     @FocusState private var isCommandPaletteRenameFocused: Bool
+
+    init(
+        updateViewModel: UpdateViewModel,
+        windowId: UUID,
+        pluginSystem: CMUXPluginAppProviding = CMUXPluginSystem.shared
+    ) {
+        self.updateViewModel = updateViewModel
+        self.windowId = windowId
+        self.pluginSystem = pluginSystem
+        _workspaceTabStore = StateObject(
+            wrappedValue: WorkspaceTabStore(digestService: pluginSystem.workspaceDigestService)
+        )
+    }
 
     private enum CommandPaletteMode {
         case commands
@@ -2420,6 +2435,7 @@ struct ContentView: View {
 
     private struct CommandPaletteCommandsContext {
         let snapshot: CommandPaletteContextSnapshot
+        let pluginCommands: [CMUXCommandContribution]
     }
 
     enum CommandPaletteContextKeys {
@@ -2962,6 +2978,7 @@ struct ContentView: View {
             onSendFeedback: presentFeedbackComposer,
             titlebarHeight: titlebarPadding,
             workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore,
+            pluginSystem: pluginSystem,
             onToggleSidebar: { sidebarState.toggle() },
             onNewTab: {
                 AppDelegate.shared?.performNewWorkspaceAction(
@@ -4049,6 +4066,18 @@ struct ContentView: View {
             presentFeedbackComposer()
         })
 
+        view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: .extensionColumnOpenStateRequested)) { notification in
+            let requestedWindow = notification.object as? NSWindow
+            guard Self.shouldHandleCommandPaletteRequest(
+                observedWindow: observedWindow,
+                requestedWindow: requestedWindow,
+                keyWindow: NSApp.keyWindow,
+                mainWindow: NSApp.mainWindow
+            ) else { return }
+            guard let request = ExtensionColumnOpenStateRequest(notification: notification) else { return }
+            pluginSystem.setSidebarExtensionOpen(id: request.id, open: request.open)
+        })
+
         let scrollForwardingGeneration = workspaceSidebarLayoutMetricsStore.scrollForwardingGeneration
         view = AnyView(view.background(WindowAccessor(dedupeByWindow: false) { window in
             MainActor.assumeIsolated {
@@ -4056,16 +4085,25 @@ struct ContentView: View {
                 let tmuxOverlayState = tmuxWorkspacePaneWindowOverlayState(for: window)
                 tmuxWorkspacePaneWindowOverlayController(for: window, createIfNeeded: tmuxOverlayState != nil)?.update(state: tmuxOverlayState)
                 let extensionOverlayController = extensionColumnWindowOverlayController(for: window)
-                let isExtensionColumnVisible = sidebarState.isVisible && extensionColumnOpen
+                let extensionContribution = WorkspaceSidebarTrailingOverlayExtensionResolver
+                    .summaryPriorityContribution(from: pluginSystem)
+                let isExtensionColumnVisible = sidebarState.isVisible && extensionColumnOpen && extensionContribution != nil
                 extensionOverlayController.update(
                     rootView: AnyView(
                         ExtensionColumnWindowOverlayRoot(
                             workspaceTabStore: workspaceTabStore,
                             workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore,
                             tabManager: tabManager,
+                            extensionContribution: extensionContribution,
                             isOpen: extensionColumnOpen,
                             sidebarWidth: sidebarWidth,
-                            onClose: { extensionColumnOpen = false }
+                            onClose: {
+                                guard let extensionContribution else { return }
+                                pluginSystem.setSidebarExtensionOpen(
+                                    id: extensionContribution.id,
+                                    open: false
+                                )
+                            }
                         )
                     ),
                     isVisible: isExtensionColumnVisible,
@@ -6617,6 +6655,14 @@ struct ContentView: View {
         var hasher = Hasher()
         hasher.combine(commandsContext.snapshot.fingerprint())
         hasher.combine(cmuxConfigStore.configRevision)
+        hasher.combine(commandsContext.pluginCommands.count)
+        for command in commandsContext.pluginCommands {
+            hasher.combine(command.id)
+            hasher.combine(command.title)
+            hasher.combine(command.subtitle ?? "")
+            hasher.combine(command.keywords)
+            hasher.combine(command.dismissOnRun)
+        }
         return hasher.finalize()
     }
 
@@ -7037,7 +7083,8 @@ struct ContentView: View {
         var snapshot = commandPaletteContextSnapshot(terminalOpenTargets: terminalOpenTargets)
         snapshot.setBool(CommandPaletteContextKeys.cliInstalledInPATH, cliInstalledInPATH)
         return CommandPaletteCommandsContext(
-            snapshot: snapshot
+            snapshot: snapshot,
+            pluginCommands: pluginSystem.commandContributions()
         )
     }
 
@@ -7045,9 +7092,11 @@ struct ContentView: View {
         commandsContext: CommandPaletteCommandsContext
     ) -> [CommandPaletteCommand] {
         let context = commandsContext.snapshot
-        let contributions = commandPaletteCommandContributions()
+        let pluginCommands = commandsContext.pluginCommands
+        let contributions = commandPaletteCommandContributions(pluginCommands: pluginCommands)
         var handlerRegistry = CommandPaletteHandlerRegistry()
         registerCommandPaletteHandlers(&handlerRegistry)
+        registerPluginCommandPaletteHandlers(&handlerRegistry, pluginCommands: pluginCommands)
 
         var commands: [CommandPaletteCommand] = []
         commands.reserveCapacity(contributions.count)
@@ -7240,7 +7289,9 @@ struct ContentView: View {
         return snapshot
     }
 
-    private func commandPaletteCommandContributions() -> [CommandPaletteCommandContribution] {
+    private func commandPaletteCommandContributions(
+        pluginCommands: [CMUXCommandContribution]
+    ) -> [CommandPaletteCommandContribution] {
         func constant(_ value: String) -> (CommandPaletteContextSnapshot) -> String {
             { _ in value }
         }
@@ -8148,11 +8199,55 @@ struct ContentView: View {
                 )
             )
         }
+        appendPluginCommandContributions(pluginCommands, to: &contributions)
+
+        return contributions
+    }
+
+    private func appendPluginCommandContributions(
+        _ pluginCommands: [CMUXCommandContribution],
+        to contributions: inout [CommandPaletteCommandContribution]
+    ) {
+        contributions.append(contentsOf: Self.commandPalettePluginCommandContributions(
+            pluginCommands,
+            existingCommandIds: Set(contributions.map(\.commandId))
+        ))
+    }
+
+    static func commandPalettePluginCommandContributions(
+        _ pluginCommands: [CMUXCommandContribution],
+        existingCommandIds: Set<String> = []
+    ) -> [CommandPaletteCommandContribution] {
+        var knownCommandIds = existingCommandIds
+        var contributions: [CommandPaletteCommandContribution] = []
+        contributions.reserveCapacity(pluginCommands.count)
+
+        for command in pluginCommands where knownCommandIds.insert(command.id).inserted {
+            let title = sanitizeCommandPaletteTextForContributions(command.title)
+            guard !title.isEmpty else { continue }
+            let subtitle = command.subtitle
+                .map { sanitizeCommandPaletteTextForContributions($0) }
+                .flatMap { $0.isEmpty ? nil : $0 }
+                ?? ""
+            contributions.append(
+                CommandPaletteCommandContribution(
+                    commandId: command.id,
+                    title: { _ in title },
+                    subtitle: { _ in subtitle },
+                    keywords: command.keywords + [command.id],
+                    dismissOnRun: command.dismissOnRun
+                )
+            )
+        }
 
         return contributions
     }
 
     private func sanitizeCmuxConfigPaletteText(_ text: String) -> String {
+        Self.sanitizeCommandPaletteTextForContributions(text)
+    }
+
+    static func sanitizeCommandPaletteTextForContributions(_ text: String) -> String {
         let dangerous: Set<Unicode.Scalar> = [
             "\u{200B}", "\u{200C}", "\u{200D}", "\u{200E}", "\u{200F}",
             "\u{202A}", "\u{202B}", "\u{202C}", "\u{202D}", "\u{202E}",
@@ -8668,6 +8763,18 @@ struct ContentView: View {
             registry.register(commandId: action.id) {
                 executeConfiguredAction(captured)
             }
+        }
+    }
+
+    private func registerPluginCommandPaletteHandlers(
+        _ registry: inout CommandPaletteHandlerRegistry,
+        pluginCommands: [CMUXCommandContribution]
+    ) {
+        for command in pluginCommands {
+            guard registry.handler(for: command.id) == nil else {
+                continue
+            }
+            registry.register(commandId: command.id, handler: command.handler)
         }
     }
 
@@ -10495,6 +10602,7 @@ struct VerticalTabsSidebar: View {
     let onSendFeedback: () -> Void
     let titlebarHeight: CGFloat
     let workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
+    let pluginSystem: CMUXPluginAppProviding
     let onToggleSidebar: () -> Void
     let onNewTab: () -> Void
     @EnvironmentObject var tabManager: TabManager
@@ -10941,6 +11049,7 @@ struct VerticalTabsSidebar: View {
         VStack(spacing: 0) {
             WorkspaceSidebarModeHeader(
                 workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore,
+                pluginSystem: pluginSystem,
                 onRefreshSidebarStatus: {
                     tabManager.forceRefreshAllWorkspacePullRequests()
                     tabManager.refreshGHPRMetadataForSidebarPullRequests()
@@ -13594,12 +13703,13 @@ struct WorkspaceSidebarSavedSort: Codable, Identifiable, Equatable {
     }
 }
 
-private struct WorkspaceSidebarDigestProgressState: Decodable {
+struct WorkspaceSidebarDigestProgressState: Decodable {
     var summaryPriority: WorkspaceSidebarDigestProgressItem?
     var workspaces: [String: WorkspaceSidebarDigestProgressItem]
+    var generatedAt: String?
 }
 
-private struct WorkspaceSidebarDigestProgressItem: Decodable {
+struct WorkspaceSidebarDigestProgressItem: Decodable {
     var stage: String
 }
 
@@ -13654,19 +13764,10 @@ final class WorkspaceTabStore: ObservableObject {
 
     private static let selectedSortDefaultsKey = "workspaceTab.summaryPriority.selectedSort"
     private static let savedSortsDefaultsKey = "workspaceTab.summaryPriority.savedSorts"
-    private static let socketQueue = DispatchQueue(
-        label: "com.cmux.digest-socket-client",
-        qos: .userInitiated,
-        attributes: .concurrent
-    )
-    private static let progressSocketQueue = DispatchQueue(label: "com.cmux.digest-progress-socket-client", qos: .utility)
     // Keep this wider than the daemon LLM throttle. The app queue only prevents
     // unbounded socket pileups; expensive CLI calls are limited inside cmux-digest
     // at each LLM request, not for an entire workspace refresh lifecycle.
     private static let maxConcurrentWorkspaceDigestRequests = 12
-    private static let digestSocketTimeoutSeconds: TimeInterval = 420
-    private static let digestProgressSocketTimeoutSeconds: TimeInterval = 5
-    private static let digestSocketStartupWaitSeconds: TimeInterval = 2
     private static let maxRefreshRetryAttempts = 5
     private static let jsonEncoder = JSONEncoder()
     private static let jsonDecoder = JSONDecoder()
@@ -13680,11 +13781,25 @@ final class WorkspaceTabStore: ObservableObject {
     private var agentOperationRefreshCounter = WorkspaceAgentOperationRefreshCounter()
     private var progressPollTimer: Timer?
     private var progressPollInFlight = false
+    private let digestService: WorkspaceDigestServicing
+
+    private enum WorkspaceDigestRequestKind {
+        case refresh(force: Bool, refinement: String?, sort: WorkspaceSidebarSummaryPrioritySort)
+        case score(sort: WorkspaceSidebarSummaryPrioritySort)
+
+        var debugName: String {
+            switch self {
+            case .refresh:
+                return "refreshWorkspace"
+            case .score:
+                return "scoreWorkspace"
+            }
+        }
+    }
 
     private struct WorkspaceDigestRequest {
-        let command: String
+        let kind: WorkspaceDigestRequestKind
         let workspaceId: String
-        let payload: [String: Any]
         let onResult: (Result<WorkspaceSidebarSummaryPriorityItem, Error>) -> Void
     }
 #if DEBUG
@@ -13695,7 +13810,8 @@ final class WorkspaceTabStore: ObservableObject {
         ((String, WorkspaceSidebarSummaryPrioritySort, @escaping (WorkspaceSidebarSummaryPriorityItem?) -> Void) -> Bool)?
 #endif
 
-    init() {
+    init(digestService: WorkspaceDigestServicing = CMUXPluginSystem.shared.digestService) {
+        self.digestService = digestService
         selectedSort = Self.loadSelectedSort()
         savedSorts = Self.loadSavedSorts()
     }
@@ -14022,9 +14138,6 @@ final class WorkspaceTabStore: ObservableObject {
     ) {
         let effectiveSort = sort ?? selectedSort
         let requestGeneration = sortRequestGeneration
-        var payload: [String: Any] = ["force": force]
-        payload["sort"] = effectiveSort.requestPayload
-
 #if DEBUG
         cmuxDebugLog(
             "summaryPriority.refresh.start gen=\(requestGeneration) force=\(force ? 1 : 0) " +
@@ -14036,11 +14149,7 @@ final class WorkspaceTabStore: ObservableObject {
         summaryRefreshStage = "connecting"
         errorMessage = nil
         startProgressPolling()
-        sendDigestCommand(
-            "refresh_summary_priority",
-            payload: payload,
-            decoding: WorkspaceSidebarSummaryPriorityState.self
-        ) { [weak self] result in
+        digestService.refreshSummaryPriority(force: force, sort: effectiveSort) { [weak self] result in
             guard let self else { return }
             switch result {
             case .failure(let error):
@@ -14194,10 +14303,7 @@ final class WorkspaceTabStore: ObservableObject {
     }
 
     func setDisplayMode(_ mode: WorkspaceSidebarDisplayMode) {
-        sendDigestCommand(
-            "set_workspace_tab_mode",
-            payload: ["displayMode": mode.rawValue]
-        ) { _ in }
+        digestService.setDisplayMode(mode) { _ in }
     }
 
     static func orderedWorkspaceIds(
@@ -14566,14 +14672,9 @@ final class WorkspaceTabStore: ObservableObject {
             "gen=\(requestGeneration) sort=\(Self.debugSortDescription(sort))"
         )
 #endif
-        let payload: [String: Any] = [
-            "workspaceId": workspaceId,
-            "sort": sort.requestPayload
-        ]
         performWorkspaceRequest(
-            command: "score_summary_priority_workspace",
-            workspaceId: workspaceId,
-            payload: payload
+            kind: .score(sort: sort),
+            workspaceId: workspaceId
         ) { [weak self] result in
             guard let self,
                   self.isCurrentSortRequest(sort, generation: requestGeneration) else { return }
@@ -14625,15 +14726,14 @@ final class WorkspaceTabStore: ObservableObject {
     }
 
     private func performWorkspaceRequest(
-        command: String,
+        kind: WorkspaceDigestRequestKind,
         workspaceId: String,
-        payload: [String: Any],
         onResult: @escaping (Result<WorkspaceSidebarSummaryPriorityItem, Error>) -> Void
     ) {
         guard workspaceRefreshesInFlight.insert(workspaceId).inserted else {
 #if DEBUG
             cmuxDebugLog(
-                "summaryPriority.workspaceQueue.dedupe command=\(command) workspace=\(workspaceId.prefix(8)) " +
+                "summaryPriority.workspaceQueue.dedupe request=\(kind.debugName) workspace=\(workspaceId.prefix(8)) " +
                 "active=\(activeWorkspaceDigestRequestCount) queued=\(queuedWorkspaceDigestRequests.count)"
             )
 #endif
@@ -14644,14 +14744,13 @@ final class WorkspaceTabStore: ObservableObject {
         workspaceRefreshStages[workspaceId] = "queue"
         startProgressPolling()
         let request = WorkspaceDigestRequest(
-            command: command,
+            kind: kind,
             workspaceId: workspaceId,
-            payload: payload,
             onResult: onResult
         )
 #if DEBUG
         cmuxDebugLog(
-            "summaryPriority.workspaceQueue.enqueue command=\(command) workspace=\(workspaceId.prefix(8)) " +
+            "summaryPriority.workspaceQueue.enqueue request=\(kind.debugName) workspace=\(workspaceId.prefix(8)) " +
             "active=\(activeWorkspaceDigestRequestCount) queued=\(queuedWorkspaceDigestRequests.count)"
         )
 #endif
@@ -14661,7 +14760,7 @@ final class WorkspaceTabStore: ObservableObject {
             queuedWorkspaceDigestRequests.append(request)
 #if DEBUG
             cmuxDebugLog(
-                "summaryPriority.workspaceQueue.queued command=\(command) workspace=\(workspaceId.prefix(8)) " +
+                "summaryPriority.workspaceQueue.queued request=\(kind.debugName) workspace=\(workspaceId.prefix(8)) " +
                 "active=\(activeWorkspaceDigestRequestCount) queued=\(queuedWorkspaceDigestRequests.count)"
             )
 #endif
@@ -14674,15 +14773,11 @@ final class WorkspaceTabStore: ObservableObject {
         startProgressPolling()
 #if DEBUG
         cmuxDebugLog(
-            "summaryPriority.workspaceQueue.start command=\(request.command) workspace=\(request.workspaceId.prefix(8)) " +
+            "summaryPriority.workspaceQueue.start request=\(request.kind.debugName) workspace=\(request.workspaceId.prefix(8)) " +
             "active=\(activeWorkspaceDigestRequestCount) queued=\(queuedWorkspaceDigestRequests.count)"
         )
 #endif
-        sendDigestCommand(
-            request.command,
-            payload: request.payload,
-            decoding: WorkspaceSidebarSummaryPriorityItem.self
-        ) { [weak self] result in
+        let completion: (Result<WorkspaceSidebarSummaryPriorityItem, Error>) -> Void = { [weak self] result in
             guard let self else { return }
             self.activeWorkspaceDigestRequestCount = max(0, self.activeWorkspaceDigestRequestCount - 1)
             self.workspaceRefreshesInFlight.remove(request.workspaceId)
@@ -14694,13 +14789,13 @@ final class WorkspaceTabStore: ObservableObject {
             switch result {
             case .success(let item):
                 cmuxDebugLog(
-                    "summaryPriority.workspaceQueue.success command=\(request.command) workspace=\(request.workspaceId.prefix(8)) " +
+                    "summaryPriority.workspaceQueue.success request=\(request.kind.debugName) workspace=\(request.workspaceId.prefix(8)) " +
                     "stale=\(item.stale == true ? 1 : 0) active=\(self.activeWorkspaceDigestRequestCount) " +
                     "queued=\(self.queuedWorkspaceDigestRequests.count)"
                 )
             case .failure(let error):
                 cmuxDebugLog(
-                    "summaryPriority.workspaceQueue.failure command=\(request.command) workspace=\(request.workspaceId.prefix(8)) " +
+                    "summaryPriority.workspaceQueue.failure request=\(request.kind.debugName) workspace=\(request.workspaceId.prefix(8)) " +
                     "active=\(self.activeWorkspaceDigestRequestCount) queued=\(self.queuedWorkspaceDigestRequests.count) " +
                     "error=\(Self.displayMessage(for: error))"
                 )
@@ -14709,6 +14804,22 @@ final class WorkspaceTabStore: ObservableObject {
             request.onResult(result)
             self.runPendingAgentRefreshIfNeeded(shouldRunPendingAgentRefresh, workspaceId: request.workspaceId)
             self.drainWorkspaceDigestRequestQueue()
+        }
+        switch request.kind {
+        case .refresh(let force, let refinement, let sort):
+            digestService.refreshWorkspace(
+                workspaceId: request.workspaceId,
+                force: force,
+                refinement: refinement,
+                sort: sort,
+                completion: completion
+            )
+        case .score(let sort):
+            digestService.scoreWorkspace(
+                workspaceId: request.workspaceId,
+                sort: sort,
+                completion: completion
+            )
         }
     }
 
@@ -14761,11 +14872,6 @@ final class WorkspaceTabStore: ObservableObject {
             return
         }
 #endif
-        var payload: [String: Any] = ["workspaceId": workspaceId, "force": force]
-        payload["sort"] = effectiveSort.requestPayload
-        if let refinement {
-            payload["refinement"] = refinement
-        }
 #if DEBUG
         cmuxDebugLog(
             "summaryPriority.workspaceRefresh.request workspace=\(workspaceId.prefix(8)) " +
@@ -14774,9 +14880,8 @@ final class WorkspaceTabStore: ObservableObject {
         )
 #endif
         performWorkspaceRequest(
-            command: "refresh_summary_priority_workspace",
-            workspaceId: workspaceId,
-            payload: payload
+            kind: .refresh(force: force, refinement: refinement, sort: effectiveSort),
+            workspaceId: workspaceId
         ) { [weak self] result in
             guard let self else { return }
             if let requestGeneration,
@@ -14932,117 +15037,8 @@ final class WorkspaceTabStore: ObservableObject {
     }
 
     func setPinned(_ pinned: Bool, item: WorkspaceSidebarSummaryPriorityItem) {
-        sendDigestCommand(
-            "set_summary_priority_override",
-            payload: ["workspaceId": item.workspaceId, "pinned": pinned]
-        ) { [weak self] _ in
+        digestService.setOverride(workspaceId: item.workspaceId, patch: ["pinned": pinned]) { [weak self] _ in
             self?.refreshSummaryPriority()
-        }
-    }
-
-    private func sendDigestCommand(
-        _ command: String,
-        payload: [String: Any],
-        completion: @escaping (Result<Void, Error>) -> Void
-    ) {
-        sendDigestCommandRaw(command, payload: payload) { result in
-            switch result {
-            case .success: completion(.success(()))
-            case .failure(let error): completion(.failure(error))
-            }
-        }
-    }
-
-    private func sendDigestCommand<Response: Decodable>(
-        _ command: String,
-        payload: [String: Any],
-        decoding _: Response.Type,
-        completion: @escaping (Result<Response, Error>) -> Void
-    ) {
-        sendDigestCommandRaw(command, payload: payload) { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let body):
-                guard let data = body.data(using: .utf8) else {
-                    completion(.failure(CmuxSocketError(message: "Invalid UTF-8 from digest daemon")))
-                    return
-                }
-                do {
-                    let decoded = try Self.jsonDecoder.decode(Response.self, from: data)
-                    completion(.success(decoded))
-                } catch {
-                    completion(.failure(error))
-                }
-            }
-        }
-    }
-
-    private func sendDigestProgressCommand(
-        completion: @escaping (Result<WorkspaceSidebarDigestProgressState, Error>) -> Void
-    ) {
-        sendDigestCommandRaw(
-            "digest_progress",
-            payload: [:],
-            queue: Self.progressSocketQueue,
-            timeoutSeconds: Self.digestProgressSocketTimeoutSeconds
-        ) { result in
-            switch result {
-            case .failure(let error):
-                completion(.failure(error))
-            case .success(let body):
-                guard let data = body.data(using: .utf8) else {
-                    completion(.failure(CmuxSocketError(message: "Invalid UTF-8 from digest daemon")))
-                    return
-                }
-                do {
-                    completion(.success(try Self.jsonDecoder.decode(WorkspaceSidebarDigestProgressState.self, from: data)))
-                } catch {
-                    completion(.failure(error))
-                }
-            }
-        }
-    }
-
-    private func sendDigestCommandRaw(
-        _ command: String,
-        payload: [String: Any],
-        queue: DispatchQueue = WorkspaceTabStore.socketQueue,
-        timeoutSeconds: TimeInterval = WorkspaceTabStore.digestSocketTimeoutSeconds,
-        completion: @escaping (Result<String, Error>) -> Void
-    ) {
-        CmuxDigestDaemonSupervisor.shared.update(enabled: true)
-        let socketPath = CmuxDigestDaemonSupervisor.digestSocketPath()
-        queue.async {
-            let result: Result<String, Error>
-            do {
-                _ = Self.waitForDigestSocket(at: socketPath, timeout: Self.digestSocketStartupWaitSeconds)
-                let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [])
-                let payloadString = String(data: payloadData, encoding: .utf8) ?? "{}"
-                let line = "\(command) \(payloadString)"
-                let client = CmuxSocketClient(
-                    path: socketPath,
-                    timeoutSeconds: timeoutSeconds
-                )
-                try client.connect()
-                defer { client.close() }
-                let response = try client.send(command: line)
-                if response.hasPrefix("ERROR:") {
-                    let message = response.dropFirst("ERROR:".count).trimmingCharacters(in: .whitespacesAndNewlines)
-                    result = .failure(CmuxSocketError(message: message))
-                } else if response.hasPrefix("OK ") {
-                    result = .success(String(response.dropFirst(3)))
-                } else if response == "OK" {
-                    result = .success("")
-                } else {
-                    result = .failure(CmuxSocketError(message: "Unexpected response: \(response)"))
-                }
-            } catch {
-                result = .failure(error)
-            }
-            DispatchQueue.main.async {
-                completion(result)
-            }
         }
     }
 
@@ -15072,7 +15068,7 @@ final class WorkspaceTabStore: ObservableObject {
             return
         }
         progressPollInFlight = true
-        sendDigestProgressCommand { [weak self] result in
+        digestService.progress { [weak self] result in
             guard let self else { return }
             self.progressPollInFlight = false
             guard self.isLoading || !self.refreshingWorkspaceIds.isEmpty else {
@@ -15101,19 +15097,6 @@ final class WorkspaceTabStore: ObservableObject {
         }
     }
 
-    private static func waitForDigestSocket(at path: String, timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            var info = stat()
-            if stat(path, &info) == 0,
-               (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFSOCK) {
-                return true
-            }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        return false
-    }
-
 #if DEBUG
     private static func debugSortDescription(_ sort: WorkspaceSidebarSummaryPrioritySort) -> String {
         "\(sort.mode):\(sort.dimensionId ?? "nil"):\(sort.direction)"
@@ -15131,11 +15114,13 @@ final class WorkspaceTabStore: ObservableObject {
 
 private struct WorkspaceSidebarModeHeader: View {
     let workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
+    let pluginSystem: CMUXPluginAppProviding
     let onRefreshSidebarStatus: () -> Void
     @AppStorage(ExtensionColumnSettings.openKey)
     private var extensionColumnOpen: Bool = ExtensionColumnSettings.defaultOpen
 
     var body: some View {
+        let extensionContribution = WorkspaceSidebarTrailingOverlayExtensionResolver.summaryPriorityContribution(from: pluginSystem)
         HStack(spacing: 6) {
             Text(String(localized: "sidebar.workspaceTab.title", defaultValue: "Workspaces"))
                 .font(.system(size: 11, weight: .semibold))
@@ -15159,7 +15144,13 @@ private struct WorkspaceSidebarModeHeader: View {
             .safeHelp(String(localized: "sidebar.workspaceTab.refreshStatus", defaultValue: "Refresh sidebar status"))
 
             Button {
-                extensionColumnOpen.toggle()
+                guard let extensionContribution else {
+                    NSSound.beep()
+                    return
+                }
+                if !pluginSystem.toggleSidebarExtension(id: extensionContribution.id) {
+                    NSSound.beep()
+                }
             } label: {
                 Image(systemName: extensionColumnOpen ? "chevron.left.2" : "chevron.right.2")
                     .font(.system(size: 9, weight: .semibold))
@@ -15171,6 +15162,7 @@ private struct WorkspaceSidebarModeHeader: View {
                     )
             }
             .buttonStyle(.plain)
+            .disabled(extensionContribution == nil)
             .safeHelp(
                 extensionColumnOpen
                     ? String(localized: "extensionColumn.toggle.tooltip", defaultValue: "Hide extension column")
@@ -15179,6 +15171,18 @@ private struct WorkspaceSidebarModeHeader: View {
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 5)
+    }
+}
+
+enum WorkspaceSidebarTrailingOverlayExtensionResolver {
+    private static let summaryPriorityRenderer = "summary-priority"
+
+    static func summaryPriorityContribution(
+        from pluginSystem: CMUXPluginAppProviding
+    ) -> CMUXSidebarExtensionContribution? {
+        pluginSystem
+            .sidebarExtensions(placement: .workspaceSidebarTrailingOverlay)
+            .first { $0.metadata["renderer"] == summaryPriorityRenderer }
     }
 }
 
@@ -20224,6 +20228,46 @@ enum ExtensionColumnSettings {
     static let hoverDismissDelay: TimeInterval = 0.14
 }
 
+struct ExtensionColumnOpenStateRequest: Equatable {
+    static let idUserInfoKey = "id"
+    static let openUserInfoKey = "open"
+
+    let id: String
+    let open: Bool
+
+    init(id: String, open: Bool) {
+        self.id = id
+        self.open = open
+    }
+
+    init?(notification: Notification) {
+        guard let id = notification.userInfo?[Self.idUserInfoKey] as? String,
+              let open = notification.userInfo?[Self.openUserInfoKey] as? Bool else {
+            return nil
+        }
+        self.init(id: id, open: open)
+    }
+
+    var userInfo: [AnyHashable: Any] {
+        [
+            Self.idUserInfoKey: id,
+            Self.openUserInfoKey: open
+        ]
+    }
+
+    func post(to window: NSWindow?) {
+        NotificationCenter.default.post(
+            name: .extensionColumnOpenStateRequested,
+            object: window,
+            userInfo: userInfo
+        )
+    }
+}
+
+extension Notification.Name {
+    static let extensionColumnOpenStateRequested = Notification.Name("cmux.extensionColumnOpenStateRequested")
+}
+
 private struct ExtensionColumnRowData: Identifiable, Equatable {
     let tabId: UUID
     let tabIndex: Int
@@ -20330,6 +20374,7 @@ private struct ExtensionColumnWindowOverlayRoot: View {
     @ObservedObject var workspaceTabStore: WorkspaceTabStore
     @ObservedObject var workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
     @ObservedObject var tabManager: TabManager
+    let extensionContribution: CMUXSidebarExtensionContribution?
     let isOpen: Bool
     let sidebarWidth: CGFloat
     let onClose: () -> Void
@@ -20338,10 +20383,11 @@ private struct ExtensionColumnWindowOverlayRoot: View {
         GeometryReader { proxy in
             ZStack(alignment: .topLeading) {
                 Color.clear
-                if isOpen {
+                if isOpen, let extensionContribution {
                     ExtensionColumnOverlay(
                         workspaceTabStore: workspaceTabStore,
                         workspaceSidebarLayoutMetricsStore: workspaceSidebarLayoutMetricsStore,
+                        extensionContribution: extensionContribution,
                         isOpen: isOpen,
                         containerHeight: proxy.size.height,
                         topInset: ExtensionColumnSettings.trafficLightInset,
@@ -20367,6 +20413,7 @@ private struct ExtensionColumnWindowOverlayRoot: View {
 struct ExtensionColumnOverlay: View {
     @ObservedObject var workspaceTabStore: WorkspaceTabStore
     @ObservedObject var workspaceSidebarLayoutMetricsStore: WorkspaceSidebarLayoutMetricsStore
+    let extensionContribution: CMUXSidebarExtensionContribution
     @EnvironmentObject var tabManager: TabManager
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(WorkspaceSummaryPrioritySettings.enabledKey)
@@ -20634,9 +20681,7 @@ struct ExtensionColumnOverlay: View {
 
     private var extensionHeader: some View {
         HStack(spacing: 5) {
-            Text(isConfiguring
-                 ? String(localized: "extensionColumn.configure.title", defaultValue: "Configure")
-                 : String(localized: "extensionColumn.header.title", defaultValue: "Extension"))
+            Text(extensionTitle)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundColor(.secondary)
                 .lineLimit(1)
@@ -20662,6 +20707,13 @@ struct ExtensionColumnOverlay: View {
             .safeHelp(String(localized: "extensionColumn.toggle.tooltip", defaultValue: "Hide extension column"))
             configureButton
         }
+    }
+
+    private var extensionTitle: String {
+        if isConfiguring {
+            return String(localized: "extensionColumn.configure.title", defaultValue: "Configure")
+        }
+        return extensionContribution.title
     }
 
     private var configureButton: some View {

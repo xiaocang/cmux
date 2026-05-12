@@ -46,6 +46,8 @@ extension TabManager {
             index: tabs.firstIndex(where: { $0.id == workspace.id }),
             tabCount: tabs.count
         )
+        CMUXPluginSystem.shared.activate(trigger: .onWorkspaceOpen)
+        CMUXEnhancementSystem.shared.activate(trigger: .onWorkspaceOpen)
     }
 
     func publishCmuxInitialSurfaceCreated(_ workspace: Workspace, selected: Bool) {

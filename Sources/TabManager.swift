@@ -4,6 +4,7 @@ import Foundation
 import Bonsplit
 import CoreVideo
 import Combine
+import CMUXEnhancementAPI
 
 // MARK: - Tab Type Alias for Backwards Compatibility
 // The old Tab class is replaced by Workspace
@@ -12,7 +13,7 @@ typealias Tab = Workspace
 // KVO-observable accessor for workspace tags toggle
 extension UserDefaults {
     @objc dynamic var workspaceTagsEnabled: Bool {
-        bool(forKey: LeaderKeySettings.workspaceTagsEnabledKey)
+        bool(forKey: CMUXTmuxPrefixService.workspaceTagsEnabledSettingsKey)
     }
 }
 
@@ -804,16 +805,7 @@ class TabManager: ObservableObject {
         let repoDirectoriesBySlug: [String: String]
     }
 
-    struct WorkspacePullRequestShellRefreshTarget: Hashable, Sendable {
-        let branch: String
-        let repoSlugs: [String]
-    }
-
-    private struct WorkspacePullRequestShellRefreshEntry: Sendable {
-        var probeKeys: Set<WorkspaceGitProbeKey>
-        var fireAt: Date
-        var bypassRepoCache: Bool
-    }
+    typealias WorkspacePullRequestShellRefreshTarget = CMUXGitHubPullRequestRefreshTarget
 
     struct WorkspacePullRequestResolvedItem: Sendable, Equatable {
         let number: Int
@@ -972,7 +964,7 @@ class TabManager: ObservableObject {
     private nonisolated static let workspacePullRequestFailureBackoffMaxInterval: TimeInterval = 5 * 60
     private nonisolated static let workspacePullRequestRateLimitFallbackCooldown: TimeInterval = 5 * 60
     private nonisolated static let workspacePullRequestStaleThreshold = 3
-    private nonisolated static let workspacePullRequestQueuedShellTriggerReason = "queuedShellTrigger"
+    nonisolated static let workspacePullRequestQueuedShellTriggerReason = "queuedShellTrigger"
     @Published var selectedTabId: UUID? {
         willSet {
 #if DEBUG
@@ -1070,7 +1062,6 @@ class TabManager: ObservableObject {
     private var workspacePullRequestTransientFailureCountByKey: [WorkspaceGitProbeKey: Int] = [:]
     private var workspacePullRequestRepoCacheBySlug: [String: WorkspacePullRequestRepoCacheEntry] = [:]
     private var workspacePullRequestRateLimitedUntilByRepoSlug: [String: Date] = [:]
-    private var workspacePullRequestShellRefreshEntriesByTarget: [WorkspacePullRequestShellRefreshTarget: WorkspacePullRequestShellRefreshEntry] = [:]
     private var workspacePullRequestPollTimer: DispatchSourceTimer?
     private var workspacePullRequestRefreshTask: Task<Void, Never>?
     private var workspacePullRequestFollowUpShouldBypassRepoCache = false
@@ -1093,6 +1084,7 @@ class TabManager: ObservableObject {
     private var selectedWorkspaceGitMetadataPollTimer: DispatchSourceTimer?
     private var workspaceGHPRMetadataRefreshTimer: DispatchSourceTimer?
     private let requestGHPRMetadataRefresh: (String) -> Void
+    private let enhancementSystem: CMUXEnhancementAppProviding
 #if DEBUG
     private var debugWorkspaceSwitchCounter: UInt64 = 0
     private var debugWorkspaceSwitchId: UInt64 = 0
@@ -1112,11 +1104,14 @@ class TabManager: ObservableObject {
 
     init(
         initialWorkingDirectory: String? = nil,
-        requestGHPRMetadataRefresh: @escaping (String) -> Void = { workspaceId in
-            CmuxDigestDaemonSupervisor.requestRefresh(workspaceId: workspaceId)
-        }
+        ghprContextRefresher: CMUXGHPRContextRefreshProviding = CMUXPluginSystem.shared,
+        requestGHPRMetadataRefresh: ((String) -> Void)? = nil,
+        enhancementSystem: CMUXEnhancementAppProviding = CMUXEnhancementSystem.shared
     ) {
-        self.requestGHPRMetadataRefresh = requestGHPRMetadataRefresh
+        self.requestGHPRMetadataRefresh = requestGHPRMetadataRefresh ?? { workspaceId in
+            ghprContextRefresher.requestGHPRContextRefresh(workspaceId: workspaceId)
+        }
+        self.enhancementSystem = enhancementSystem
         addWorkspace(workingDirectory: initialWorkingDirectory)
         observers.append(NotificationCenter.default.addObserver(
             forName: .ghosttyDidSetTitle,
@@ -1268,7 +1263,7 @@ class TabManager: ObservableObject {
             return
         }
 
-        let nextQueuedShellRefreshAt = workspacePullRequestShellRefreshEntriesByTarget.values.map(\.fireAt).min()
+        let nextQueuedShellRefreshAt = enhancementSystem.github.nextQueuedRefreshAt()
         let nextPollAt = [
             workspacePullRequestNextPollAtByKey.values.min(),
             nextQueuedShellRefreshAt,
@@ -1533,6 +1528,18 @@ class TabManager: ObservableObject {
         )
     }
 
+    private static func enhancementKey(_ key: WorkspaceGitProbeKey) -> CMUXGitHubPullRequestRefreshKey {
+        CMUXGitHubPullRequestRefreshKey(workspaceId: key.workspaceId, panelId: key.panelId)
+    }
+
+    private static func probeKey(_ key: CMUXGitHubPullRequestRefreshKey) -> WorkspaceGitProbeKey {
+        WorkspaceGitProbeKey(workspaceId: key.workspaceId, panelId: key.panelId)
+    }
+
+    private static func enhancementKeys(_ keys: Set<WorkspaceGitProbeKey>) -> Set<CMUXGitHubPullRequestRefreshKey> {
+        Set(keys.map(enhancementKey))
+    }
+
     private func workspacePullRequestShellRefreshTarget(
         workspace: Workspace,
         panelId: UUID
@@ -1560,16 +1567,7 @@ class TabManager: ObservableObject {
     }
 
     private func removeWorkspacePullRequestShellRefreshProbeKey(_ key: WorkspaceGitProbeKey) {
-        guard !workspacePullRequestShellRefreshEntriesByTarget.isEmpty else { return }
-        for target in Array(workspacePullRequestShellRefreshEntriesByTarget.keys) {
-            guard var entry = workspacePullRequestShellRefreshEntriesByTarget[target] else { continue }
-            entry.probeKeys.remove(key)
-            if entry.probeKeys.isEmpty {
-                workspacePullRequestShellRefreshEntriesByTarget.removeValue(forKey: target)
-            } else {
-                workspacePullRequestShellRefreshEntriesByTarget[target] = entry
-            }
-        }
+        enhancementSystem.github.removeQueuedRefresh(key: Self.enhancementKey(key))
     }
 
     @discardableResult
@@ -1579,8 +1577,7 @@ class TabManager: ObservableObject {
         reason: String,
         now: Date = Date()
     ) -> Bool {
-        guard SidebarPullRequestShellDebounceSettings.isEnabled(),
-              reason == "shellPrompt" || reason.hasPrefix("commandHint:"),
+        guard reason == "shellPrompt" || reason.hasPrefix("commandHint:"),
               let workspace = tabs.first(where: { $0.id == workspaceId }),
               let target = workspacePullRequestShellRefreshTarget(
                 workspace: workspace,
@@ -1591,35 +1588,20 @@ class TabManager: ObservableObject {
 
         let key = WorkspaceGitProbeKey(workspaceId: workspaceId, panelId: panelId)
         let bypassRepoCache = !Self.workspacePullRequestRefreshAllowsRepoCache(reason: reason)
-        removeWorkspacePullRequestShellRefreshProbeKey(key)
-
-        if var existingEntry = workspacePullRequestShellRefreshEntriesByTarget[target] {
-            existingEntry.probeKeys.insert(key)
-            existingEntry.bypassRepoCache = existingEntry.bypassRepoCache || bypassRepoCache
-            workspacePullRequestShellRefreshEntriesByTarget[target] = existingEntry
-        } else {
-            workspacePullRequestShellRefreshEntriesByTarget[target] = WorkspacePullRequestShellRefreshEntry(
-                probeKeys: [key],
-                fireAt: now.addingTimeInterval(
-                    TimeInterval(SidebarPullRequestShellDebounceSettings.delaySeconds())
-                ),
-                bypassRepoCache: bypassRepoCache
-            )
+        let queued = enhancementSystem.github.queueRefreshIfNeeded(
+            request: CMUXGitHubPullRequestRefreshRequest(
+                key: Self.enhancementKey(key),
+                reason: reason,
+                target: target,
+                bypassRepoCache: bypassRepoCache,
+                triggerImmediateRefresh: false
+            ),
+            now: now
+        )
+        if queued {
+            updateWorkspacePullRequestPollTimer()
         }
-
-#if DEBUG
-        if let entry = workspacePullRequestShellRefreshEntriesByTarget[target] {
-            let fireDelay = entry.fireAt.timeIntervalSince(now)
-            cmuxDebugLog(
-                "workspace.prRefresh.queue workspace=\(workspaceId.uuidString.prefix(5)) " +
-                "panel=\(panelId.uuidString.prefix(5)) reason=\(reason) " +
-                "branch=\(target.branch) repos=\(target.repoSlugs.count) " +
-                "keys=\(entry.probeKeys.count) delay=\(String(format: "%.2f", fireDelay))"
-            )
-        }
-#endif
-        updateWorkspacePullRequestPollTimer()
-        return true
+        return queued
     }
 
     private func requestWorkspacePullRequestRefresh(
@@ -1658,20 +1640,40 @@ class TabManager: ObservableObject {
         panelId: UUID,
         reason: String
     ) {
-        if queueWorkspacePullRequestShellRefreshIfNeeded(
-            workspaceId: workspaceId,
-            panelId: panelId,
-            reason: reason
-        ) {
-            return
-        }
-
         let key = WorkspaceGitProbeKey(workspaceId: workspaceId, panelId: panelId)
-        requestWorkspacePullRequestRefresh(
-            key: key,
+        let target = workspacePullRequestShellRefreshTarget(for: key)
+        let request = CMUXGitHubPullRequestRefreshRequest(
+            key: Self.enhancementKey(key),
             reason: reason,
+            target: target,
             bypassRepoCache: !Self.workspacePullRequestRefreshAllowsRepoCache(reason: reason)
         )
+        let action = CMUXEnhancementAction(
+            id: CMUXGitHubEnhancementActionID.pullRequestRefresh,
+            source: "TabManager",
+            params: [
+                "workspace_id": workspaceId.uuidString,
+                "panel_id": panelId.uuidString,
+                "reason": reason,
+            ],
+            payload: request
+        )
+
+        let handled = enhancementSystem.actions.dispatch(action) { [weak self] action in
+            guard let self,
+                  let request = action.payload as? CMUXGitHubPullRequestRefreshRequest else {
+                return
+            }
+            self.requestWorkspacePullRequestRefresh(
+                key: Self.probeKey(request.key),
+                reason: request.reason,
+                bypassRepoCache: request.bypassRepoCache,
+                triggerImmediateRefresh: request.triggerImmediateRefresh
+            )
+        }
+        if handled {
+            updateWorkspacePullRequestPollTimer()
+        }
     }
 
     private func applyWorkspacePullRequestRefreshResults(
@@ -1763,7 +1765,7 @@ class TabManager: ObservableObject {
                     branch: resolvedPullRequest.branch,
                     isStale: false
                 )
-                CmuxDigestDaemonSupervisor.requestRefresh(workspaceId: workspace.id.uuidString)
+                requestGHPRMetadataRefresh(workspace.id.uuidString)
             case .notFound, .unsupportedRepository:
                 workspacePullRequestTransientFailureCountByKey[key] = 0
                 workspacePullRequestLastTerminalStateRefreshAtByKey.removeValue(forKey: key)
@@ -1863,11 +1865,12 @@ class TabManager: ObservableObject {
     private func flushQueuedWorkspacePullRequestShellRefreshesIfNeeded(
         now: Date = Date()
     ) -> Bool {
-        if workspacePullRequestShellRefreshEntriesByTarget.isEmpty {
+        let githubEnhancement = enhancementSystem.github
+        if githubEnhancement.queuedRefreshesAreEmpty() {
             return false
         }
         guard SidebarPullRequestShellDebounceSettings.isEnabled() else {
-            workspacePullRequestShellRefreshEntriesByTarget.removeAll()
+            githubEnhancement.resetQueuedRefreshes()
             return false
         }
 
@@ -1880,42 +1883,22 @@ class TabManager: ObservableObject {
         }
         pruneWorkspacePullRequestShellRefreshQueue(validKeys: validKeys)
 
-        let dueTargets = workspacePullRequestShellRefreshEntriesByTarget
-            .filter { $0.value.fireAt <= now }
-            .map(\.key)
-        guard !dueTargets.isEmpty else { return false }
-
-        var scheduledAnyRefresh = false
-        for target in dueTargets {
-            guard let entry = workspacePullRequestShellRefreshEntriesByTarget.removeValue(forKey: target) else {
-                continue
-            }
-
-            var scheduledKeys: Set<WorkspaceGitProbeKey> = []
-            for key in entry.probeKeys {
-                guard workspacePullRequestShellRefreshTarget(for: key) == target else {
-                    continue
-                }
-                scheduledKeys.insert(key)
-                requestWorkspacePullRequestRefresh(
-                    key: key,
-                    reason: Self.workspacePullRequestQueuedShellTriggerReason,
-                    bypassRepoCache: entry.bypassRepoCache,
-                    triggerImmediateRefresh: false
-                )
-            }
-
-            scheduledAnyRefresh = scheduledAnyRefresh || !scheduledKeys.isEmpty
-
-#if DEBUG
-            cmuxDebugLog(
-                "workspace.prRefresh.queue.flush branch=\(target.branch) " +
-                "repos=\(target.repoSlugs.count) scheduled=\(scheduledKeys.count)"
-            )
-#endif
+        let requests = githubEnhancement.flushDueQueuedRefreshes(
+            now: now,
+            validKeys: Self.enhancementKeys(validKeys),
+            ownedWorkspaceIds: Set(tabs.map(\.id))
+        ) { [weak self] key in
+            self?.workspacePullRequestShellRefreshTarget(for: Self.probeKey(key))
         }
-
-        guard scheduledAnyRefresh else { return false }
+        guard !requests.isEmpty else { return false }
+        for request in requests {
+            requestWorkspacePullRequestRefresh(
+                key: Self.probeKey(request.key),
+                reason: request.reason,
+                bypassRepoCache: request.bypassRepoCache,
+                triggerImmediateRefresh: false
+            )
+        }
         refreshTrackedWorkspacePullRequestsIfNeeded(
             reason: Self.workspacePullRequestQueuedShellTriggerReason,
             allowCachedResultsOverride: false
@@ -1924,21 +1907,12 @@ class TabManager: ObservableObject {
     }
 
     private func pruneWorkspacePullRequestShellRefreshQueue(validKeys: Set<WorkspaceGitProbeKey>) {
-        var prunedEntries: [WorkspacePullRequestShellRefreshTarget: WorkspacePullRequestShellRefreshEntry] = [:]
-
-        for (target, entry) in workspacePullRequestShellRefreshEntriesByTarget {
-            let matchingProbeKeys = entry.probeKeys.filter { key in
-                guard validKeys.contains(key) else { return false }
-                return workspacePullRequestShellRefreshTarget(for: key) == target
-            }
-            guard !matchingProbeKeys.isEmpty else { continue }
-
-            var nextEntry = entry
-            nextEntry.probeKeys = Set(matchingProbeKeys)
-            prunedEntries[target] = nextEntry
+        enhancementSystem.github.pruneQueuedRefreshes(
+            validKeys: Self.enhancementKeys(validKeys),
+            ownedWorkspaceIds: Set(tabs.map(\.id))
+        ) { [weak self] key in
+            self?.workspacePullRequestShellRefreshTarget(for: Self.probeKey(key))
         }
-
-        workspacePullRequestShellRefreshEntriesByTarget = prunedEntries
     }
 
     private func pruneWorkspacePullRequestTracking(validKeys: Set<WorkspaceGitProbeKey>) {
@@ -1972,11 +1946,7 @@ class TabManager: ObservableObject {
         workspacePullRequestProbeStateByKey = workspacePullRequestProbeStateByKey.filter { $0.key.workspaceId != workspaceId }
         workspacePullRequestLastTerminalStateRefreshAtByKey = workspacePullRequestLastTerminalStateRefreshAtByKey.filter { $0.key.workspaceId != workspaceId }
         workspacePullRequestTransientFailureCountByKey = workspacePullRequestTransientFailureCountByKey.filter { $0.key.workspaceId != workspaceId }
-        workspacePullRequestShellRefreshEntriesByTarget = workspacePullRequestShellRefreshEntriesByTarget.compactMapValues { entry in
-            var nextEntry = entry
-            nextEntry.probeKeys = Set(nextEntry.probeKeys.filter { $0.workspaceId != workspaceId })
-            return nextEntry.probeKeys.isEmpty ? nil : nextEntry
-        }
+        enhancementSystem.github.removeQueuedRefreshes(workspaceId: workspaceId)
         updateWorkspacePullRequestPollTimer()
     }
 
@@ -1989,7 +1959,10 @@ class TabManager: ObservableObject {
         workspacePullRequestTransientFailureCountByKey.removeAll()
         workspacePullRequestRepoCacheBySlug.removeAll()
         workspacePullRequestRateLimitedUntilByRepoSlug.removeAll()
-        workspacePullRequestShellRefreshEntriesByTarget.removeAll()
+        let githubEnhancement = enhancementSystem.github
+        for workspaceId in Set(tabs.map(\.id)) {
+            githubEnhancement.removeQueuedRefreshes(workspaceId: workspaceId)
+        }
         workspacePullRequestFollowUpShouldBypassRepoCache = false
         updateWorkspacePullRequestPollTimer()
     }
@@ -2200,27 +2173,11 @@ class TabManager: ObservableObject {
     }
 
     func workspacePullRequestShellRefreshQueueTargetsForTesting() -> [WorkspacePullRequestShellRefreshTarget] {
-        workspacePullRequestShellRefreshEntriesByTarget.keys.sorted {
-            let lhs = "\($0.branch)|\($0.repoSlugs.joined(separator: ","))"
-            let rhs = "\($1.branch)|\($1.repoSlugs.joined(separator: ","))"
-            return lhs < rhs
-        }
+        enhancementSystem.github.queuedRefreshTargets()
     }
 
     func workspacePullRequestShellRefreshQueueSnapshotForTesting() -> [(target: WorkspacePullRequestShellRefreshTarget, fireAt: Date, probeKeyCount: Int)] {
-        workspacePullRequestShellRefreshEntriesByTarget
-            .map { target, entry in
-                (
-                    target: target,
-                    fireAt: entry.fireAt,
-                    probeKeyCount: entry.probeKeys.count
-                )
-            }
-            .sorted {
-                let lhs = "\($0.target.branch)|\($0.target.repoSlugs.joined(separator: ","))"
-                let rhs = "\($1.target.branch)|\($1.target.repoSlugs.joined(separator: ","))"
-                return lhs < rhs
-            }
+        enhancementSystem.github.queuedRefreshSnapshot()
     }
 
     func workspacePullRequestNextPollAtForTesting(
@@ -8485,3 +8442,5 @@ extension Notification.Name {
     static let terminalPortalVisibilityDidChange = Notification.Name("cmux.terminalPortalVisibilityDidChange")
     static let browserPortalRegistryDidChange = Notification.Name("cmux.browserPortalRegistryDidChange")
 }
+
+extension TabManager: CMUXLeaderModeOwner {}

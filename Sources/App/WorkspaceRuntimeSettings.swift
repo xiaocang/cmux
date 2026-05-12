@@ -109,7 +109,7 @@ enum TerminalScrollBarSettings {
     }
 }
 
-enum DigestGHPRIntegrationSettings {
+enum CMUXGHPRIntegrationSettings {
     static let enabledKey = "digest.ghpr.enabled"
     static let socketPathKey = "digest.ghpr.socketPath"
     static let displayItemsKey = "digest.ghpr.displayItems"

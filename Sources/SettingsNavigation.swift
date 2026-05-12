@@ -1,4 +1,5 @@
 import SwiftUI
+import CMUXPluginAPI
 
 enum SettingsNavigationTarget: String, CaseIterable, Identifiable {
     case account
@@ -6,6 +7,7 @@ enum SettingsNavigationTarget: String, CaseIterable, Identifiable {
     case terminal
     case sidebarAppearance
     case betaFeatures
+    case enhancements
     case automation
     case browser
     case browserImport
@@ -31,6 +33,8 @@ enum SettingsNavigationTarget: String, CaseIterable, Identifiable {
             return String(localized: "settings.section.sidebarAppearance", defaultValue: "Sidebar")
         case .betaFeatures:
             return String(localized: "settings.section.betaFeatures", defaultValue: "Beta Features")
+        case .enhancements:
+            return String(localized: "settings.section.enhancements", defaultValue: "Enhancements")
         case .automation:
             return String(localized: "settings.section.automation", defaultValue: "Automation")
         case .browser:
@@ -62,6 +66,8 @@ enum SettingsNavigationTarget: String, CaseIterable, Identifiable {
             return "sidebar.left"
         case .betaFeatures:
             return "exclamationmark.triangle"
+        case .enhancements:
+            return "puzzlepiece.extension"
         case .automation:
             return "wand.and.sparkles"
         case .browser:
@@ -93,6 +99,8 @@ enum SettingsNavigationTarget: String, CaseIterable, Identifiable {
             return "\(title) sidebar details branches badges material terminal background"
         case .betaFeatures:
             return "\(title) beta experimental unstable feed dock right sidebar"
+        case .enhancements:
+            return "\(title) github pull request pr refresh delay debounce coalesce"
         case .automation:
             return "\(title) socket integrations hooks ports claude cursor gemini"
         case .browser:
@@ -328,6 +336,7 @@ enum SettingsSearchIndex {
         setting(.sidebarAppearance, "show-metadata", String(localized: "settings.app.showMetadata", defaultValue: "Show Custom Metadata in Sidebar"), "report meta status block"),
         setting(.betaFeatures, "feed", String(localized: "settings.betaFeatures.feed", defaultValue: "Feed"), "feed right sidebar agent decisions permissions questions"),
         setting(.betaFeatures, "dock", String(localized: "settings.betaFeatures.dock", defaultValue: "Dock"), "dock right sidebar terminal controls tui"),
+        setting(.enhancements, "github-pr-refresh", String(localized: "settings.enhancements.github.pullRequestShellDebounce", defaultValue: "GitHub PR Refresh Delay"), "github pull request pr shell refresh debounce coalesce merge"),
         setting(.automation, "socket-mode", String(localized: "settings.automation.socketMode", defaultValue: "Socket Control Mode"), "unix socket api access password auth"),
         setting(.automation, "socket-password", String(localized: "settings.automation.socketPassword", defaultValue: "Socket Password"), "socket auth credential"),
         setting(.automation, "claude-code", String(localized: "settings.automation.claudeCode", defaultValue: "Claude Code Integration"), "agent hooks notifications"),
@@ -363,15 +372,17 @@ enum SettingsSearchIndex {
         setting(.reset, "reset-all", String(localized: "settings.reset.resetAll", defaultValue: "Reset All Settings"), "restore defaults")
     ]
 
-    private static let allEntries = sectionEntries + settingEntries
+    private static let baseEntries = sectionEntries + settingEntries
 
     private static let entriesByID: [String: SettingsSearchEntry] = Dictionary(
-        uniqueKeysWithValues: allEntries.map { ($0.id, $0) }
+        uniqueKeysWithValues: baseEntries.map { ($0.id, $0) }
     )
 
     private static let settingsPathAnchorIDs: [String: String] = [
         "rightSidebar.beta.feed.enabled": settingID(for: .betaFeatures, idSuffix: "feed"),
         "rightSidebar.beta.dock.enabled": settingID(for: .betaFeatures, idSuffix: "dock"),
+        "automation.sidebarPullRequestShellDebounceEnabled": settingID(for: .enhancements, idSuffix: "github-pr-refresh"),
+        "automation.sidebarPullRequestShellDebounceSeconds": settingID(for: .enhancements, idSuffix: "github-pr-refresh"),
         "app.language": settingID(for: .app, idSuffix: "language"),
         "app.appearance": settingID(for: .app, idSuffix: "appearance"),
         "app.appIcon": settingID(for: .app, idSuffix: "app-icon"),
@@ -435,14 +446,15 @@ enum SettingsSearchIndex {
 
     static func entries(matching query: String) -> [SettingsSearchEntry] {
         let tokens = normalizedTokens(for: query)
+        let entries = baseEntries + pluginSettingEntries()
         guard !tokens.isEmpty else { return sectionEntries }
-        return allEntries.filter { entry in
+        return entries.filter { entry in
             tokens.allSatisfy { token in entry.normalizedSearchText.contains(token) }
         }
     }
 
     static func entry(withID id: String) -> SettingsSearchEntry? {
-        entriesByID[id]
+        entriesByID[id] ?? pluginSettingEntries().first { $0.id == id }
     }
 
     static func sectionEntry(for target: SettingsNavigationTarget) -> SettingsSearchEntry {
@@ -480,6 +492,23 @@ enum SettingsSearchIndex {
             symbolName: target.symbolName,
             searchText: "\(target.rawValue) \(idSuffix) \(target.searchText) \(searchText) \(SettingsSearchAliasIndex.aliases(target: target, idSuffix: idSuffix))"
         )
+    }
+
+    private static func pluginSettingEntries() -> [SettingsSearchEntry] {
+        CMUXPluginSystem.shared.settings.settingsContributions().compactMap { contribution in
+            guard let target = SettingsNavigationTarget(rawValue: contribution.target) else {
+                return nil
+            }
+            return SettingsSearchEntry(
+                id: contribution.anchorID ?? "plugin-setting:\(contribution.id)",
+                kind: .setting,
+                target: target,
+                title: contribution.title,
+                subtitle: contribution.subtitle ?? target.title,
+                symbolName: contribution.symbolName ?? target.symbolName,
+                searchText: "\(target.rawValue) \(contribution.id) \(target.searchText) \(contribution.searchText)"
+            )
+        }
     }
 
     private static func normalizedTokens(for query: String) -> [String] {

@@ -8136,7 +8136,10 @@ class GhosttyNSView: NSView, NSUserInterfaceValidations {
         if event.clickCount >= 2 {
             let key = ExtensionColumnSettings.openKey
             if UserDefaults.standard.bool(forKey: key) {
-                UserDefaults.standard.set(false, forKey: key)
+                ExtensionColumnOpenStateRequest(
+                    id: CMUXBuiltinSidebarExtensionID.summaryPriority,
+                    open: false
+                ).post(to: window)
                 #if DEBUG
                 cmuxDebugLog("extensionColumn.collapseFromTerminalMultiClick clickCount=\(event.clickCount)")
                 #endif

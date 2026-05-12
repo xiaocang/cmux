@@ -8534,7 +8534,7 @@ final class Workspace: Identifiable, ObservableObject {
             let t = title.trimmingCharacters(in: .whitespacesAndNewlines)
             base = t.isEmpty ? String(localized: "workspace.displayName.fallback", defaultValue: "Workspace") : t
         }
-        guard LeaderKeySettings.workspaceTagsEnabled, let tag, !tag.isEmpty else { return base }
+        guard CMUXWorkspaceTagSettings.isEnabled(), let tag, !tag.isEmpty else { return base }
         return String(format: String(localized: "workspace.displayTitle.tagged", defaultValue: "[%@] %@"), tag, base)
     }
 

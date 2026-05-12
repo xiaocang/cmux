@@ -41881,6 +41881,35 @@
         }
       }
     },
+    "extensionColumn.plugin.summaryPriority.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Summary Priority"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Summary Priority"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "摘要优先级"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "摘要優先級"
+          }
+        }
+      }
+    },
     "extensionColumn.l2.heading.activity": {
       "extractionState": "manual",
       "localizations": {
@@ -69296,6 +69325,108 @@
         }
       }
     },
+    "settings.enhancements.github.pullRequestShellDebounce": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub PR Refresh Delay"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub PR 更新遅延"
+          }
+        }
+      }
+    },
+    "settings.enhancements.github.pullRequestShellDebounce.delay": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PR Refresh Delay"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PR 更新遅延"
+          }
+        }
+      }
+    },
+    "settings.enhancements.github.pullRequestShellDebounce.delay.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delay shell-triggered pull request refreshes by this many seconds before checking GitHub."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "シェル起点の PR 更新を GitHub 確認前にこの秒数だけ遅延します。"
+          }
+        }
+      }
+    },
+    "settings.enhancements.github.pullRequestShellDebounce.note": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Applies to shell prompt and command-hint pull request refreshes. Matching repo and branch targets share one queued refresh window."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "shell prompt と command hint の PR 更新に適用されます。同じ repo と branch の更新は 1 つの待機ウィンドウを共有します。"
+          }
+        }
+      }
+    },
+    "settings.enhancements.github.pullRequestShellDebounce.subtitleOff": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shell-triggered sidebar pull request refreshes check GitHub immediately."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "シェル起点のサイドバー PR 更新はすぐに GitHub を確認します。"
+          }
+        }
+      }
+    },
+    "settings.enhancements.github.pullRequestShellDebounce.subtitleOn": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shell-triggered sidebar pull request refreshes are delayed and coalesced before checking GitHub."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "シェル起点のサイドバー PR 更新は GitHub 確認前に遅延・集約されます。"
+          }
+        }
+      }
+    },
     "settings.automation.socketMode": {
       "extractionState": "manual",
       "localizations": {
@@ -91781,6 +91912,35 @@
         }
       }
     },
+    "settings.section.enhancements": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enhancements"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拡張"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "增强"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "增強"
+          }
+        }
+      }
+    },
     "settings.section.automation": {
       "extractionState": "manual",
       "localizations": {
@@ -92155,6 +92315,23 @@
         }
       }
     },
+    "settings.section.ghpr": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ghpr"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ghpr"
+          }
+        }
+      }
+    },
     "settings.section.globalHotkey": {
       "extractionState": "manual",
       "localizations": {
@@ -92310,6 +92487,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "リーダーキー"
+          }
+        }
+      }
+    },
+    "settings.section.tmuxPrefix": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "tmux Prefix"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "tmux Prefix"
           }
         }
       }

@@ -848,23 +848,23 @@ final class CmuxSettingsFileStore {
         snapshot: inout ResolvedSettingsSnapshot
     ) {
         if let value = jsonBool(section["enabled"]) {
-            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.enabledKey] = .bool(value)
+            snapshot.managedUserDefaults[CMUXGHPRIntegrationSettings.enabledKey] = .bool(value)
         }
         if let raw = jsonString(section["socketPath"]) {
             let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.socketPathKey] = .string(
-                value.isEmpty ? DigestGHPRIntegrationSettings.defaultSocketPath : value
+            snapshot.managedUserDefaults[CMUXGHPRIntegrationSettings.socketPathKey] = .string(
+                value.isEmpty ? CMUXGHPRIntegrationSettings.defaultSocketPath : value
             )
         }
         if let values = jsonStringArray(section["displayItems"]) {
-            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.displayItemsKey] = .string(
+            snapshot.managedUserDefaults[CMUXGHPRIntegrationSettings.displayItemsKey] = .string(
                 values.joined(separator: ", ")
             )
         } else if section.keys.contains("displayItems") {
             logInvalid("digest.ghpr.displayItems", sourcePath: sourcePath)
         }
         if let raw = jsonString(section["jiraBaseURL"]) {
-            snapshot.managedUserDefaults[DigestGHPRIntegrationSettings.jiraBaseURLKey] = .string(raw)
+            snapshot.managedUserDefaults[CMUXGHPRIntegrationSettings.jiraBaseURLKey] = .string(raw)
         }
     }
 
@@ -1503,10 +1503,10 @@ final class CmuxSettingsFileStore {
                 "digest": [
                     "enabled": false,
                     "ghpr": [
-                        "enabled": DigestGHPRIntegrationSettings.defaultEnabled,
-                        "socketPath": DigestGHPRIntegrationSettings.defaultSocketPath,
-                        "displayItems": DigestGHPRIntegrationSettings.defaultDisplayItems,
-                        "jiraBaseURL": DigestGHPRIntegrationSettings.defaultJiraBaseURL,
+                        "enabled": CMUXGHPRIntegrationSettings.defaultEnabled,
+                        "socketPath": CMUXGHPRIntegrationSettings.defaultSocketPath,
+                        "displayItems": CMUXGHPRIntegrationSettings.defaultDisplayItems,
+                        "jiraBaseURL": CMUXGHPRIntegrationSettings.defaultJiraBaseURL,
                     ],
                 ],
             ],

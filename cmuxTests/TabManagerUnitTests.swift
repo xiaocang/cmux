@@ -997,7 +997,9 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         let defaults = UserDefaults.standard
         let previousEnabled = defaults.object(forKey: SidebarPullRequestShellDebounceSettings.enabledKey)
         let previousDelay = defaults.object(forKey: SidebarPullRequestShellDebounceSettings.delaySecondsKey)
+        CMUXEnhancementSystem.shared.github.resetQueuedRefreshes()
         defer {
+            CMUXEnhancementSystem.shared.github.resetQueuedRefreshes()
             if let previousEnabled {
                 defaults.set(previousEnabled, forKey: SidebarPullRequestShellDebounceSettings.enabledKey)
             } else {
@@ -1061,10 +1063,10 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         defaults.set(false, forKey: "digest.enabled")
-        defaults.set(true, forKey: DigestGHPRIntegrationSettings.enabledKey)
+        defaults.set(true, forKey: CMUXGHPRIntegrationSettings.enabledKey)
 
-        XCTAssertTrue(CmuxDigestDaemonSupervisor.ghprMetadataRefreshEnabled(defaults: defaults))
-        XCTAssertTrue(CmuxDigestDaemonSupervisor.writesSidebarMetadata(
+        XCTAssertTrue(CMUXGHPRService.metadataRefreshEnabled(defaults: defaults))
+        XCTAssertTrue(CMUXGHPRService.writesSidebarMetadata(
             digestEnabled: false,
             ghprEnabled: true,
             defaults: defaults
@@ -1077,10 +1079,10 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         defaults.removePersistentDomain(forName: suiteName)
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
-        defaults.set(true, forKey: DigestGHPRIntegrationSettings.enabledKey)
+        defaults.set(true, forKey: CMUXGHPRIntegrationSettings.enabledKey)
         defaults.set(false, forKey: "digest.writeSidebarMetadata")
 
-        XCTAssertFalse(CmuxDigestDaemonSupervisor.writesSidebarMetadata(
+        XCTAssertFalse(CMUXGHPRService.writesSidebarMetadata(
             digestEnabled: false,
             ghprEnabled: true,
             defaults: defaults

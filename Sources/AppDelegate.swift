@@ -1,6 +1,8 @@
 import AppKit
 import SwiftUI
 import Bonsplit
+import CMUXEnhancementAPI
+import CMUXPluginAPI
 import CMUXWorkstream
 import CoreServices
 import UserNotifications
@@ -512,6 +514,10 @@ final class CmuxMainThreadTurnProfiler {
 final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate, NSMenuItemValidation {
     nonisolated(unsafe) static var shared: AppDelegate?
 
+    private let pluginSystem: CMUXPluginAppProviding = CMUXPluginSystem.shared
+    private let pluginLifecycle: CMUXPluginLifecycleManaging = CMUXPluginSystem.shared
+    private let enhancementSystem: CMUXEnhancementAppProviding = CMUXEnhancementSystem.shared
+
     private static let cachedIsRunningUnderXCTest = detectRunningUnderXCTest(ProcessInfo.processInfo.environment)
 
     private var isRunningUnderXCTestCached: Bool {
@@ -711,15 +717,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     // MARK: - Leader Key State
 
-    private enum LeaderKeyState {
-        case inactive
-        case waitingForSecondKey
-    }
-
-    private var leaderKeyState: LeaderKeyState = .inactive
-    private var leaderKeyWorkItem: DispatchWorkItem?
-    private weak var leaderKeyOwner: TabManager?
-    private var leaderKeyDisableObserver: NSObjectProtocol?
+    private var leaderActionRegistryDisposable: CMUXPluginDisposable?
 #if DEBUG
     struct DebugWorkspaceTagPromptResult {
         let response: NSApplication.ModalResponse
@@ -1148,7 +1146,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         refreshGhosttyGotoSplitShortcuts()
         installGhosttyConfigObserver()
         installWindowResponderSwizzles()
-        installLeaderKeyDisableObserver()
+        installLeaderKeyPlugin()
         installBrowserAddressBarFocusObservers()
         installShortcutMonitor()
         installShortcutDefaultsObserver()
@@ -1553,7 +1551,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         _ = saveSessionSnapshot(includeScrollback: true, removeWhenEmpty: false)
         stopSessionAutosaveTimer()
         CloudVMActionLauncher.shared.terminateAll()
-        CmuxDigestDaemonSupervisor.shared.shutdown()
+        enhancementSystem.shutdown()
+        pluginLifecycle.shutdown()
         TerminalController.shared.stop()
         VSCodeServeWebController.shared.stop()
         BrowserProfileStore.shared.flushPendingSaves()
@@ -10657,28 +10656,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // When leader mode is already armed, dispatch the second key immediately.
         // This must run before modal/alert guards so that an already-armed leader
         // session is not blocked by intervening guard code.
-        if LeaderKeySettings.isEnabled, leaderKeyState == .waitingForSecondKey {
-            if synchronizeShortcutRoutingContext(event: event) {
-                cancelLeaderMode()
-                let leaderShortcut = KeyboardShortcutSettings.shortcut(for: .leaderKey)
-                // Double-press leader key: send the raw key through to terminal
-                if matchShortcut(event: event, shortcut: leaderShortcut) {
-                    return false
-                }
-                // ESC cancels leader mode
-                if event.keyCode == 53 {
-                    return true
-                }
-                // Try to dispatch the second key
-                if executeLeaderAction(event: event) {
-                    return true
-                }
-                // Unrecognized second key: beep and consume
-                NSSound.beep()
-                return true
-            } else {
-                cancelLeaderMode()
+        let enhancementSystem = self.enhancementSystem
+        let leaderSecondKeyRequest = CMUXTmuxLeaderSecondKeyRequest(event: event)
+        enhancementSystem.actions.dispatch(
+            CMUXEnhancementAction(
+                id: CMUXTmuxLeaderEnhancementActionID.secondKey,
+                source: "appDelegate.shortcut",
+                payload: leaderSecondKeyRequest
+            )
+        ) { action in
+            guard let request = action.payload as? CMUXTmuxLeaderSecondKeyRequest else {
+                return
             }
+            request.outcome = enhancementSystem.tmuxPrefix.handleSecondKey(event: request.event)
+        }
+        switch leaderSecondKeyRequest.outcome {
+        case .dispatched:
+            return true
+        case .passToTerminal:
+            return false
+        case .notHandled:
+            break
         }
 
         // Don't steal shortcuts from close-confirmation alerts. Keep standard alert key
@@ -10726,16 +10724,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // Placed after modal/alert guards so leader mode cannot arm from Settings,
         // close-confirmation alerts, or the command palette.
         // Second-key dispatch is handled earlier, before the guards.
-        if LeaderKeySettings.isEnabled, leaderKeyState == .inactive {
-            if synchronizeShortcutRoutingContext(event: event) {
-                let leaderShortcut = KeyboardShortcutSettings.shortcut(for: .leaderKey)
-                if matchShortcut(event: event, shortcut: leaderShortcut) {
-                    leaderKeyState = .waitingForSecondKey
-                    leaderKeyOwner = tabManager
-                    tabManager?.isLeaderModeActive = true
-                    startLeaderKeyTimer()
-                    return true
+        if let tabManager {
+            let leaderArmRequest = CMUXTmuxLeaderArmRequest(event: event, owner: tabManager)
+            enhancementSystem.actions.dispatch(
+                CMUXEnhancementAction(
+                    id: CMUXTmuxLeaderEnhancementActionID.arm,
+                    source: "appDelegate.shortcut",
+                    payload: leaderArmRequest
+                )
+            ) { action in
+                guard let request = action.payload as? CMUXTmuxLeaderArmRequest,
+                      let owner = request.owner else {
+                    return
                 }
+                request.didArm = enhancementSystem.tmuxPrefix.handleLeaderArm(
+                    event: request.event,
+                    owner: owner
+                )
+            }
+            if leaderArmRequest.didArm {
+                return true
             }
         }
 
@@ -11216,10 +11224,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         if matchConfiguredShortcut(event: event, action: .toggleExtensionColumn) {
-            DispatchQueue.main.async {
-                let key = ExtensionColumnSettings.openKey
-                let current = UserDefaults.standard.bool(forKey: key)
-                UserDefaults.standard.set(!current, forKey: key)
+            DispatchQueue.main.async { [pluginSystem] in
+                guard let extensionContribution = WorkspaceSidebarTrailingOverlayExtensionResolver
+                    .summaryPriorityContribution(from: pluginSystem),
+                    pluginSystem.toggleSidebarExtension(id: extensionContribution.id) else {
+                    NSSound.beep()
+                    return
+                }
             }
             return true
         }
@@ -12734,67 +12745,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     // MARK: - Leader Key Helpers
 
-    private func startLeaderKeyTimer() {
-        cancelLeaderKeyTimer()
-        let workItem = DispatchWorkItem { [weak self] in
-            self?.cancelLeaderMode()
-        }
-        leaderKeyWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + LeaderKeySettings.timeout, execute: workItem)
-    }
-
-    private func cancelLeaderKeyTimer() {
-        leaderKeyWorkItem?.cancel()
-        leaderKeyWorkItem = nil
-    }
-
-    private func cancelLeaderMode() {
-        leaderKeyState = .inactive
-        // Clear on the originating window's tabManager, not the currently focused one
-        leaderKeyOwner?.isLeaderModeActive = false
-        leaderKeyOwner = nil
-        cancelLeaderKeyTimer()
-    }
-
-    private func installLeaderKeyDisableObserver() {
-        guard leaderKeyDisableObserver == nil else { return }
-        leaderKeyDisableObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            if !LeaderKeySettings.isEnabled, self?.leaderKeyState != .inactive {
-                self?.cancelLeaderMode()
-            }
-        }
-    }
-
-    /// Dispatch the second key after leader key activation.
-    /// Returns true if the key was recognized and handled.
-    private func executeLeaderAction(event: NSEvent) -> Bool {
-#if DEBUG
-        cmuxDebugLog("leader.action chars=\(event.charactersIgnoringModifiers ?? "") shifted=\(event.characters ?? "") keyCode=\(event.keyCode) mods=\(event.modifierFlags.rawValue)")
-#endif
-
-        // Table-driven: match configurable keys to actions.
-        // Check both base key (unshifted) and shifted output to support rebound shifted symbols.
-        for action in LeaderKeySettings.LeaderAction.allCases {
-            let configuredKey = LeaderKeySettings.key(for: action)
-            if leaderActionMatches(event: event, action: action, configuredKey: configuredKey) {
-                return performLeaderAction(action)
-            }
-        }
-        return false
-    }
-
     /// Match a shortcut stroke against an event, handling normal keys.
     private func matchShortcutStroke(event: NSEvent, stroke: ShortcutStroke) -> Bool {
         stroke.matches(event: event, layoutCharacterProvider: shortcutLayoutCharacterProvider)
     }
 
+    func installLeaderKeyPlugin() {
+        let tmuxPrefix = enhancementSystem.tmuxPrefix
+        tmuxPrefix.configure(
+            keyMatcher: { [weak self] event, action, configuredKey in
+                guard let self else { return false }
+                return self.leaderActionMatches(
+                    event: event,
+                    action: action,
+                    configuredKey: configuredKey
+                )
+            },
+            leaderShortcutMatcher: { [weak self] event in
+                guard let self else { return false }
+                return self.matchShortcut(
+                    event: event,
+                    shortcut: KeyboardShortcutSettings.shortcut(for: .leaderKey)
+                )
+            },
+            routingContextSync: { [weak self] event in
+                guard let self else { return false }
+                return self.synchronizeShortcutRoutingContext(event: event)
+            }
+        )
+
+        leaderActionRegistryDisposable?.dispose()
+        leaderActionRegistryDisposable = tmuxPrefix.registerBuiltInLeaderActions { [weak self] action, _ in
+            self?.performLeaderAction(action) ?? false
+        }
+    }
+
     private func leaderActionMatches(
         event: NSEvent,
-        action: LeaderKeySettings.LeaderAction,
+        action: CMUXTmuxPrefixAction,
         configuredKey: String
     ) -> Bool {
         let chars = event.charactersIgnoringModifiers ?? ""
@@ -12804,7 +12792,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         // Keep broader leader matching behavior unchanged for all other actions.
-        guard action == .setWorkspaceTag, configuredKey == LeaderKeySettings.LeaderAction.setWorkspaceTag.defaultKey else {
+        guard action == .setWorkspaceTag, configuredKey == CMUXTmuxPrefixAction.setWorkspaceTag.defaultKey else {
             return false
         }
 
@@ -12846,9 +12834,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return false
     }
 
-    /// Execute a resolved leader action.
-    private func performLeaderAction(_ action: LeaderKeySettings.LeaderAction) -> Bool {
-        // Actions that don't require a workspace
+    private func performLeaderAction(_ action: CMUXTmuxPrefixAction) -> Bool {
         switch action {
         case .splitRight:
             _ = performSplitShortcut(direction: .right)
@@ -12908,13 +12894,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         case .selectTab9:
             ws.selectSurface(at: 8)
         case .splitRight, .splitDown, .setWorkspaceTag:
-            break // Already handled above
+            break
         }
         return true
     }
 
     private func beginSetWorkspaceTagFlow() -> Bool {
-        guard LeaderKeySettings.workspaceTagsEnabled else {
+        guard CMUXWorkspaceTagSettings.isEnabled() else {
             NSSound.beep()
             return true
         }
@@ -14553,7 +14539,7 @@ private extension NSWindow {
 
         if let ghosttyView = firstResponderGhosttyView {
             // While leader key mode is active, don't route keystrokes to the terminal.
-            // Let them flow through to the local event monitor so executeLeaderAction
+            // Let them flow through to the local event monitor so the leader-key plugin
             // can dispatch the second key.
             if AppDelegate.shared?.tabManager?.isLeaderModeActive == true {
 #if DEBUG

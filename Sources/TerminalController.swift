@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import CMUXPluginAPI
 import CMUXWorkstream
 import Foundation
 import Bonsplit
@@ -17,6 +18,126 @@ extension Notification.Name {
 nonisolated private struct SocketLineProcessingResult: Sendable {
     let response: String
     let authenticated: Bool
+}
+
+enum CMUXPluginSocketBridge {
+    static func v1Response(
+        commandId: String,
+        arguments: String,
+        rawLine: String,
+        commands: CMUXCommandRegistry
+    ) -> String? {
+        guard let command = commands.socketCommand(id: commandId) else {
+            return nil
+        }
+
+        let input = CMUXSocketCommandInput(
+            commandId: commandId,
+            protocolVersion: .v1,
+            rawLine: rawLine,
+            params: ["arguments": arguments],
+            arguments: arguments
+        )
+
+        do {
+            let result = try command.handler(input)
+            guard !result.payload.isEmpty else {
+                return "OK"
+            }
+            guard let encoded = encodePayload(result.payload) else {
+                return "ERROR: Plugin command returned a non-JSON payload"
+            }
+            return "OK \(encoded)"
+        } catch let error as CMUXSocketCommandError {
+            return "ERROR: \(error.message)"
+        } catch {
+            return "ERROR: \(String(describing: error))"
+        }
+    }
+
+    static func v2Response(
+        method: String,
+        id: Any?,
+        params: [String: Any],
+        rawLine: String,
+        commands: CMUXCommandRegistry
+    ) -> String? {
+        guard let command = commands.socketCommand(id: method) else {
+            return nil
+        }
+
+        let input = CMUXSocketCommandInput(
+            commandId: method,
+            protocolVersion: .v2,
+            rawLine: rawLine,
+            params: params,
+            jsonRPCId: id
+        )
+
+        do {
+            let result = try command.handler(input)
+            guard JSONSerialization.isValidJSONObject(result.payload) else {
+                return v2Error(
+                    id: id,
+                    code: "invalid_plugin_response",
+                    message: "Plugin command returned a non-JSON payload"
+                )
+            }
+            return v2Ok(id: id, result: result.payload)
+        } catch let error as CMUXSocketCommandError {
+            return v2Error(id: id, code: error.code, message: error.message, data: error.data)
+        } catch {
+            return v2Error(
+                id: id,
+                code: "plugin_command_failed",
+                message: String(describing: error)
+            )
+        }
+    }
+
+    private static func encodePayload(_ payload: [String: Any]) -> String? {
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload, options: []),
+              let string = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return string
+    }
+
+    private static func v2Ok(id: Any?, result: Any) -> String {
+        v2Encode([
+            "id": v2OrNull(id),
+            "ok": true,
+            "result": result,
+        ])
+    }
+
+    private static func v2Error(id: Any?, code: String, message: String, data: Any? = nil) -> String {
+        var err: [String: Any] = ["code": code, "message": message]
+        if let data {
+            err["data"] = data
+        }
+        return v2Encode([
+            "id": v2OrNull(id),
+            "ok": false,
+            "error": err,
+        ])
+    }
+
+    private static func v2Encode(_ object: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: []),
+              var string = String(data: data, encoding: .utf8) else {
+            return "{\"ok\":false,\"error\":{\"code\":\"encode_error\",\"message\":\"Failed to encode JSON\"}}"
+        }
+        string = string.replacingOccurrences(of: "\n", with: "\\n")
+        return string
+    }
+
+    private static func v2OrNull(_ value: Any?) -> Any {
+        if let value { return value }
+        return NSNull()
+    }
 }
 
 /// Unix socket-based controller for programmatic terminal control
@@ -60,6 +181,7 @@ class TerminalController {
     private nonisolated(unsafe) var acceptSourceConsecutiveFailures = 0
     private var clientHandlers: [Int32: Thread] = [:]
     private var tabManager: TabManager?
+    private nonisolated(unsafe) var pluginSocketCommands: CMUXCommandRegistry
     private nonisolated(unsafe) var accessMode: SocketControlMode = .cmuxOnly
     private nonisolated let myPid = getpid()
     private nonisolated static let socketCommandFocusAllowanceStackKey = "cmux.socketCommandFocusAllowanceStack"
@@ -211,7 +333,8 @@ class TerminalController {
     private let v2BrowserUndefinedSentinel = V2BrowserUndefinedSentinel()
     private var browserDownloadObserver: NSObjectProtocol?
 
-    private init() {
+    private init(pluginSocketCommands: CMUXCommandRegistry = CMUXPluginSystem.shared.commands) {
+        self.pluginSocketCommands = pluginSocketCommands
         browserDownloadObserver = NotificationCenter.default.addObserver(
             forName: .browserDownloadEventDidArrive,
             object: nil,
@@ -1472,6 +1595,13 @@ class TerminalController {
         let id: Any?
         let method: String
         let params: [String: Any]
+        let rawLine: String
+    }
+
+    private struct V1SocketRequest {
+        let commandId: String
+        let arguments: String
+        let rawLine: String
     }
 
     private nonisolated static let socketWorkerV2Methods: Set<String> = [
@@ -1486,8 +1616,11 @@ class TerminalController {
         "system.top",
     ]
 
-    private nonisolated static func executionPolicy(forV2Method method: String) -> SocketCommandExecutionPolicy {
-        if method.hasPrefix("vm.") || socketWorkerV2Methods.contains(method) {
+    private nonisolated func executionPolicy(forV2Method method: String) -> SocketCommandExecutionPolicy {
+        if method.hasPrefix("vm.") || Self.socketWorkerV2Methods.contains(method) {
+            return .socketWorker
+        }
+        if pluginSocketCommands.socketCommand(id: method)?.executionContext == .socketWorker {
             return .socketWorker
         }
         return .mainActor
@@ -1509,13 +1642,54 @@ class TerminalController {
         return V2SocketRequest(
             id: dict["id"],
             method: method,
-            params: dict["params"] as? [String: Any] ?? [:]
+            params: dict["params"] as? [String: Any] ?? [:],
+            rawLine: trimmedCommand
         )
+    }
+
+    private nonisolated func parseV1SocketRequest(_ command: String) -> V1SocketRequest? {
+        let trimmedCommand = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedCommand.isEmpty, !trimmedCommand.hasPrefix("{") else {
+            return nil
+        }
+
+        let parts = trimmedCommand.split(separator: " ", maxSplits: 1).map(String.init)
+        guard let commandId = parts.first?.lowercased(), !commandId.isEmpty else {
+            return nil
+        }
+
+        return V1SocketRequest(
+            commandId: commandId,
+            arguments: parts.count > 1 ? parts[1] : "",
+            rawLine: trimmedCommand
+        )
+    }
+
+    private nonisolated func socketWorkerV1RequestIfNeeded(for command: String) -> V1SocketRequest? {
+        guard let request = parseV1SocketRequest(command),
+              pluginSocketCommands.socketCommand(id: request.commandId)?.executionContext == .socketWorker else {
+            return nil
+        }
+        return request
+    }
+
+    private nonisolated func socketWorkerV1ResponseIfNeeded(for command: String) -> String? {
+        guard let request = socketWorkerV1RequestIfNeeded(for: command) else {
+            return nil
+        }
+
+        return withSocketCommandPolicy(commandKey: request.commandId, isV2: false) {
+            pluginSocketV1ResponseIfAvailable(
+                commandId: request.commandId,
+                arguments: request.arguments,
+                rawLine: request.rawLine
+            ) ?? "ERROR: Unknown command '\(request.commandId)'"
+        }
     }
 
     private nonisolated func socketWorkerV2ResponseIfNeeded(for command: String) -> String? {
         guard let request = parseV2SocketRequest(command),
-              Self.executionPolicy(forV2Method: request.method) == .socketWorker else {
+              executionPolicy(forV2Method: request.method) == .socketWorker else {
             return nil
         }
 
@@ -1569,6 +1743,14 @@ class TerminalController {
         case let method where method.hasPrefix("vm."):
             return socketWorkerCloudVMResponse(method: method, id: request.id, params: request.params)
         default:
+            if let pluginResponse = pluginSocketV2ResponseIfAvailable(
+                method: request.method,
+                id: request.id,
+                params: request.params,
+                rawLine: request.rawLine
+            ) {
+                return pluginResponse
+            }
             return v2Error(id: request.id, code: "method_not_found", message: "Unknown method")
         }
     }
@@ -1946,7 +2128,7 @@ class TerminalController {
     private nonisolated func processCommandUsingSocketExecutionPolicy(_ command: String) -> String {
         if Thread.isMainThread,
            let request = parseV2SocketRequest(command),
-           Self.executionPolicy(forV2Method: request.method) == .socketWorker {
+           executionPolicy(forV2Method: request.method) == .socketWorker {
             return v2Error(
                 id: request.id,
                 code: "invalid_dispatch",
@@ -1962,6 +2144,15 @@ class TerminalController {
             return withSocketCommandPolicy(commandKey: "ping", isV2: false) {
                 "PONG"
             }
+        }
+
+        if Thread.isMainThread,
+           let request = socketWorkerV1RequestIfNeeded(for: command) {
+            return "ERROR: \(request.commandId) must run off the main thread"
+        }
+
+        if let response = socketWorkerV1ResponseIfNeeded(for: command) {
+            return response
         }
 
         return v2MainSync {
@@ -2335,6 +2526,13 @@ class TerminalController {
                 return surfaceHealth(args)
 
             default:
+                if let pluginResponse = pluginSocketV1ResponseIfAvailable(
+                    commandId: cmd,
+                    arguments: args,
+                    rawLine: trimmed
+                ) {
+                    return pluginResponse
+                }
                 return "ERROR: Unknown command '\(cmd)'. Use 'help' for available commands."
             }
         }
@@ -2369,7 +2567,7 @@ class TerminalController {
             return v2Error(id: id, code: "invalid_request", message: "Missing method")
         }
 
-        guard Self.executionPolicy(forV2Method: method) == .mainActor else {
+        guard executionPolicy(forV2Method: method) == .mainActor else {
             return v2Error(
                 id: id,
                 code: "invalid_dispatch",
@@ -2814,9 +3012,45 @@ class TerminalController {
 #endif
 
             default:
+                if let pluginResponse = pluginSocketV2ResponseIfAvailable(
+                    method: method,
+                    id: id,
+                    params: params,
+                    rawLine: jsonLine
+                ) {
+                    return pluginResponse
+                }
                 return v2Error(id: id, code: "method_not_found", message: "Unknown method")
             }
         }
+    }
+
+    private nonisolated func pluginSocketV1ResponseIfAvailable(
+        commandId: String,
+        arguments: String,
+        rawLine: String
+    ) -> String? {
+        CMUXPluginSocketBridge.v1Response(
+            commandId: commandId,
+            arguments: arguments,
+            rawLine: rawLine,
+            commands: pluginSocketCommands
+        )
+    }
+
+    private nonisolated func pluginSocketV2ResponseIfAvailable(
+        method: String,
+        id: Any?,
+        params: [String: Any],
+        rawLine: String
+    ) -> String? {
+        CMUXPluginSocketBridge.v2Response(
+            method: method,
+            id: id,
+            params: params,
+            rawLine: rawLine,
+            commands: pluginSocketCommands
+        )
     }
 
     private func v2Capabilities() -> [String: Any] {
@@ -3038,13 +3272,14 @@ class TerminalController {
             "debug.window.screenshot",
         ])
 #endif
+        methods.append(contentsOf: pluginSocketCommands.socketCommands().map(\.id))
 
         return [
             "protocol": "cmux-socket",
             "version": 2,
             "socket_path": socketPath,
             "access_mode": accessMode.rawValue,
-            "methods": methods.sorted()
+            "methods": Set(methods).sorted()
         ]
     }
 
@@ -4538,7 +4773,7 @@ class TerminalController {
     }
 
     private func v2WorkspaceSetTag(params: [String: Any]) -> V2CallResult {
-        guard LeaderKeySettings.workspaceTagsEnabled else {
+        guard CMUXWorkspaceTagSettings.isEnabled() else {
             return .err(code: "disabled", message: "Workspace tags are disabled in settings", data: nil)
         }
         guard let tabManager = v2ResolveTabManager(params: params) else {

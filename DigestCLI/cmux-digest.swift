@@ -758,9 +758,7 @@ private struct DigestConfig {
     var agentSessionMaxTranscriptBytes: Int
     var agentSessionAllowLinkedLocalSessionDiscovery: Bool
     var ghprEnabled: Bool
-    var ghprSocketPath: String
     var ghprDisplayItems: [String]
-    var ghprJiraBaseURL: String?
 
     static func load() -> DigestConfig {
         let env = ProcessInfo.processInfo.environment
@@ -775,10 +773,6 @@ private struct DigestConfig {
             .map(GHPRDisplayItem.normalizeList)
         let envGHPRDisplayItems = env["CMUX_DIGEST_GHPR_DISPLAY_ITEMS"]
             .map(Self.displayItems)
-        let ghprSocketPath = env["CMUX_DIGEST_GHPR_SOCKET_PATH"]?.trimmedNonEmpty
-            ?? env["GHPR_SOCKET_PATH"]?.trimmedNonEmpty
-            ?? settings.string(in: "ghpr", key: "socketPath")?.trimmedNonEmpty
-            ?? Self.defaultGHPRSocketPath()
         let maxConcurrentLLM = max(
             1,
             Int(env["CMUX_DIGEST_MAX_CONCURRENT_LLM"] ?? "") ?? settings.int("maxConcurrentLLM") ?? 3
@@ -812,10 +806,7 @@ private struct DigestConfig {
             agentSessionMaxTranscriptBytes: Int(env["CMUX_DIGEST_AGENT_SESSION_MAX_BYTES"] ?? "") ?? settings.int("agentSessionMaxTranscriptBytes") ?? 200_000,
             agentSessionAllowLinkedLocalSessionDiscovery: env["CMUX_DIGEST_ALLOW_LOCAL_SESSION_DISCOVERY"].map(DigestConfig.bool) ?? settings.bool("agentSessionAllowLinkedLocalSessionDiscovery") ?? false,
             ghprEnabled: env["CMUX_DIGEST_GHPR_ENABLED"].map(DigestConfig.bool) ?? settings.bool(in: "ghpr", key: "enabled") ?? false,
-            ghprSocketPath: ghprSocketPath,
-            ghprDisplayItems: envGHPRDisplayItems ?? settingsGHPRDisplayItems ?? GHPRDisplayItem.defaultItems,
-            ghprJiraBaseURL: env["CMUX_DIGEST_GHPR_JIRA_BASE_URL"]?.trimmedNonEmpty
-                ?? settings.string(in: "ghpr", key: "jiraBaseURL")?.trimmedNonEmpty
+            ghprDisplayItems: envGHPRDisplayItems ?? settingsGHPRDisplayItems ?? GHPRDisplayItem.defaultItems
         )
     }
 
@@ -837,10 +828,6 @@ private struct DigestConfig {
         GHPRDisplayItem.normalizeList(
             raw.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
         )
-    }
-
-    private static func defaultGHPRSocketPath() -> String {
-        "/tmp/com.xiaocang.PRDashboard.\(getuid()).sock"
     }
 }
 
@@ -892,6 +879,18 @@ private enum DigestDebugLog {
             .replacingOccurrences(of: "\t", with: "\\t")
             .replacingOccurrences(of: " ", with: "_")
         return output.truncated(240)
+    }
+}
+
+private enum DigestWarningLog {
+    static func warning(_ message: String) {
+        fputs("cmux-digest: warning: \(singleLine(message))\n", stderr)
+    }
+
+    private static func singleLine(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "\r", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
     }
 }
 
@@ -1156,6 +1155,37 @@ private final class CmuxAdapter {
         try sendV1("sidebar_state --tab=\(workspaceId)")
     }
 
+    func pluginGHPRContext(workspaceId: String) -> GHPRPullRequestContext? {
+        do {
+            let payload = try sendV2(
+                method: "plugin.context.collect",
+                params: ["workspace_id": workspaceId]
+            )
+            let items = payload["items"] as? [[String: Any]] ?? []
+            for item in items {
+                guard item["source"] as? String == "@cmux/plugin-ghpr",
+                      item["kind"] as? String == "pull_request",
+                      let metadata = item["metadata"] as? [String: Any],
+                      let encoded = metadata["pullRequestJSON"] as? String,
+                      let data = encoded.data(using: .utf8),
+                      let context = try? JSONDecoder().decode(GHPRPullRequestContext.self, from: data) else {
+                    continue
+                }
+                return context
+            }
+            return nil
+        } catch {
+            DigestWarningLog.warning(
+                "GHPR context unavailable via plugin.context.collect for workspace \(workspaceId): \(error)"
+            )
+            DigestDebugLog.event("plugin.context.collect.failed", fields: [
+                "workspace": workspaceId,
+                "error": String(describing: error)
+            ])
+            return nil
+        }
+    }
+
     func setDigestStatus(_ digest: WorkspaceDigest) {
         guard config.writeSidebarMetadata else { return }
         let value = "\(digest.topic.text) - \(digest.state.currentStatus.label)"
@@ -1286,290 +1316,14 @@ private final class CmuxAdapter {
 }
 
 private final class GHPRContextService {
-    private let config: DigestConfig
+    private let pluginContextProvider: (String) -> GHPRPullRequestContext?
 
-    init(config: DigestConfig) {
-        self.config = config
+    init(pluginContextProvider: @escaping (String) -> GHPRPullRequestContext?) {
+        self.pluginContextProvider = pluginContextProvider
     }
 
-    func context(fromSidebarState sidebarState: String) -> GHPRPullRequestContext? {
-        guard config.ghprEnabled,
-              let reference = Self.pullRequestReference(fromSidebarState: sidebarState) else {
-            return nil
-        }
-
-        do {
-            let client = GHPRSocketClient(path: config.ghprSocketPath)
-            return try client.pullRequest(
-                repository: reference.repository,
-                number: reference.number,
-                jiraBaseURL: config.ghprJiraBaseURL
-            )
-        } catch {
-            return nil
-        }
-    }
-
-    private static func pullRequestReference(fromSidebarState sidebarState: String) -> (repository: String, number: Int)? {
-        for line in sidebarState.split(separator: "\n").map(String.init) {
-            guard line.hasPrefix("pr=") else { continue }
-            let value = String(line.dropFirst("pr=".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard value != "none", !value.isEmpty else { return nil }
-            let parts = value.split(separator: " ").map(String.init)
-            let number = parts.lazy.compactMap { part -> Int? in
-                let trimmed = part.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard trimmed.hasPrefix("#") else { return nil }
-                return Int(trimmed.dropFirst())
-            }.first
-            let url = parts.last(where: { $0.hasPrefix("http://") || $0.hasPrefix("https://") })
-            guard let number,
-                  let url,
-                  let repository = githubRepositorySlug(fromPullRequestURLString: url) else {
-                return nil
-            }
-            return (repository, number)
-        }
-        return nil
-    }
-
-    private static func githubRepositorySlug(fromPullRequestURLString raw: String) -> String? {
-        guard let url = URL(string: raw) else { return nil }
-        let components = url.pathComponents.filter { $0 != "/" }
-        guard components.count >= 4,
-              components[2] == "pull",
-              Int(components[3]) != nil else {
-            return nil
-        }
-        let owner = components[0].trimmingCharacters(in: .whitespacesAndNewlines)
-        let repo = components[1].trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !owner.isEmpty, !repo.isEmpty else { return nil }
-        return "\(owner)/\(repo)"
-    }
-}
-
-private final class GHPRSocketClient {
-    private let path: String
-    private let encoder = JSONEncoder()
-    private let decoder = JSONDecoder()
-    private let maxResponseBytes = 4 * 1024 * 1024
-
-    init(path: String) {
-        self.path = path
-    }
-
-    func pullRequest(repository: String, number: Int, jiraBaseURL: String?) throws -> GHPRPullRequestContext? {
-        let response = try call(GHPRRequest(command: "pr", repository: repository, number: number))
-        guard response.schemaVersion == 1 else {
-            throw DigestError(description: "unsupported ghpr schemaVersion \(response.schemaVersion)")
-        }
-        if response.ok {
-            guard let raw = response.pullRequest else { return nil }
-            return GHPRPullRequestContext(raw: raw, fallbackRepository: repository, fallbackNumber: number, jiraBaseURL: jiraBaseURL)
-        }
-        if response.error?.code == "not_found" {
-            return nil
-        }
-        throw DigestError(description: response.error?.message ?? "ghpr socket request failed")
-    }
-
-    private func call(_ request: GHPRRequest) throws -> GHPRResponse {
-        let fd = try connect()
-        defer { Darwin.close(fd) }
-
-        let data = try encoder.encode(request)
-        var payload = data
-        payload.append(0x0A)
-        try writeAll(payload, to: fd)
-        Darwin.shutdown(fd, SHUT_WR)
-
-        var responseData = Data()
-        var buffer = [UInt8](repeating: 0, count: 65536)
-        while true {
-            let count = Darwin.read(fd, &buffer, buffer.count)
-            if count < 0 {
-                if errno == EINTR { continue }
-                throw DigestError(description: "ghpr socket read failed (errno \(errno))")
-            }
-            if count == 0 { break }
-            responseData.append(buffer, count: count)
-            if responseData.count > maxResponseBytes {
-                throw DigestError(description: "ghpr socket response exceeded 4 MiB")
-            }
-        }
-        guard !responseData.isEmpty else {
-            throw DigestError(description: "ghpr socket returned an empty response")
-        }
-        return try decoder.decode(GHPRResponse.self, from: responseData)
-    }
-
-    private func connect() throws -> Int32 {
-        var st = stat()
-        guard stat(path, &st) == 0 else {
-            throw DigestError(description: "ghpr socket not found at \(path)")
-        }
-        guard (st.st_mode & mode_t(S_IFMT)) == mode_t(S_IFSOCK) else {
-            throw DigestError(description: "ghpr path is not a socket: \(path)")
-        }
-        guard st.st_uid == getuid() else {
-            throw DigestError(description: "ghpr socket is not owned by current user: \(path)")
-        }
-
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else {
-            throw DigestError(description: "failed to create ghpr socket (errno \(errno))")
-        }
-
-        do {
-            try configureTimeouts(fd)
-
-            var addr = sockaddr_un()
-            addr.sun_family = sa_family_t(AF_UNIX)
-            let maxLen = MemoryLayout.size(ofValue: addr.sun_path)
-            guard path.utf8CString.count <= maxLen else {
-                throw DigestError(description: "ghpr socket path too long: \(path)")
-            }
-            path.withCString { src in
-                withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
-                    let dst = UnsafeMutableRawPointer(ptr).assumingMemoryBound(to: CChar.self)
-                    strncpy(dst, src, maxLen - 1)
-                }
-            }
-
-            let result = withUnsafePointer(to: &addr) { ptr in
-                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sockaddrPtr in
-                    Darwin.connect(fd, sockaddrPtr, socklen_t(MemoryLayout<sockaddr_un>.size))
-                }
-            }
-            guard result == 0 else {
-                throw DigestError(description: "failed to connect to ghpr socket \(path) (errno \(errno))")
-            }
-            return fd
-        } catch {
-            Darwin.close(fd)
-            throw error
-        }
-    }
-
-    private func configureTimeouts(_ fd: Int32) throws {
-        var timeout = timeval(tv_sec: time_t(2), tv_usec: suseconds_t(0))
-        let timeoutSize = socklen_t(MemoryLayout<timeval>.size)
-        guard setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, timeoutSize) == 0,
-              setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, timeoutSize) == 0 else {
-            throw DigestError(description: "failed to configure ghpr socket timeout (errno \(errno))")
-        }
-        var nosigpipe: Int32 = 1
-        _ = setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, socklen_t(MemoryLayout<Int32>.size))
-    }
-
-    private func writeAll(_ data: Data, to fd: Int32) throws {
-        try data.withUnsafeBytes { rawBuffer in
-            guard let base = rawBuffer.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return }
-            var offset = 0
-            while offset < data.count {
-                let written = Darwin.write(fd, base.advanced(by: offset), data.count - offset)
-                if written < 0 {
-                    if errno == EINTR { continue }
-                    throw DigestError(description: "ghpr socket write failed (errno \(errno))")
-                }
-                if written == 0 {
-                    throw DigestError(description: "ghpr socket closed during write")
-                }
-                offset += written
-            }
-        }
-    }
-}
-
-private struct GHPRRequest: Encodable {
-    var command: String
-    var repository: String?
-    var number: Int?
-}
-
-private struct GHPRResponse: Decodable {
-    var schemaVersion: Int
-    var ok: Bool
-    var pullRequest: GHPRRawPullRequest?
-    var error: GHPRSocketErrorPayload?
-}
-
-private struct GHPRSocketErrorPayload: Decodable {
-    var code: String
-    var message: String
-}
-
-private struct GHPRRawPullRequest: Decodable {
-    var id: Int?
-    var section: String?
-    var repository: String?
-    var number: Int?
-    var title: String?
-    var author: String?
-    var url: String?
-    var state: String?
-    var isDraft: Bool?
-    var isPinned: Bool?
-    var hasBaseConflicts: Bool?
-    var unresolvedCount: Int?
-    var ciStatus: String?
-    var checkSuccessCount: Int?
-    var checkFailureCount: Int?
-    var checkPendingCount: Int?
-    var ciIsRunning: Bool?
-    var approvalCount: Int?
-    var changesRequestedCount: Int?
-    var myReviewStatus: String?
-    var jiraTicket: String?
-    var updatedAt: String?
-    var mergedAt: String?
-}
-
-private extension GHPRPullRequestContext {
-    init(raw: GHPRRawPullRequest, fallbackRepository: String, fallbackNumber: Int, jiraBaseURL: String?) {
-        let ticket = raw.jiraTicket?.trimmedNonEmpty
-        self.repository = raw.repository?.trimmedNonEmpty ?? fallbackRepository
-        self.number = raw.number ?? fallbackNumber
-        self.title = raw.title?.trimmedNonEmpty ?? "Pull Request #\(self.number)"
-        self.author = raw.author?.trimmedNonEmpty ?? "unknown"
-        self.url = raw.url?.trimmedNonEmpty ?? ""
-        self.state = raw.state?.trimmedNonEmpty ?? "UNKNOWN"
-        self.isDraft = raw.isDraft ?? false
-        self.isPinned = raw.isPinned ?? false
-        self.hasBaseConflicts = raw.hasBaseConflicts ?? false
-        self.unresolvedCount = raw.unresolvedCount ?? 0
-        self.ciStatus = raw.ciStatus?.trimmedNonEmpty
-        self.checkSuccessCount = raw.checkSuccessCount ?? 0
-        self.checkFailureCount = raw.checkFailureCount ?? 0
-        self.checkPendingCount = raw.checkPendingCount ?? 0
-        self.ciIsRunning = raw.ciIsRunning ?? false
-        self.approvalCount = raw.approvalCount ?? 0
-        self.changesRequestedCount = raw.changesRequestedCount
-        self.myReviewStatus = raw.myReviewStatus?.trimmedNonEmpty
-        self.jiraTicket = ticket
-        self.jiraURL = GHPRJiraURLBuilder.urlString(ticket: ticket, baseURL: jiraBaseURL)
-        self.updatedAt = raw.updatedAt?.trimmedNonEmpty ?? ""
-        self.mergedAt = raw.mergedAt?.trimmedNonEmpty
-        self.section = raw.section?.trimmedNonEmpty
-        self.source = "ghpr_socket"
-    }
-}
-
-private enum GHPRJiraURLBuilder {
-    static func urlString(ticket: String?, baseURL: String?) -> String? {
-        guard let ticket = ticket?.trimmedNonEmpty,
-              let rawBase = baseURL?.trimmedNonEmpty else {
-            return nil
-        }
-        let encodedTicket = ticket.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? ticket
-        if rawBase.contains("{ticket}") {
-            return rawBase.replacingOccurrences(of: "{ticket}", with: encodedTicket)
-        }
-        let trimmedBase = rawBase.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !trimmedBase.isEmpty else { return nil }
-        if trimmedBase.hasSuffix("/browse") {
-            return "\(trimmedBase)/\(encodedTicket)"
-        }
-        return "\(trimmedBase)/browse/\(encodedTicket)"
+    func context(workspaceId: String) -> GHPRPullRequestContext? {
+        pluginContextProvider(workspaceId)
     }
 }
 
@@ -5264,7 +5018,9 @@ private final class DigestController {
         self.git = git
         self.store = store
         self.llm = DigestLLMClient(config: config)
-        self.ghpr = GHPRContextService(config: config)
+        self.ghpr = GHPRContextService { workspaceId in
+            cmux.pluginGHPRContext(workspaceId: workspaceId)
+        }
         self.agentSessions = AgentSessionDigestService(
             config: config,
             repository: AgentSessionRepository(root: config.appSupportDirectory)
@@ -5385,9 +5141,8 @@ private final class DigestController {
         return output.sorted(by: DigestSort.precedes)
     }
 
-    /// Lightweight ghpr-only refresh: query the ghpr socket for the current
-    /// PR context and diff-apply sidebar badges. Skips all LLM work and the
-    /// cmux v1/v2 chatter that a full digest refresh does.
+    /// Lightweight ghpr-only refresh: query plugin-provided PR context and
+    /// diff-apply sidebar badges. Skips all LLM work.
     func refreshGHPRMetadata(workspaceId: String) throws -> [String: String] {
         guard config.ghprEnabled else {
             return ["status": "ghpr disabled"]
@@ -5395,8 +5150,7 @@ private final class DigestController {
         guard config.writeSidebarMetadata else {
             return ["status": "sidebar metadata disabled"]
         }
-        let sidebarState = try cmux.sidebarStateOrThrow(workspaceId: workspaceId)
-        let context = ghpr.context(fromSidebarState: sidebarState)
+        let context = ghpr.context(workspaceId: workspaceId)
         cmux.applyGHPRMetadata(context, workspaceId: workspaceId)
         guard context != nil else {
             return ["status": "no ghpr context"]
@@ -6071,7 +5825,7 @@ private final class DigestController {
         let surfaces = try cmux.listSurfaces(workspaceId: workspace.id)
         let cwd = workspace.currentDirectory ?? parseSidebarValue("focused_cwd", from: sidebarState) ?? parseSidebarValue("cwd", from: sidebarState)
         let gitFacts = git.facts(cwd: cwd)
-        let ghprContext = ghpr.context(fromSidebarState: sidebarState)
+        let ghprContext = ghpr.context(workspaceId: workspace.id)
         let terminalSurfaces = surfaces.filter { $0.type == "terminal" }
         let inputSurfaces = Self.workspaceInputSurfaces(terminalSurfaces, level: level)
         DigestDebugLog.event("workspace.refresh.input", fields: [
