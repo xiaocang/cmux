@@ -16627,7 +16627,7 @@ private struct TabItemView: View, Equatable {
                 updateSelection()
             }
             .onHover { hovering in
-                guard !rowInteractionState.contextMenuVisible else {
+                guard !rowInteractionState.freezesSidebarWorkspaceDetails else {
                     if !hovering {
                         reportHoverState(tab.id, false)
                     }

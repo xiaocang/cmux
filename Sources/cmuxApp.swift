@@ -5514,10 +5514,6 @@ struct SettingsView: View {
     private var openSidebarPullRequestLinksInCmuxBrowser = BrowserLinkOpenSettings.defaultOpenSidebarPullRequestLinksInCmuxBrowser
     @AppStorage(BrowserLinkOpenSettings.openSidebarPortLinksInCmuxBrowserKey)
     private var openSidebarPortLinksInCmuxBrowser = BrowserLinkOpenSettings.defaultOpenSidebarPortLinksInCmuxBrowser
-    @AppStorage(ShortcutHintDebugSettings.showHintsOnCommandHoldKey)
-    private var showShortcutHintsOnCommandHold = ShortcutHintDebugSettings.defaultShowHintsOnCommandHold
-    @AppStorage(ShortcutHintDebugSettings.showHintsOnControlHoldKey)
-    private var showShortcutHintsOnControlHold = ShortcutHintDebugSettings.defaultShowHintsOnControlHold
     @AppStorage("sidebarShowSSH") private var sidebarShowSSH = SidebarWorkspaceDetailDefaults.showSSH
     @AppStorage("sidebarShowPorts") private var sidebarShowPorts = SidebarWorkspaceDetailDefaults.showPorts
     @AppStorage("sidebarShowLog") private var sidebarShowLog = SidebarWorkspaceDetailDefaults.showLog
@@ -8071,8 +8067,6 @@ struct SettingsView: View {
         sidebarMakePullRequestClickable = SidebarPullRequestClickabilitySettings.defaultClickable
         openSidebarPullRequestLinksInCmuxBrowser = BrowserLinkOpenSettings.defaultOpenSidebarPullRequestLinksInCmuxBrowser
         openSidebarPortLinksInCmuxBrowser = BrowserLinkOpenSettings.defaultOpenSidebarPortLinksInCmuxBrowser
-        showShortcutHintsOnCommandHold = ShortcutHintDebugSettings.defaultShowHintsOnCommandHold
-        showShortcutHintsOnControlHold = ShortcutHintDebugSettings.defaultShowHintsOnControlHold
         sidebarShowSSH = SidebarWorkspaceDetailDefaults.showSSH
         sidebarShowPorts = SidebarWorkspaceDetailDefaults.showPorts
         sidebarShowLog = SidebarWorkspaceDetailDefaults.showLog
