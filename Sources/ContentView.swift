@@ -16158,35 +16158,6 @@ private struct TabItemView: View, Equatable {
             if let summaryScoreBadge {
                 summaryScoreBadgeView(summaryScoreBadge)
             }
-
-            ZStack(alignment: .trailing) {
-                Button(action: {
-                    #if DEBUG
-                    cmuxDebugLog("sidebar.close workspace=\(tab.id.uuidString.prefix(5)) method=button")
-                    #endif
-                    tabManager.closeWorkspaceWithConfirmation(tab)
-                }) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(activeSecondaryColor(0.7))
-                }
-                .buttonStyle(.plain)
-                .safeHelp(closeButtonTooltip)
-                .frame(width: SidebarTrailingAccessoryWidthPolicy.closeButtonWidth, height: 16, alignment: .center)
-                .opacity(showCloseButton && !showsWorkspaceShortcutHint ? 1 : 0)
-                .allowsHitTesting(showCloseButton && !showsWorkspaceShortcutHint)
-
-                if showsWorkspaceShortcutHint, let workspaceShortcutLabel {
-                    ShortcutHintPill(text: workspaceShortcutLabel, fontSize: 10, emphasis: shortcutHintEmphasis)
-                        .offset(
-                            x: ShortcutHintDebugSettings.clamped(sidebarShortcutHintXOffset),
-                            y: ShortcutHintDebugSettings.clamped(sidebarShortcutHintYOffset)
-                        )
-                        .shortcutHintTransition()
-                }
-            }
-            .shortcutHintVisibilityAnimation(value: showsWorkspaceShortcutHint)
-            .frame(width: trailingAccessoryWidth, height: 16, alignment: .trailing)
         }
     }
 
@@ -16469,7 +16440,7 @@ private struct TabItemView: View, Equatable {
             return notification
         }
         guard settings.iMessageModeEnabled else { return nil }
-        return workspaceSnapshot.latestSubmittedMessage?
+        return workspaceSnapshot.latestConversationMessage?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
     }
@@ -16535,7 +16506,6 @@ private struct TabItemView: View, Equatable {
                     frozenPresentation = nil
                     reportHoverState(tab.id, false)
                     flushDeferredWorkspaceObservationInvalidation()
-                    flushWorkspaceContextMenuFreezeIfLive()
                 }
         }
     }
@@ -16743,7 +16713,7 @@ private struct TabItemView: View, Equatable {
                 updateSelection()
             }
             .onHover { hovering in
-                guard !rowInteractionState.freezesSidebarWorkspaceDetails else {
+                guard !rowInteractionState.contextMenuVisible else {
                     if !hovering {
                         reportHoverState(tab.id, false)
                     }

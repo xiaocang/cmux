@@ -189,6 +189,20 @@ tend to conflict together during rebases.
   - The first commit intentionally preserves the panic so cmux can keep the
     required failing-test-then-fix history for issue #3369.
 
+### 12) cmux crash report directory build option
+
+- Commit: pending fork commit
+- Files:
+  - `src/build_config.zig`
+  - `src/build/Config.zig`
+  - `src/crash/dir.zig`
+- Summary:
+  - Restores the `-Dcrash-report-subdir` Zig build option after the upstream refresh
+    hardcoded Ghostty's default `ghostty/crash` directory.
+  - cmux passes `-Dcrash-report-subdir=cmux/crash` when building GhosttyKit and the
+    bundled Ghostty CLI helper so app-side crash breadcrumbs keep reading the same
+    `~/.local/state/cmux/crash` location.
+
 The current cmux pin is the head listed above. It is reachable from
 `manaflow-ai/ghostty` through the `xcframework-fe972c09579a7943f6fe9607fdd24f0f7c999cb1`
 release tag and branch `issue-3369-metal-renderer-crash`.
