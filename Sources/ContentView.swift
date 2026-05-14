@@ -3070,13 +3070,11 @@ struct ContentView: View {
                             .padding(.top, 4)
                     }
                 }
-                .overlay(alignment: .topTrailing) {
-                    SortAssistantPopoverHost(
+                .overlay(alignment: .topLeading) {
+                    SortAssistantFloatingHost(
                         tabManager: tabManager,
                         workspaceTabStore: workspaceTabStore
                     )
-                    .padding(.trailing, 96)
-                    .padding(.top, WindowChromeMetrics.appTitlebarHeight + 8)
                 }
                 .frame(minWidth: CGFloat(SessionPersistencePolicy.minimumWindowWidth), minHeight: CGFloat(SessionPersistencePolicy.minimumWindowHeight))
                 .background(Color.clear)

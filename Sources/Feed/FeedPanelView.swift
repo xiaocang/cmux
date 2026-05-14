@@ -153,13 +153,17 @@ struct SortAssistantThreadView: View {
     @ObservedObject var coordinator: SortAssistantCoordinator
     @ObservedObject var tabManager: TabManager
     @ObservedObject var workspaceTabStore: WorkspaceTabStore
+    var showsHeader = true
+    var showsAssistantMessageAvatar = true
 
     @State private var draft = ""
     @FocusState private var inputFocused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            header
+        VStack(alignment: .leading, spacing: 10) {
+            if showsHeader {
+                header
+            }
             messages
             if let question = coordinator.dimensionQuestion {
                 dimensionQuestion(question)
@@ -175,8 +179,9 @@ struct SortAssistantThreadView: View {
             }
             inputRow
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
+        .padding(.horizontal, showsHeader ? 10 : 12)
+        .padding(.vertical, showsHeader ? 8 : 12)
+        .fixedSize(horizontal: false, vertical: true)
         .onAppear {
             coordinator.drainExternalGoal(
                 tabManager: tabManager,
@@ -217,19 +222,58 @@ struct SortAssistantThreadView: View {
     }
 
     private var messages: some View {
-        VStack(alignment: .leading, spacing: 5) {
+        Group {
             if coordinator.messages.isEmpty {
-                SortAssistantMascotIntroView(
-                    isSorting: coordinator.isSorting,
-                    action: coordinator.activateEntry
-                )
+                if showsAssistantMessageAvatar {
+                    SortAssistantMascotIntroView(
+                        isSorting: coordinator.isSorting,
+                        action: coordinator.activateEntry
+                    )
+                } else {
+                    Text(String(localized: "sortAssistant.mascot.prompt", defaultValue: "What should move up in the workspace order?"))
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .lineLimit(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.horizontal, 2)
+                        .padding(.vertical, 2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
             } else {
-                ForEach(coordinator.messages.suffix(4)) { message in
-                    SortAssistantMessageRow(message: message)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 8) {
+                            ForEach(coordinator.messages) { message in
+                                SortAssistantMessageRow(
+                                    message: message,
+                                    showsAssistantAvatar: showsAssistantMessageAvatar
+                                )
+                                    .id(message.id)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .frame(maxHeight: 220)
+                    .scrollIndicators(.automatic)
+                    .onAppear {
+                        scrollToLatestMessage(proxy)
+                    }
+                    .onChange(of: coordinator.messages.last?.id) { _, _ in
+                        scrollToLatestMessage(proxy)
+                    }
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func scrollToLatestMessage(_ proxy: ScrollViewProxy) {
+        guard let id = coordinator.messages.last?.id else { return }
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.16)) {
+                proxy.scrollTo(id, anchor: .bottom)
+            }
+        }
     }
 
     private func dimensionQuestion(_ question: SortAssistantDimensionQuestion) -> some View {
@@ -385,17 +429,41 @@ struct SortAssistantThreadView: View {
                 text: $draft,
                 axis: .vertical
             )
-            .textFieldStyle(.roundedBorder)
-            .font(.system(size: 11))
+            .textFieldStyle(.plain)
+            .font(.system(size: 12, design: .monospaced))
             .lineLimit(1...4)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                SortAssistantPixelPanelShape(cornerLength: 4)
+                    .fill(Color(nsColor: .textBackgroundColor).opacity(0.92))
+            )
+            .overlay(
+                SortAssistantPixelPanelShape(cornerLength: 4)
+                    .stroke(Color.primary.opacity(inputFocused ? 0.54 : 0.32), lineWidth: 1)
+            )
+            .overlay(
+                SortAssistantPixelPanelShape(cornerLength: 2)
+                    .stroke(Color.white.opacity(0.28), lineWidth: 1)
+                    .padding(2)
+            )
             .focused($inputFocused)
             .accessibilityIdentifier("SortAssistantInput")
             .onSubmit(sendDraft)
 
             Button(action: sendDraft) {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 18, weight: .semibold))
+                Image(systemName: "arrow.up")
+                    .font(.system(size: 14, weight: .bold))
                     .foregroundStyle(draftTrimmed.isEmpty ? Color.secondary : Color.accentColor)
+                    .frame(width: 30, height: 30)
+                    .background(
+                        SortAssistantPixelPanelShape(cornerLength: 4)
+                            .fill(Color(nsColor: .textBackgroundColor).opacity(0.92))
+                    )
+                    .overlay(
+                        SortAssistantPixelPanelShape(cornerLength: 4)
+                            .stroke(Color.primary.opacity(draftTrimmed.isEmpty ? 0.22 : 0.46), lineWidth: 1)
+                    )
             }
             .buttonStyle(.plain)
             .disabled(draftTrimmed.isEmpty || coordinator.isSorting)
@@ -428,19 +496,214 @@ struct SortAssistantThreadView: View {
 
 private struct SortAssistantMessageRow: View {
     let message: SortAssistantMessage
+    var showsAssistantAvatar = true
 
     var body: some View {
-        HStack(alignment: .top, spacing: 5) {
-            Image(systemName: message.icon)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(message.tint)
-                .frame(width: 12)
-            Text(message.text)
-                .font(.system(size: 11))
-                .foregroundStyle(message.kind == .error ? Color.red : Color.primary.opacity(0.88))
-                .lineLimit(3)
+        Group {
+            if message.kind == .user {
+                userBubble
+            } else {
+                assistantBubble
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var assistantBubble: some View {
+        HStack(alignment: .bottom, spacing: 7) {
+            if showsAssistantAvatar {
+                SortAssistantMascotAvatar(size: 28, isActive: message.kind == .progress)
+                    .padding(.bottom, 1)
+            }
+
+            bubbleContent(
+                foreground: assistantForeground,
+                fill: assistantFill,
+                stroke: assistantStroke,
+                tailEdge: .leading,
+                includesStatusIcon: message.kind != .assistant
+            )
+
+            Spacer(minLength: showsAssistantAvatar ? 28 : 44)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var userBubble: some View {
+        HStack(alignment: .bottom, spacing: 7) {
+            Spacer(minLength: 52)
+
+            bubbleContent(
+                foreground: Color.primary,
+                fill: Color.primary.opacity(0.070),
+                stroke: Color.primary.opacity(0.060),
+                tailEdge: .trailing,
+                includesStatusIcon: false
+            )
+        }
+        .frame(maxWidth: .infinity, alignment: .trailing)
+    }
+
+    private func bubbleContent(
+        foreground: Color,
+        fill: Color,
+        stroke: Color,
+        tailEdge: SortAssistantBubbleTail.Edge,
+        includesStatusIcon: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: 6) {
+            if includesStatusIcon {
+                Image(systemName: message.icon)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(message.tint)
+                    .padding(.top, 2)
+            }
+
+            Text(message.text)
+                .font(.system(size: 12, design: .monospaced))
+                .foregroundStyle(foreground)
+                .lineLimit(6)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, message.kind == .assistant ? 2 : 10)
+        .padding(.vertical, message.kind == .assistant ? 1 : 7)
+        .frame(maxWidth: 254, alignment: .leading)
+        .background(
+            SortAssistantPixelPanelShape(cornerLength: message.kind == .assistant ? 0 : 4)
+                .fill(fill)
+        )
+        .overlay(
+            SortAssistantPixelPanelShape(cornerLength: message.kind == .assistant ? 0 : 4)
+                .stroke(stroke, lineWidth: message.kind == .assistant ? 0 : 1)
+        )
+        .overlay(alignment: tailEdge.alignment) {
+            if message.kind != .assistant {
+                SortAssistantBubbleTail(edge: tailEdge)
+                    .fill(fill)
+                    .frame(width: 8, height: 10)
+                    .offset(x: tailEdge.offsetX)
+            }
+        }
+    }
+
+    private var assistantForeground: Color {
+        message.kind == .error ? Color.red : Color.primary
+    }
+
+    private var assistantFill: Color {
+        switch message.kind {
+        case .assistant:
+            return .clear
+        case .progress:
+            return Color.blue.opacity(0.075)
+        case .error:
+            return Color.red.opacity(0.075)
+        case .user:
+            return Color.primary.opacity(0.070)
+        }
+    }
+
+    private var assistantStroke: Color {
+        switch message.kind {
+        case .assistant:
+            return .clear
+        case .progress:
+            return Color.blue.opacity(0.14)
+        case .error:
+            return Color.red.opacity(0.14)
+        case .user:
+            return Color.primary.opacity(0.060)
+        }
+    }
+}
+
+struct SortAssistantPixelPanelShape: InsettableShape {
+    var cornerLength: CGFloat = 6
+    var insetAmount: CGFloat = 0
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let bounds = rect.insetBy(dx: insetAmount, dy: insetAmount)
+        let step = min(max(cornerLength, 0), bounds.width / 3, bounds.height / 3)
+
+        guard step > 0 else {
+            path.addRect(bounds)
+            return path
+        }
+
+        path.move(to: CGPoint(x: bounds.minX + step, y: bounds.minY))
+        path.addLine(to: CGPoint(x: bounds.maxX - step, y: bounds.minY))
+        path.addLine(to: CGPoint(x: bounds.maxX - step, y: bounds.minY + step))
+        path.addLine(to: CGPoint(x: bounds.maxX, y: bounds.minY + step))
+        path.addLine(to: CGPoint(x: bounds.maxX, y: bounds.maxY - step))
+        path.addLine(to: CGPoint(x: bounds.maxX - step, y: bounds.maxY - step))
+        path.addLine(to: CGPoint(x: bounds.maxX - step, y: bounds.maxY))
+        path.addLine(to: CGPoint(x: bounds.minX + step, y: bounds.maxY))
+        path.addLine(to: CGPoint(x: bounds.minX + step, y: bounds.maxY - step))
+        path.addLine(to: CGPoint(x: bounds.minX, y: bounds.maxY - step))
+        path.addLine(to: CGPoint(x: bounds.minX, y: bounds.minY + step))
+        path.addLine(to: CGPoint(x: bounds.minX + step, y: bounds.minY + step))
+        path.closeSubpath()
+        return path
+    }
+
+    func inset(by amount: CGFloat) -> SortAssistantPixelPanelShape {
+        var copy = self
+        copy.insetAmount += amount
+        return copy
+    }
+}
+
+private struct SortAssistantBubbleTail: Shape {
+    enum Edge {
+        case leading
+        case trailing
+
+        var alignment: Alignment {
+            switch self {
+            case .leading: return .leading
+            case .trailing: return .trailing
+            }
+        }
+
+        var offsetX: CGFloat {
+            switch self {
+            case .leading: return -5
+            case .trailing: return 5
+            }
+        }
+    }
+
+    let edge: Edge
+
+    func path(in rect: CGRect) -> Path {
+        var path = Path()
+        let tab = rect.width * 0.52
+        let upper = rect.height * 0.32
+        let lower = rect.height * 0.68
+
+        switch edge {
+        case .leading:
+            path.move(to: CGPoint(x: rect.maxX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.minX + tab, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.minX + tab, y: upper))
+            path.addLine(to: CGPoint(x: rect.minX, y: upper))
+            path.addLine(to: CGPoint(x: rect.minX, y: lower))
+            path.addLine(to: CGPoint(x: rect.minX + tab, y: lower))
+            path.addLine(to: CGPoint(x: rect.minX + tab, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        case .trailing:
+            path.move(to: CGPoint(x: rect.minX, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX - tab, y: rect.minY))
+            path.addLine(to: CGPoint(x: rect.maxX - tab, y: upper))
+            path.addLine(to: CGPoint(x: rect.maxX, y: upper))
+            path.addLine(to: CGPoint(x: rect.maxX, y: lower))
+            path.addLine(to: CGPoint(x: rect.maxX - tab, y: lower))
+            path.addLine(to: CGPoint(x: rect.maxX - tab, y: rect.maxY))
+            path.addLine(to: CGPoint(x: rect.minX, y: rect.maxY))
+        }
+        path.closeSubpath()
+        return path
     }
 }
 
@@ -4270,6 +4533,7 @@ final class SortAssistantCoordinator: ObservableObject {
     @Published private(set) var memories: [SortAssistantMemory] = []
     @Published private(set) var isSorting = false
     @Published private(set) var presentationSequence = 0
+    @Published private(set) var presentationToggleSequence = 0
     @Published private(set) var externalGoalSequence = 0
     @Published private(set) var entryFocusSequence = 0
 
@@ -4292,7 +4556,7 @@ final class SortAssistantCoordinator: ObservableObject {
                 text: String(localized: "sortAssistant.entry.ready", defaultValue: "Tell me how to sort the workspace sidebar.")
             ))
         }
-        requestPresentation()
+        togglePresentation()
         entryFocusSequence += 1
     }
 
@@ -4306,6 +4570,10 @@ final class SortAssistantCoordinator: ObservableObject {
 
     func requestPresentation() {
         presentationSequence += 1
+    }
+
+    func togglePresentation() {
+        presentationToggleSequence += 1
     }
 
     func drainExternalGoal(

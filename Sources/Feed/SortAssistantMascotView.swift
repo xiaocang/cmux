@@ -5,12 +5,14 @@ struct SortAssistantMascotButton: View {
         case modeBar
         case threadHeader
         case intro
+        case floating
 
         var size: CGFloat {
             switch self {
             case .modeBar: return 24
             case .threadHeader: return 26
             case .intro: return 42
+            case .floating: return 56
             }
         }
     }
@@ -83,6 +85,21 @@ struct SortAssistantMascotIntroView: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+struct SortAssistantMascotAvatar: View {
+    let size: CGFloat
+    var isActive: Bool = false
+
+    var body: some View {
+        SortAssistantMascotView(
+            size: size,
+            isActive: isActive,
+            isHovered: false,
+            bobbing: false
+        )
+        .accessibilityHidden(true)
     }
 }
 
