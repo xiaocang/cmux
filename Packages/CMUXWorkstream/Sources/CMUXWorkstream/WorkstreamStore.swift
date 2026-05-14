@@ -128,6 +128,29 @@ public final class WorkstreamStore {
         }
     }
 
+    /// Inserts a cmux-local item. Used by app-owned helper surfaces that
+    /// intentionally reuse the Workstream JSONL/event format without going
+    /// through an external agent hook.
+    public func ingestLocal(_ item: WorkstreamItem, persist: Bool) {
+        insert(item)
+        updateContextIndex(with: item)
+        guard persist, let persistence else { return }
+        Task { [persistence, item] in
+            try? await persistence.append(item)
+        }
+    }
+
+    public func rewritePersistedToolResults(
+        toolName: String,
+        containing needle: String
+    ) async {
+        guard let persistence else { return }
+        try? await persistence.rewriteDroppingToolResults(
+            toolName: toolName,
+            containing: needle
+        )
+    }
+
     // MARK: - Actions
 
     /// Sends a user-initiated action through the transport and marks the

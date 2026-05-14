@@ -71,6 +71,8 @@ struct FeedPanelView: View {
         }
     }
 
+    @ObservedObject var tabManager: TabManager
+    @ObservedObject var workspaceTabStore: WorkspaceTabStore
     @State private var filter: Filter = .actionable
     @StateObject private var viewModel = FeedPanelViewModel()
 

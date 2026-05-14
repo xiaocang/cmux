@@ -1141,6 +1141,7 @@ private final class FakeWorkspaceDigestService: WorkspaceDigestServicing {
     func refreshSummaryPriority(
         force _: Bool,
         sort _: WorkspaceSidebarSummaryPrioritySort,
+        assistantContext _: WorkspaceSidebarAssistantContext?,
         completion: @escaping (Result<WorkspaceSidebarSummaryPriorityState, Error>) -> Void
     ) {
         completion(.failure(TestError.activationFailed))

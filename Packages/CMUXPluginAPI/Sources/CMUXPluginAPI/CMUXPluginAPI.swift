@@ -46,6 +46,7 @@ public protocol CMUXPluginContext {
     var prompt: CMUXPromptRegistry { get }
     var commands: CMUXCommandRegistry { get }
     var sidebarExtensions: CMUXSidebarExtensionRegistry { get }
+    var windowOverlays: CMUXWindowOverlayRegistry { get }
     var settings: CMUXSettingsRegistry { get }
 }
 
@@ -505,4 +506,37 @@ public protocol CMUXSidebarExtensionRegistry {
     func registerSidebarExtension(_ extensionContribution: CMUXSidebarExtensionContribution) -> CMUXPluginDisposable
     func sidebarExtension(id: String) -> CMUXSidebarExtensionContribution?
     func sidebarExtensions() -> [CMUXSidebarExtensionContribution]
+}
+
+public enum CMUXWindowOverlayPlacement: String, Equatable {
+    case windowRootFloating
+}
+
+public struct CMUXWindowOverlayContribution: Equatable {
+    public var id: String
+    public var title: String
+    public var placement: CMUXWindowOverlayPlacement
+    public var priority: Int
+    public var metadata: [String: String]
+
+    public init(
+        id: String,
+        title: String,
+        placement: CMUXWindowOverlayPlacement,
+        priority: Int = 0,
+        metadata: [String: String] = [:]
+    ) {
+        self.id = id
+        self.title = title
+        self.placement = placement
+        self.priority = priority
+        self.metadata = metadata
+    }
+}
+
+public protocol CMUXWindowOverlayRegistry {
+    @discardableResult
+    func registerWindowOverlay(_ overlayContribution: CMUXWindowOverlayContribution) -> CMUXPluginDisposable
+    func windowOverlay(id: String) -> CMUXWindowOverlayContribution?
+    func windowOverlays() -> [CMUXWindowOverlayContribution]
 }

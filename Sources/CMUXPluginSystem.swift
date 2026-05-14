@@ -7,6 +7,7 @@ protocol WorkspaceDigestServicing: AnyObject {
     func refreshSummaryPriority(
         force: Bool,
         sort: WorkspaceSidebarSummaryPrioritySort,
+        assistantContext: WorkspaceSidebarAssistantContext?,
         completion: @escaping (Result<WorkspaceSidebarSummaryPriorityState, Error>) -> Void
     )
     func setDisplayMode(_ mode: WorkspaceSidebarDisplayMode, completion: @escaping (Result<Void, Error>) -> Void)
@@ -30,8 +31,31 @@ protocol WorkspaceDigestServicing: AnyObject {
     func progress(completion: @escaping (Result<WorkspaceSidebarDigestProgressState, Error>) -> Void)
 }
 
+extension WorkspaceDigestServicing {
+    func refreshSummaryPriority(
+        force: Bool,
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        completion: @escaping (Result<WorkspaceSidebarSummaryPriorityState, Error>) -> Void
+    ) {
+        refreshSummaryPriority(
+            force: force,
+            sort: sort,
+            assistantContext: nil,
+            completion: completion
+        )
+    }
+}
+
 enum CMUXBuiltinSidebarExtensionID {
     static let summaryPriority = "@cmux/sidebar-extension.summary-priority"
+}
+
+enum CMUXBuiltinWindowOverlayID {
+    static let spriteAssistant = "@cmux/window-overlay.sprite-assistant"
+}
+
+enum CMUXBuiltinWindowOverlayRenderer {
+    static let spriteAssistant = "sprite-assistant-floating"
 }
 
 enum CMUXBuiltinPluginID {
@@ -40,6 +64,7 @@ enum CMUXBuiltinPluginID {
     static let tmuxPrefix = "@cmux/plugin-tmux-prefix"
     static let ghpr = "@cmux/plugin-ghpr"
     static let digest = "@cmux/plugin-digest"
+    static let spriteAssistant = "@cmux/plugin-sprite-assistant"
 }
 
 enum CMUXBuiltinPluginCommandID {
@@ -58,6 +83,7 @@ protocol CMUXPluginAppProviding: AnyObject {
     func commandContributions() -> [CMUXCommandContribution]
     func runCommand(id: String) -> Bool
     func sidebarExtensions(placement: CMUXSidebarExtensionPlacement) -> [CMUXSidebarExtensionContribution]
+    func windowOverlays(placement: CMUXWindowOverlayPlacement) -> [CMUXWindowOverlayContribution]
     func toggleSidebarExtension(id: String) -> Bool
     func setSidebarExtensionOpen(id: String, open: Bool) -> Bool
 }
@@ -77,7 +103,7 @@ protocol CMUXGHPRContextRefreshProviding: AnyObject {
     func requestGHPRContextRefresh(workspaceId: String)
 }
 
-private func runOnMainSync<T>(_ body: @MainActor () -> T) -> T {
+func runOnMainSync<T>(_ body: @MainActor () -> T) -> T {
     if Thread.isMainThread {
         return MainActor.assumeIsolated { body() }
     }
@@ -86,7 +112,16 @@ private func runOnMainSync<T>(_ body: @MainActor () -> T) -> T {
     }
 }
 
-fileprivate enum CMUXPluginParams {
+func runOnMainSyncThrowing<T>(_ body: @MainActor () throws -> T) rethrows -> T {
+    if Thread.isMainThread {
+        return try MainActor.assumeIsolated { try body() }
+    }
+    return try DispatchQueue.main.sync {
+        try MainActor.assumeIsolated { try body() }
+    }
+}
+
+enum CMUXPluginParams {
     static func string(_ params: [String: Any], _ keys: String...) -> String? {
         for key in keys {
             guard let value = params[key], !(value is NSNull) else { continue }
@@ -938,6 +973,7 @@ final class CMUXPluginSystem {
     let context: CMUXAppContextRegistry
     let commands: CMUXAppCommandRegistry
     let sidebarExtensions: CMUXAppSidebarExtensionRegistry
+    let windowOverlays: CMUXAppWindowOverlayRegistry
     let settings: CMUXAppSettingsRegistry
     let storage: CMUXAppPluginStorage
     let workspace: CMUXAppWorkspaceAPI
@@ -962,6 +998,7 @@ final class CMUXPluginSystem {
         let context = CMUXAppContextRegistry(logger: logger)
         let commands = CMUXAppCommandRegistry()
         let sidebarExtensions = CMUXAppSidebarExtensionRegistry()
+        let windowOverlays = CMUXAppWindowOverlayRegistry()
         let settings = CMUXAppSettingsRegistry()
         let storage = CMUXAppPluginStorage(pluginDirectoryOverrides: [
             CMUXBuiltinPluginID.digest: DigestPluginRuntime.defaultHomeDirectory()
@@ -977,6 +1014,7 @@ final class CMUXPluginSystem {
             prompt: prompt,
             commands: commands,
             sidebarExtensions: sidebarExtensions,
+            windowOverlays: windowOverlays,
             settings: settings
         )
 
@@ -988,6 +1026,7 @@ final class CMUXPluginSystem {
         self.context = context
         self.commands = commands
         self.sidebarExtensions = sidebarExtensions
+        self.windowOverlays = windowOverlays
         self.settings = settings
         self.storage = storage
         self.workspace = workspace
@@ -1124,6 +1163,10 @@ extension CMUXPluginSystem: CMUXPluginAppProviding, CMUXPluginLifecycleManaging,
     func sidebarExtensions(placement: CMUXSidebarExtensionPlacement) -> [CMUXSidebarExtensionContribution] {
         sidebarExtensions.sidebarExtensions().filter { $0.placement == placement }
     }
+
+    func windowOverlays(placement: CMUXWindowOverlayPlacement) -> [CMUXWindowOverlayContribution] {
+        windowOverlays.windowOverlays().filter { $0.placement == placement }
+    }
 }
 
 final class CMUXPluginHost {
@@ -1154,7 +1197,9 @@ final class CMUXPluginHost {
         "prompt:contribute",
         "settings:contribute",
         "sidebar:contribute",
+        "window-overlay:contribute",
         "workspace:read",
+        "workspace:write",
     ]
 
     private let context: CMUXPluginContext
@@ -1240,6 +1285,7 @@ enum CMUXBuiltinPlugins {
             CMUXTmuxPrefixPlugin(service: tmuxPrefixService),
             CMUXGHPRPlugin(service: ghprService),
             CMUXDigestPlugin(digestService: digestService),
+            CMUXSpriteAssistantPlugin(),
         ]
     }
 }
@@ -1672,6 +1718,25 @@ private final class CMUXGHPRPlugin: CMUXPlugin {
         disposables.append(
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
+                    id: "plugin.ghpr.context",
+                    title: "ghpr Pull Request Context",
+                    executionContext: .socketWorker
+                ) { [service, workspace = context.workspace] input in
+                    let workspaceId = CMUXPluginParams.string(input.params, "workspaceId", "workspace_id")
+                        ?? workspace.currentWorkspaceId()
+                    let pullRequestContext = try service.pullRequestContext(workspaceId: workspaceId)
+                    return .ok([
+                        "workspace_id": workspaceId.map { $0 as Any } ?? NSNull(),
+                        "summary": pullRequestContext.map { $0.summaryText as Any } ?? NSNull(),
+                        "pull_request": pullRequestContext.map { $0.payload as Any } ?? NSNull(),
+                    ])
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
                     id: "plugin.ghpr.refresh",
                     title: "Refresh ghpr Context",
                     executionContext: .socketWorker
@@ -2071,6 +2136,7 @@ final class CMUXAppPluginContext: CMUXPluginContext {
     let prompt: CMUXPromptRegistry
     let commands: CMUXCommandRegistry
     let sidebarExtensions: CMUXSidebarExtensionRegistry
+    let windowOverlays: CMUXWindowOverlayRegistry
     let settings: CMUXSettingsRegistry
 
     init(
@@ -2083,6 +2149,7 @@ final class CMUXAppPluginContext: CMUXPluginContext {
         prompt: CMUXPromptRegistry,
         commands: CMUXCommandRegistry,
         sidebarExtensions: CMUXSidebarExtensionRegistry,
+        windowOverlays: CMUXWindowOverlayRegistry,
         settings: CMUXSettingsRegistry
     ) {
         self.logger = logger
@@ -2094,6 +2161,7 @@ final class CMUXAppPluginContext: CMUXPluginContext {
         self.prompt = prompt
         self.commands = commands
         self.sidebarExtensions = sidebarExtensions
+        self.windowOverlays = windowOverlays
         self.settings = settings
     }
 }
@@ -2336,6 +2404,28 @@ final class CMUXAppSidebarExtensionRegistry: CMUXSidebarExtensionRegistry {
     }
 }
 
+final class CMUXAppWindowOverlayRegistry: CMUXWindowOverlayRegistry {
+    private let store = IdentifiedStore<CMUXWindowOverlayContribution>()
+
+    @discardableResult
+    func registerWindowOverlay(_ overlayContribution: CMUXWindowOverlayContribution) -> CMUXPluginDisposable {
+        store.register(id: overlayContribution.id, overlayContribution)
+    }
+
+    func windowOverlay(id: String) -> CMUXWindowOverlayContribution? {
+        store.get(id)
+    }
+
+    func windowOverlays() -> [CMUXWindowOverlayContribution] {
+        store.values().sorted {
+            if $0.priority != $1.priority {
+                return $0.priority > $1.priority
+            }
+            return $0.id < $1.id
+        }
+    }
+}
+
 final class CMUXAppSettingsRegistry: CMUXSettingsRegistry {
     private let store = IdentifiedStore<CMUXSettingsContribution>()
 
@@ -2476,12 +2566,16 @@ final class WorkspaceDigestService: WorkspaceDigestServicing, CMUXDigestRegistry
     func refreshSummaryPriority(
         force: Bool,
         sort: WorkspaceSidebarSummaryPrioritySort,
+        assistantContext: WorkspaceSidebarAssistantContext?,
         completion: @escaping (Result<WorkspaceSidebarSummaryPriorityState, Error>) -> Void
     ) {
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "force": force,
             "sort": sort.requestPayload,
         ]
+        if let assistantContext {
+            payload["assistantContext"] = assistantContext.requestPayload
+        }
         sendDigestCommand(
             "refresh_summary_priority",
             payload: payload,

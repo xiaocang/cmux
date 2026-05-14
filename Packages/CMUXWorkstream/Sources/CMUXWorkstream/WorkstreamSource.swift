@@ -5,6 +5,7 @@ import Foundation
 /// emit, and matches Vibe Island's source tag 1:1 so existing hook payloads
 /// can flow through unchanged.
 public enum WorkstreamSource: String, Codable, Sendable, CaseIterable, Equatable {
+    case cmux
     case claude
     case codex
     case pi

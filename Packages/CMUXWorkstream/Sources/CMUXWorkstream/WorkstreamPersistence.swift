@@ -145,6 +145,42 @@ public actor WorkstreamPersistence {
         }
     }
 
+    /// Rewrites the JSONL file after dropping persisted tool-result rows
+    /// whose payload contains `needle`. This is intentionally narrow so
+    /// privacy-sensitive deletes do not require exposing arbitrary rewrite
+    /// hooks to callers.
+    public func rewriteDroppingToolResults(
+        toolName: String,
+        containing needle: String
+    ) throws {
+        guard !toolName.isEmpty, !needle.isEmpty else { return }
+        if let fh = handle {
+            try fh.close()
+        }
+        handle = nil
+
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        let data = try Data(contentsOf: fileURL)
+        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        var keptLines: [Data] = []
+        keptLines.reserveCapacity(lines.count)
+
+        for line in lines {
+            let lineData = Data(line)
+            if shouldDropToolResultLine(lineData, toolName: toolName, needle: needle) {
+                continue
+            }
+            keptLines.append(lineData)
+        }
+
+        var output = Data()
+        for line in keptLines {
+            output.append(line)
+            output.append(0x0A)
+        }
+        try output.write(to: fileURL, options: .atomic)
+    }
+
     private func handleForWriting() throws -> FileHandle {
         if let handle { return handle }
         let fm = FileManager.default
@@ -158,6 +194,20 @@ public actor WorkstreamPersistence {
         let fh = try FileHandle(forWritingTo: fileURL)
         handle = fh
         return fh
+    }
+
+    private func shouldDropToolResultLine(
+        _ lineData: Data,
+        toolName: String,
+        needle: String
+    ) -> Bool {
+        guard let item = try? decoder.decode(WorkstreamItem.self, from: lineData) else {
+            return false
+        }
+        guard case .toolResult(let storedToolName, let resultJSON, _) = item.payload else {
+            return false
+        }
+        return storedToolName == toolName && resultJSON.contains(needle)
     }
 
     private static func lineRanges(

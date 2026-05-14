@@ -2980,6 +2980,15 @@ struct CMUXCLI {
             return
         }
 
+        if command == "mcp" {
+            try runMCPCommand(
+                commandArgs: commandArgs,
+                socketPath: resolvedSocketPath,
+                explicitPassword: socketPasswordArg
+            )
+            return
+        }
+
         let browserAvailabilityArgs = commandArgs.filter { $0 != "--json" }
         if command == "disable-browser" ||
             command == "enable-browser" ||
@@ -4688,6 +4697,724 @@ struct CMUXCLI {
                 throw CLIError(message: authResponse)
             }
         }
+    }
+
+    private func runMCPCommand(
+        commandArgs: [String],
+        socketPath: String,
+        explicitPassword: String?
+    ) throws {
+        let subcommand = commandArgs.first?.lowercased() ?? "help"
+        switch subcommand {
+        case "sprite-assistant", "sprite", "sort-assistant":
+            try runSpriteAssistantMCPServer(socketPath: socketPath, explicitPassword: explicitPassword)
+        case "help", "--help", "-h":
+            print("""
+            Usage:
+              cmux mcp sprite-assistant
+
+            Starts the cmux sprite assistant MCP server over stdio. The server exposes
+            memory, sort, list, plugin context, ghpr, GitHub, and workspace digest tools.
+            """)
+        default:
+            throw CLIError(message: "Unknown mcp subcommand: \(subcommand)")
+        }
+    }
+
+    private func runSpriteAssistantMCPServer(
+        socketPath: String,
+        explicitPassword: String?
+    ) throws {
+        let client = SocketClient(path: socketPath)
+        try client.connect()
+        try authenticateClientIfNeeded(
+            client,
+            explicitPassword: explicitPassword,
+            socketPath: socketPath
+        )
+        defer { client.close() }
+
+        while let line = readLine(strippingNewline: true) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let data = trimmed.data(using: .utf8),
+                  let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            guard let id = request["id"] else {
+                continue
+            }
+            let method = request["method"] as? String ?? ""
+            let params = request["params"] as? [String: Any] ?? [:]
+            do {
+                let result = try spriteMCPResult(
+                    method: method,
+                    params: params,
+                    client: client
+                )
+                writeMCPResponse([
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result,
+                ])
+            } catch let error as CLIError {
+                writeMCPResponse([
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": [
+                        "code": -32000,
+                        "message": error.message,
+                    ],
+                ])
+            } catch {
+                writeMCPResponse([
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": [
+                        "code": -32000,
+                        "message": String(describing: error),
+                    ],
+                ])
+            }
+        }
+    }
+
+    private func spriteMCPResult(
+        method: String,
+        params: [String: Any],
+        client: SocketClient
+    ) throws -> [String: Any] {
+        switch method {
+        case "initialize":
+            return [
+                "protocolVersion": "2024-11-05",
+                "capabilities": [
+                    "tools": [
+                        "listChanged": false,
+                    ],
+                ],
+                "serverInfo": [
+                    "name": "cmux-sprite-assistant",
+                    "version": "0.1.0",
+                ],
+            ]
+        case "ping":
+            return [:]
+        case "tools/list":
+            return ["tools": spriteMCPTools()]
+        case "prompts/list":
+            return ["prompts": []]
+        case "resources/list":
+            return ["resources": []]
+        case "tools/call":
+            guard let toolName = params["name"] as? String else {
+                throw CLIError(message: "tools/call requires params.name")
+            }
+            guard spriteMCPToolNames.contains(toolName) else {
+                throw CLIError(message: "Unknown sprite assistant MCP tool: \(toolName)")
+            }
+            let arguments = params["arguments"] as? [String: Any] ?? [:]
+            let payload: Any
+            if toolName == "repository_context" {
+                payload = repositoryContextMCPPayload(arguments: arguments)
+            } else {
+                let socketMethod = spriteMCPSocketMethod(for: toolName)
+                let socketParams = spriteMCPSocketParams(for: toolName, arguments: arguments)
+                payload = try client.sendV2(
+                    method: socketMethod,
+                    params: socketParams,
+                    responseTimeout: 60
+                )
+            }
+            return [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": compactJSONString(payload),
+                    ],
+                ],
+                "isError": false,
+            ]
+        default:
+            throw CLIError(message: "Unsupported MCP method: \(method)")
+        }
+    }
+
+    private var spriteMCPToolNames: Set<String> {
+        Set([
+            "memory_query",
+            "memory_write_candidate",
+            "memory_forget",
+            "sprite_memory_query",
+            "sprite_memory_write",
+            "sprite_memory_write_candidate",
+            "sprite_memory_forget",
+            "sort_context",
+            "sort_preview",
+            "sort_apply",
+            "sort_undo",
+            "sort_explain",
+            "list_state",
+            "list_lock",
+            "list_pin",
+            "context_collect",
+            "repository_context",
+            "ghpr_context",
+            "ghpr_status",
+            "ghpr_refresh",
+            "github_context",
+            "github_pr_context",
+            "workspace_digest_get",
+            "workspace_digest_refresh",
+            "workspace_digest_progress",
+        ])
+    }
+
+    private func spriteMCPSocketMethod(for toolName: String) -> String {
+        switch toolName {
+        case "memory_query":
+            return "memory.query"
+        case "memory_write_candidate":
+            return "memory.write_candidate"
+        case "memory_forget":
+            return "memory.forget"
+        case "sprite_memory_query":
+            return "sprite.memory.query"
+        case "sprite_memory_write":
+            return "sprite.memory.write"
+        case "sprite_memory_write_candidate":
+            return "sprite.memory.write_candidate"
+        case "sprite_memory_forget":
+            return "sprite.memory.forget"
+        case "sort_context":
+            return "sort.context"
+        case "sort_preview":
+            return "sort.preview"
+        case "sort_apply":
+            return "sort.apply"
+        case "sort_undo":
+            return "sort.undo"
+        case "sort_explain":
+            return "sort.explain"
+        case "list_state":
+            return "list.state"
+        case "list_lock":
+            return "list.lock"
+        case "list_pin":
+            return "list.pin"
+        case "context_collect":
+            return "plugin.context.collect"
+        case "ghpr_context", "github_pr_context":
+            return "plugin.ghpr.context"
+        case "ghpr_status":
+            return "plugin.ghpr.status"
+        case "ghpr_refresh":
+            return "plugin.ghpr.refresh"
+        case "github_context":
+            return "github.context"
+        case "workspace_digest_get":
+            return "plugin.digest.get"
+        case "workspace_digest_refresh":
+            return "plugin.digest.refresh"
+        case "workspace_digest_progress":
+            return "plugin.digest.progress"
+        default:
+            return toolName
+        }
+    }
+
+    private func spriteMCPSocketParams(for toolName: String, arguments: [String: Any]) -> [String: Any] {
+        var params = arguments
+        switch toolName {
+        case "sprite_memory_query",
+             "sprite_memory_write",
+             "sprite_memory_write_candidate",
+             "sprite_memory_forget":
+            addDefaultWorkspaceDirectory(to: &params)
+        case "context_collect",
+             "ghpr_context",
+             "github_pr_context",
+             "ghpr_refresh",
+             "github_context",
+             "workspace_digest_get",
+             "workspace_digest_refresh":
+            addDefaultWorkspaceId(to: &params)
+        default:
+            break
+        }
+        return params
+    }
+
+    private func addDefaultWorkspaceId(to params: inout [String: Any]) {
+        guard params["workspaceId"] == nil,
+              params["workspace_id"] == nil,
+              let workspaceId = ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"]?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !workspaceId.isEmpty else {
+            return
+        }
+        params["workspaceId"] = workspaceId
+    }
+
+    private func addDefaultWorkspaceDirectory(to params: inout [String: Any]) {
+        guard params["directory"] == nil,
+              params["cwd"] == nil,
+              params["workspaceDirectory"] == nil,
+              params["workspace_directory"] == nil,
+              let directory = ProcessInfo.processInfo.environment["CMUX_WORKSPACE_DIRECTORY"]?
+                  .trimmingCharacters(in: .whitespacesAndNewlines),
+              !directory.isEmpty else {
+            return
+        }
+        params["directory"] = directory
+    }
+
+    private func spriteMCPTools() -> [[String: Any]] {
+        [
+            spriteMCPTool(
+                name: "memory_query",
+                description: "Return saved free-sort memories: user preferences that affect workspace sidebar sorting only. This does not read the sprite workspace memory.md.",
+                properties: [:]
+            ),
+            spriteMCPTool(
+                name: "memory_write_candidate",
+                description: "Create a reviewable free-sort memory candidate. Use only for sorting/sidebar preferences; it is not saved to memory.md.",
+                properties: [
+                    "text": stringSchema(description: "The memory text to propose."),
+                    "sourceSummary": stringSchema(description: "Optional short reason or source for the memory."),
+                ],
+                required: ["text"]
+            ),
+            spriteMCPTool(
+                name: "memory_forget",
+                description: "Delete a saved free-sort memory by id or by contained text.",
+                properties: [
+                    "id": stringSchema(description: "Memory UUID to delete."),
+                    "text": stringSchema(description: "Delete memories containing this text."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "sprite_memory_query",
+                description: "Return sprite workspace memories from the current workspace memory.md. This is separate from free-sort memories.",
+                properties: [
+                    "directory": stringSchema(description: "Optional workspace directory. Defaults to the active workspace directory."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "sprite_memory_write",
+                description: "Write a sprite workspace memory directly to the current workspace memory.md. Use for project/session facts, not sorting preferences.",
+                properties: [
+                    "text": stringSchema(description: "The sprite memory text to save."),
+                    "sourceSummary": stringSchema(description: "Optional short reason or source for the memory."),
+                    "directory": stringSchema(description: "Optional workspace directory. Defaults to the active workspace directory."),
+                ],
+                required: ["text"]
+            ),
+            spriteMCPTool(
+                name: "sprite_memory_forget",
+                description: "Delete a sprite workspace memory from memory.md by id or by contained text.",
+                properties: [
+                    "id": stringSchema(description: "Memory UUID to delete."),
+                    "text": stringSchema(description: "Delete memories containing this text."),
+                    "directory": stringSchema(description: "Optional workspace directory. Defaults to the active workspace directory."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "sort_context",
+                description: "Return the assembled read-only sort context for the current workspace sidebar.",
+                properties: [
+                    "goal": stringSchema(description: "The user's sort intent or question."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "sort_preview",
+                description: "Create a non-mutating sort preview. Pass itemIds for a proposed order, or omit to preview the current summary-priority order.",
+                properties: [
+                    "goal": stringSchema(description: "The user's sort goal."),
+                    "itemIds": stringArraySchema(description: "Optional ordered workspace UUIDs."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "sort_apply",
+                description: "Apply a pending sort preview by patchId, or apply itemIds as an ordered workspace list.",
+                properties: [
+                    "patchId": stringSchema(description: "Pending preview patch UUID."),
+                    "itemIds": stringArraySchema(description: "Optional ordered workspace UUIDs."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "sort_undo",
+                description: "Undo the most recent assistant-applied sort.",
+                properties: [:]
+            ),
+            spriteMCPTool(
+                name: "sort_explain",
+                description: "Explain the latest assistant sort or preview.",
+                properties: [:]
+            ),
+            spriteMCPTool(
+                name: "list_state",
+                description: "Return current workspace sidebar list state, revision, pinned flags, and locked flags.",
+                properties: [:]
+            ),
+            spriteMCPTool(
+                name: "list_lock",
+                description: "Set or clear the locked flag for a workspace sidebar item.",
+                properties: [
+                    "itemId": stringSchema(description: "Workspace UUID."),
+                    "locked": [
+                        "type": "boolean",
+                        "description": "Whether the item should be locked.",
+                    ] as [String: Any],
+                ],
+                required: ["itemId"]
+            ),
+            spriteMCPTool(
+                name: "list_pin",
+                description: "Set or clear the pinned flag for a workspace sidebar item.",
+                properties: [
+                    "itemId": stringSchema(description: "Workspace UUID."),
+                    "pinned": [
+                        "type": "boolean",
+                        "description": "Whether the item should be pinned.",
+                    ] as [String: Any],
+                ],
+                required: ["itemId"]
+            ),
+            spriteMCPTool(
+                name: "context_collect",
+                description: "Collect plugin-contributed context for the current or specified workspace. Includes ghpr context when available.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                    "conversationId": stringSchema(description: "Optional conversation id for scoped context."),
+                    "taskId": stringSchema(description: "Optional task id for scoped context."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "repository_context",
+                description: "Return local Git repository context for the active workspace directory: repo root, branch, HEAD, dirty state, remotes, worktrees, and GitHub repository slugs.",
+                properties: [
+                    "directory": stringSchema(description: "Optional directory to inspect. Defaults to the active workspace directory."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "ghpr_context",
+                description: "Return detailed ghpr pull-request context for the current or specified workspace, including CI, review, Jira, and PR metadata when configured.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "github_pr_context",
+                description: "Alias for ghpr_context. Use for GitHub pull-request context for the current or specified workspace.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "ghpr_status",
+                description: "Return ghpr integration configuration/status.",
+                properties: [:]
+            ),
+            spriteMCPTool(
+                name: "ghpr_refresh",
+                description: "Schedule a ghpr metadata refresh for the current or specified workspace.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "github_context",
+                description: "Return cached GitHub-related sidebar context from cmux: branches, dirty flags, pull-request badges, and PR URLs.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                    "includeAllWorkspaces": boolSchema(description: "When true, return GitHub context for every visible sidebar workspace."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "workspace_digest_get",
+                description: "Return the current workspace digest for the current or specified workspace/conversation/task scope.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                    "conversationId": stringSchema(description: "Optional conversation id."),
+                    "taskId": stringSchema(description: "Optional task id."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "workspace_digest_refresh",
+                description: "Refresh and return the workspace digest for the current or specified workspace/conversation/task scope.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                    "conversationId": stringSchema(description: "Optional conversation id."),
+                    "taskId": stringSchema(description: "Optional task id."),
+                    "force": boolSchema(description: "When true, bypass cached digest data."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "workspace_digest_progress",
+                description: "Return the workspace digest background progress snapshot.",
+                properties: [:]
+            ),
+        ]
+    }
+
+    private func spriteMCPTool(
+        name: String,
+        description: String,
+        properties: [String: Any],
+        required: [String] = []
+    ) -> [String: Any] {
+        [
+            "name": name,
+            "description": description,
+            "inputSchema": [
+                "type": "object",
+                "properties": properties,
+                "required": required,
+                "additionalProperties": false,
+            ] as [String: Any],
+        ]
+    }
+
+    private func stringSchema(description: String) -> [String: Any] {
+        [
+            "type": "string",
+            "description": description,
+        ]
+    }
+
+    private func stringArraySchema(description: String) -> [String: Any] {
+        [
+            "type": "array",
+            "description": description,
+            "items": [
+                "type": "string",
+            ],
+        ]
+    }
+
+    private func boolSchema(description: String) -> [String: Any] {
+        [
+            "type": "boolean",
+            "description": description,
+        ]
+    }
+
+    private func repositoryContextMCPPayload(arguments: [String: Any]) -> [String: Any] {
+        let rawDirectory = (arguments["directory"] as? String)
+            ?? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_DIRECTORY"]
+        guard let directory = rawDirectory?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !directory.isEmpty else {
+            return [
+                "isRepository": false,
+                "directory": NSNull(),
+                "error": "No workspace directory was provided.",
+            ]
+        }
+
+        let expandedDirectory = (directory as NSString).expandingTildeInPath
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: expandedDirectory, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            return [
+                "isRepository": false,
+                "directory": expandedDirectory,
+                "error": "Workspace directory does not exist.",
+            ]
+        }
+
+        let root = gitMCPCommand(directory: expandedDirectory, arguments: ["rev-parse", "--show-toplevel"])
+        guard root.status == 0 else {
+            return [
+                "isRepository": false,
+                "directory": expandedDirectory,
+                "error": trimmedMCPText(root.stderr).isEmpty ? "Directory is not a Git repository." : trimmedMCPText(root.stderr),
+            ]
+        }
+
+        let repositoryRoot = trimmedMCPText(root.stdout)
+        let branch = trimmedMCPText(gitMCPCommand(directory: expandedDirectory, arguments: ["branch", "--show-current"]).stdout)
+        let head = trimmedMCPText(gitMCPCommand(directory: expandedDirectory, arguments: ["rev-parse", "--short", "HEAD"]).stdout)
+        let status = trimmedMCPText(gitMCPCommand(directory: expandedDirectory, arguments: ["status", "--porcelain", "-uno"]).stdout)
+        let remoteOutput = gitMCPCommand(directory: expandedDirectory, arguments: ["remote", "-v"]).stdout
+        let worktreeOutput = gitMCPCommand(directory: expandedDirectory, arguments: ["worktree", "list", "--porcelain"]).stdout
+        let remotes = gitMCPRemotes(from: remoteOutput)
+        let githubRepositories = orderedUniqueStrings(remotes.compactMap { $0["githubRepository"] as? String })
+
+        return [
+            "isRepository": true,
+            "directory": expandedDirectory,
+            "repositoryRoot": repositoryRoot.isEmpty ? NSNull() as Any : repositoryRoot as Any,
+            "branch": branch.isEmpty ? NSNull() as Any : branch as Any,
+            "head": head.isEmpty ? NSNull() as Any : head as Any,
+            "dirty": !status.isEmpty,
+            "statusPorcelain": status,
+            "remotes": remotes,
+            "githubRepositories": githubRepositories,
+            "worktrees": gitMCPWorktrees(from: worktreeOutput),
+        ]
+    }
+
+    private func gitMCPCommand(directory: String, arguments: [String]) -> (status: Int32, stdout: String, stderr: String) {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+        process.arguments = ["git", "-C", directory] + arguments
+        let stdout = Pipe()
+        let stderr = Pipe()
+        process.standardOutput = stdout
+        process.standardError = stderr
+        do {
+            try process.run()
+        } catch {
+            return (-1, "", String(describing: error))
+        }
+        let timeout = DispatchWorkItem {
+            if process.isRunning {
+                process.terminate()
+            }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2, execute: timeout)
+        process.waitUntilExit()
+        timeout.cancel()
+        return (
+            process.terminationStatus,
+            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
+            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        )
+    }
+
+    private func gitMCPRemotes(from output: String) -> [[String: Any]] {
+        output.split(whereSeparator: \.isNewline).compactMap { line in
+            let parts = line.split(whereSeparator: \.isWhitespace)
+            guard parts.count >= 3 else { return nil }
+            let name = String(parts[0])
+            let url = sanitizedMCPRemoteURL(String(parts[1]))
+            let kind = String(parts[2]).trimmingCharacters(in: CharacterSet(charactersIn: "()"))
+            var payload: [String: Any] = [
+                "name": name,
+                "url": url,
+                "kind": kind,
+            ]
+            if let githubRepository = githubRepositorySlug(fromRemoteURL: url) {
+                payload["githubRepository"] = githubRepository
+            }
+            return payload
+        }
+    }
+
+    private func gitMCPWorktrees(from output: String) -> [[String: Any]] {
+        var worktrees: [[String: Any]] = []
+        var current: [String: Any] = [:]
+
+        func flush() {
+            guard !current.isEmpty else { return }
+            worktrees.append(current)
+            current = [:]
+        }
+
+        for rawLine in output.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = String(rawLine)
+            if line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                flush()
+                continue
+            }
+            if let separator = line.firstIndex(of: " ") {
+                let key = String(line[..<separator])
+                let value = String(line[line.index(after: separator)...])
+                switch key {
+                case "worktree":
+                    current["path"] = value
+                case "HEAD":
+                    current["head"] = value
+                case "branch":
+                    current["branch"] = value.hasPrefix("refs/heads/")
+                        ? String(value.dropFirst("refs/heads/".count))
+                        : value
+                default:
+                    current[key] = value
+                }
+            } else {
+                current[line] = true
+            }
+        }
+        flush()
+        return worktrees
+    }
+
+    private func sanitizedMCPRemoteURL(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: trimmed),
+              components.user != nil || components.password != nil else {
+            return trimmed
+        }
+        components.user = nil
+        components.password = nil
+        return components.string ?? trimmed
+    }
+
+    private func githubRepositorySlug(fromRemoteURL remoteURL: String) -> String? {
+        let trimmed = remoteURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let prefixes = [
+            "git@github.com:",
+            "ssh://git@github.com/",
+            "https://github.com/",
+            "http://github.com/",
+            "git://github.com/",
+        ]
+        for prefix in prefixes where trimmed.hasPrefix(prefix) {
+            return normalizedGitHubRepositorySlug(String(trimmed.dropFirst(prefix.count)))
+        }
+        guard let url = URL(string: trimmed),
+              url.host?.lowercased() == "github.com" else {
+            return nil
+        }
+        return normalizedGitHubRepositorySlug(url.path)
+    }
+
+    private func normalizedGitHubRepositorySlug(_ rawPath: String) -> String? {
+        let trimmed = rawPath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let components = trimmed.split(separator: "/").map(String.init)
+        guard components.count >= 2 else { return nil }
+        let owner = components[0]
+        var repo = components[1]
+        if repo.hasSuffix(".git") {
+            repo.removeLast(4)
+        }
+        guard !owner.isEmpty, !repo.isEmpty else { return nil }
+        return "\(owner)/\(repo)"
+    }
+
+    private func orderedUniqueStrings(_ values: [String]) -> [String] {
+        var seen: Set<String> = []
+        var output: [String] = []
+        for value in values where seen.insert(value).inserted {
+            output.append(value)
+        }
+        return output
+    }
+
+    private func trimmedMCPText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func writeMCPResponse(_ response: [String: Any]) {
+        guard JSONSerialization.isValidJSONObject(response),
+              let data = try? JSONSerialization.data(withJSONObject: response, options: []),
+              let line = String(data: data, encoding: .utf8) else {
+            return
+        }
+        FileHandle.standardOutput.write(Data((line + "\n").utf8))
+    }
+
+    private func compactJSONString(_ value: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]),
+              let output = String(data: data, encoding: .utf8) else {
+            return "{}"
+        }
+        return output
     }
 
     private func launchApp() throws {
@@ -24835,6 +25562,7 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           ping
           version
           capabilities
+          mcp sprite-assistant
           events [--after <seq>] [--cursor-file <path>] [--name <event>] [--category <category>] [--reconnect] [--limit <n>] [--no-ack] [--no-heartbeat]
           auth <status|login|logout>
           login | logout                                      (aliases for auth login/logout)

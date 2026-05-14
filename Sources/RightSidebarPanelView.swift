@@ -151,6 +151,8 @@ struct RightSidebarPanelView: View {
     @ObservedObject var fileExplorerStore: FileExplorerStore
     @ObservedObject var fileExplorerState: FileExplorerState
     @ObservedObject var sessionIndexStore: SessionIndexStore
+    @ObservedObject var tabManager: TabManager
+    @ObservedObject var workspaceTabStore: WorkspaceTabStore
     let titlebarHeight: CGFloat
     let workspaceId: UUID?
     let onResumeSession: ((SessionEntry) -> Void)?
@@ -385,7 +387,10 @@ struct RightSidebarPanelView: View {
                     sessionIndexStore.setCurrentDirectoryIfChanged(sessionIndexDirectory)
                 }
         case .feed:
-            FeedPanelView()
+            FeedPanelView(
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore
+            )
         case .dock:
             DockPanelView(rootDirectory: sessionIndexDirectory, workspaceId: workspaceId, store: dockStore)
         }

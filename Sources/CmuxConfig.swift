@@ -1126,8 +1126,10 @@ struct CmuxSurfaceTabBarButton: Codable, Sendable, Hashable, Identifiable {
     static let newBrowser = actionReference(CmuxSurfaceTabBarBuiltInAction.newBrowser.configID)
     static let splitRight = actionReference(CmuxSurfaceTabBarBuiltInAction.splitRight.configID)
     static let splitDown = actionReference(CmuxSurfaceTabBarBuiltInAction.splitDown.configID)
+    static let sortAssistant = actionReference(CmuxSurfaceTabBarBuiltInAction.sortAssistant.configID)
 
     static let defaults: [CmuxSurfaceTabBarButton] = [
+        .sortAssistant,
         .newTerminal,
         .newBrowser,
         .splitRight,
@@ -1508,6 +1510,9 @@ struct CmuxResolvedConfigAction: Identifiable, Sendable, Hashable {
         case .cloudVM:
             title = String(localized: "command.cloudVM.title", defaultValue: "Start Cloud VM")
             keywords = ["cloud", "vm", "virtual", "machine", "remote"]
+        case .sortAssistant:
+            title = String(localized: "sortAssistant.feed.title", defaultValue: "Sort Assistant")
+            keywords = ["sort", "assistant", "workspace", "priority"]
         case .newTerminal:
             title = String(localized: "command.newTerminalTab.title", defaultValue: "New Terminal Tab")
             keywords = ["new", "terminal", "tab", "surface"]
@@ -2196,6 +2201,7 @@ final class CmuxConfigStore: ObservableObject {
         let defaultResolvedButtons = (try? CmuxSurfaceTabBarButton.defaults.map {
             try $0.resolved(actions: resolvedActionLookup, codingPath: [])
         }) ?? [
+            .builtIn(.sortAssistant),
             .builtIn(.newTerminal),
             .builtIn(.newBrowser),
             .builtIn(.splitRight),
