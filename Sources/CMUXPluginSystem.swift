@@ -7,6 +7,7 @@ protocol WorkspaceDigestServicing: AnyObject {
     func refreshSummaryPriority(
         force: Bool,
         sort: WorkspaceSidebarSummaryPrioritySort,
+        assistantContext: WorkspaceSidebarAssistantContext?,
         completion: @escaping (Result<WorkspaceSidebarSummaryPriorityState, Error>) -> Void
     )
     func setDisplayMode(_ mode: WorkspaceSidebarDisplayMode, completion: @escaping (Result<Void, Error>) -> Void)
@@ -28,6 +29,21 @@ protocol WorkspaceDigestServicing: AnyObject {
         completion: @escaping (Result<Void, Error>) -> Void
     )
     func progress(completion: @escaping (Result<WorkspaceSidebarDigestProgressState, Error>) -> Void)
+}
+
+extension WorkspaceDigestServicing {
+    func refreshSummaryPriority(
+        force: Bool,
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        completion: @escaping (Result<WorkspaceSidebarSummaryPriorityState, Error>) -> Void
+    ) {
+        refreshSummaryPriority(
+            force: force,
+            sort: sort,
+            assistantContext: nil,
+            completion: completion
+        )
+    }
 }
 
 enum CMUXBuiltinSidebarExtensionID {
@@ -2476,12 +2492,16 @@ final class WorkspaceDigestService: WorkspaceDigestServicing, CMUXDigestRegistry
     func refreshSummaryPriority(
         force: Bool,
         sort: WorkspaceSidebarSummaryPrioritySort,
+        assistantContext: WorkspaceSidebarAssistantContext?,
         completion: @escaping (Result<WorkspaceSidebarSummaryPriorityState, Error>) -> Void
     ) {
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "force": force,
             "sort": sort.requestPayload,
         ]
+        if let assistantContext {
+            payload["assistantContext"] = assistantContext.requestPayload
+        }
         sendDigestCommand(
             "refresh_summary_priority",
             payload: payload,

@@ -2628,6 +2628,8 @@ struct ContentView: View {
             fileExplorerStore: fileExplorerStore,
             fileExplorerState: fileExplorerState,
             sessionIndexStore: sessionIndexStore,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore,
             titlebarHeight: RightSidebarChromeMetrics.titlebarHeight,
             workspaceId: tabManager.selectedTabId,
             onResumeSession: { entry in
@@ -3067,6 +3069,14 @@ struct ContentView: View {
                             .padding(.leading, 10)
                             .padding(.top, 4)
                     }
+                }
+                .overlay(alignment: .topTrailing) {
+                    SortAssistantPopoverHost(
+                        tabManager: tabManager,
+                        workspaceTabStore: workspaceTabStore
+                    )
+                    .padding(.trailing, 96)
+                    .padding(.top, WindowChromeMetrics.appTitlebarHeight + 8)
                 }
                 .frame(minWidth: CGFloat(SessionPersistencePolicy.minimumWindowWidth), minHeight: CGFloat(SessionPersistencePolicy.minimumWindowHeight))
                 .background(Color.clear)
@@ -13048,6 +13058,20 @@ struct WorkspaceSidebarSummaryPrioritySort: Codable, Equatable {
     }
 }
 
+struct WorkspaceSidebarAssistantContext: Codable, Equatable {
+    let requestId: String
+    let goal: String
+    let memorySnippets: [String]
+
+    var requestPayload: [String: Any] {
+        [
+            "requestId": requestId,
+            "goal": goal,
+            "memorySnippets": memorySnippets
+        ]
+    }
+}
+
 struct WorkspaceSidebarSummaryPriorityStats: Codable, Equatable {
     let total: Int
     let needsAttention: Int
@@ -13203,6 +13227,9 @@ final class WorkspaceTabStore: ObservableObject {
               let sort = try? jsonDecoder.decode(WorkspaceSidebarSummaryPrioritySort.self, from: data) else {
             return .defaultSort
         }
+        if sort.isGoalDriven {
+            return .defaultSort
+        }
         return sort
     }
 
@@ -13244,7 +13271,11 @@ final class WorkspaceTabStore: ObservableObject {
 
     func applySavedSort(id: UUID) {
         guard let preset = savedSorts.first(where: { $0.id == id }) else { return }
-        setSort(.goalDriven(goal: preset.goalText))
+        SortAssistantCoordinator.shared.submitExternalGoal(preset.goalText)
+        _ = AppDelegate.shared?.focusRightSidebarInActiveMainWindow(
+            focusFirstItem: false,
+            preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow
+        )
     }
 
     func contextSummary(for workspaceId: UUID) -> WorkspaceTabContextSummary? {
@@ -13504,26 +13535,41 @@ final class WorkspaceTabStore: ObservableObject {
         return simplified.isEmpty ? nil : simplified
     }
 
-    func refreshSummaryPriority(force: Bool = false, sort: WorkspaceSidebarSummaryPrioritySort? = nil) {
+    func refreshSummaryPriority(
+        force: Bool = false,
+        sort: WorkspaceSidebarSummaryPrioritySort? = nil,
+        assistantContext: WorkspaceSidebarAssistantContext? = nil,
+        completion: ((Result<WorkspaceSidebarSummaryPriorityState, Error>) -> Void)? = nil
+    ) {
 #if DEBUG
         if refreshSummaryPriorityInterceptorForTesting?(force, sort) == true {
+            completion?(.failure(CmuxSocketError(message: "Intercepted summary refresh for testing")))
             return
         }
 #endif
-        refreshSummaryPriority(force: force, sort: sort, retryAttempt: 0)
+        refreshSummaryPriority(
+            force: force,
+            sort: sort,
+            assistantContext: assistantContext,
+            retryAttempt: 0,
+            completion: completion
+        )
     }
 
     private func refreshSummaryPriority(
         force: Bool,
         sort: WorkspaceSidebarSummaryPrioritySort?,
-        retryAttempt: Int
+        assistantContext: WorkspaceSidebarAssistantContext?,
+        retryAttempt: Int,
+        completion: ((Result<WorkspaceSidebarSummaryPriorityState, Error>) -> Void)?
     ) {
         let effectiveSort = sort ?? selectedSort
         let requestGeneration = sortRequestGeneration
 #if DEBUG
         cmuxDebugLog(
             "summaryPriority.refresh.start gen=\(requestGeneration) force=\(force ? 1 : 0) " +
-            "sort=\(Self.debugSortDescription(effectiveSort)) selected=\(Self.debugSortDescription(selectedSort))"
+            "sort=\(Self.debugSortDescription(effectiveSort)) selected=\(Self.debugSortDescription(selectedSort)) " +
+            "assistant=\(assistantContext == nil ? 0 : 1)"
         )
 #endif
 
@@ -13531,7 +13577,11 @@ final class WorkspaceTabStore: ObservableObject {
         summaryRefreshStage = "connecting"
         errorMessage = nil
         startProgressPolling()
-        digestService.refreshSummaryPriority(force: force, sort: effectiveSort) { [weak self] result in
+        digestService.refreshSummaryPriority(
+            force: force,
+            sort: effectiveSort,
+            assistantContext: assistantContext
+        ) { [weak self] result in
             guard let self else { return }
             switch result {
             case .failure(let error):
@@ -13549,7 +13599,9 @@ final class WorkspaceTabStore: ObservableObject {
                         self.refreshSummaryPriority(
                             force: force,
                             sort: effectiveSort,
-                            retryAttempt: retryAttempt + 1
+                            assistantContext: assistantContext,
+                            retryAttempt: retryAttempt + 1,
+                            completion: completion
                         )
                     }
                     return
@@ -13558,6 +13610,7 @@ final class WorkspaceTabStore: ObservableObject {
                 self.summaryRefreshStage = nil
                 self.stopProgressPollingIfIdle()
                 self.errorMessage = Self.displayMessage(for: error)
+                completion?(.failure(error))
             case .success(let decoded):
                 self.isLoading = false
                 self.summaryRefreshStage = nil
@@ -13569,6 +13622,7 @@ final class WorkspaceTabStore: ObservableObject {
                         "current=\(self.sortRequestGeneration) responseSort=\(Self.debugSortDescription(decoded.sort))"
                     )
 #endif
+                    completion?(.failure(CmuxSocketError(message: "Stale summary priority response")))
                     return
                 }
                 guard effectiveSort == self.selectedSort else {
@@ -13579,6 +13633,7 @@ final class WorkspaceTabStore: ObservableObject {
                         "response=\(Self.debugSortDescription(decoded.sort))"
                     )
 #endif
+                    completion?(.failure(CmuxSocketError(message: "Summary priority sort changed before response")))
                     return
                 }
 #if DEBUG
@@ -13596,6 +13651,7 @@ final class WorkspaceTabStore: ObservableObject {
                     requestGeneration: requestGeneration
                 )
                 self.refineColdStartItems(decoded.items)
+                completion?(.success(decoded))
             }
         }
     }
@@ -13639,6 +13695,8 @@ final class WorkspaceTabStore: ObservableObject {
             return String(localized: "extensionColumn.refreshStage.summary", defaultValue: "Summary")
         case "scoring":
             return String(localized: "extensionColumn.refreshStage.scoring", defaultValue: "Scoring")
+        case "comparing":
+            return String(localized: "extensionColumn.refreshStage.comparing", defaultValue: "Comparing")
         case "sorting":
             return String(localized: "extensionColumn.refreshStage.sorting", defaultValue: "Sorting")
         case "saving":
@@ -13664,12 +13722,8 @@ final class WorkspaceTabStore: ObservableObject {
         cmuxDebugLog("summaryPriority.setSort.start gen=\(requestGeneration) sort=\(Self.debugSortDescription(sort))")
 #endif
 
-        // Goal-driven sort runs entirely client-side until the real scorer
-        // ships. Reorder cached items using max-of-dimension as a stable
-        // composite; native order is the tie-breaker. The backend never
-        // sees the goal_driven mode in the request payload.
         if sort.isGoalDriven {
-            applyGoalDrivenSortLocally(sort)
+            setSort(.defaultSort)
             return
         }
 
@@ -13712,26 +13766,6 @@ final class WorkspaceTabStore: ObservableObject {
         return sortedSummaryPriorityItems(currentItems, sort: sort).compactMap {
             UUID(uuidString: $0.workspaceId)
         }
-    }
-
-    private func applyGoalDrivenSortLocally(_ sort: WorkspaceSidebarSummaryPrioritySort) {
-        guard let current = summaryPriority else { return }
-        let reordered = current.items.sorted { lhs, rhs in
-            let lScore = Self.goalDrivenComposite(lhs)
-            let rScore = Self.goalDrivenComposite(rhs)
-            if lScore != rScore { return lScore > rScore }
-            return lhs.nativeOrder < rhs.nativeOrder
-        }
-        summaryPriority = WorkspaceSidebarSummaryPriorityState(
-            profileId: current.profileId,
-            sort: sort,
-            items: reordered,
-            dimensions: current.dimensions,
-            stats: current.stats,
-            generatedAt: current.generatedAt
-        )
-        isLoading = false
-        errorMessage = nil
     }
 
     private func applyCachedSortLocally(_ sort: WorkspaceSidebarSummaryPrioritySort) {
@@ -13808,13 +13842,6 @@ final class WorkspaceTabStore: ObservableObject {
                 refinementDelay: Double(index) * 0.15
             )
         }
-    }
-
-    private static func goalDrivenComposite(_ item: WorkspaceSidebarSummaryPriorityItem) -> Double {
-        // Phase 1 stub: max raw score across known dimensions. Replace with
-        // the real CLI scorer in the follow-up PR.
-        let raws = item.scores.dimensions.values.map(\.rawScore)
-        return raws.max() ?? 0
     }
 
     func refreshWorkspace(_ item: WorkspaceSidebarSummaryPriorityItem) {

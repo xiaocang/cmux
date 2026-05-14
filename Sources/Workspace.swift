@@ -7453,6 +7453,20 @@ final class Workspace: Identifiable, ObservableObject {
         )
     }
 
+    private static func sortAssistantSplitActionButton() -> BonsplitConfiguration.SplitActionButton {
+        let id = CmuxSurfaceTabBarBuiltInAction.sortAssistant.configID
+        return BonsplitConfiguration.SplitActionButton(
+            id: id,
+            icon: .systemImage(CmuxSurfaceTabBarBuiltInAction.sortAssistant.defaultIcon),
+            tooltip: String(localized: "sortAssistant.feed.title", defaultValue: "Sort Assistant"),
+            action: .custom(id)
+        )
+    }
+
+    private static func initialSplitActionButtons() -> [BonsplitConfiguration.SplitActionButton] {
+        [sortAssistantSplitActionButton()] + BonsplitConfiguration.SplitActionButton.defaults
+    }
+
     private static func bonsplitAppearance(from config: GhosttyConfig) -> BonsplitConfiguration.Appearance {
         bonsplitAppearance(
             from: config.backgroundColor,
@@ -7608,6 +7622,7 @@ final class Workspace: Identifiable, ObservableObject {
         return BonsplitConfiguration.Appearance(
             tabBarHeight: WindowChromeMetrics.bonsplitTabBarHeight,
             tabTitleFontSize: tabTitleFontSize,
+            splitButtons: Self.initialSplitActionButtons(),
             splitButtonBackdropEffect: Self.bonsplitSplitButtonBackdropEffect(),
             splitButtonTooltips: Self.currentSplitButtonTooltips(),
             enableAnimations: false,
@@ -7891,6 +7906,16 @@ final class Workspace: Identifiable, ObservableObject {
         bonsplitController.configuration = configuration
     }
 
+    private static func surfaceTabBarButtonsWithSortAssistant(
+        _ buttons: [CmuxSurfaceTabBarButton]
+    ) -> [CmuxSurfaceTabBarButton] {
+        let assistantId = CmuxSurfaceTabBarBuiltInAction.sortAssistant.configID
+        guard !buttons.contains(where: { $0.id == assistantId }) else {
+            return buttons
+        }
+        return [.sortAssistant] + buttons
+    }
+
     func applySurfaceTabBarButtons(
         _ buttons: [CmuxSurfaceTabBarButton],
         sourcePath: String?,
@@ -7898,6 +7923,7 @@ final class Workspace: Identifiable, ObservableObject {
         terminalCommandSourcePaths: [String: String],
         workspaceCommands: [String: CmuxResolvedCommand]
     ) {
+        let buttons = Self.surfaceTabBarButtonsWithSortAssistant(buttons)
         let executableButtons = Dictionary(
             uniqueKeysWithValues: buttons.compactMap { button in
                 if button.terminalCommand != nil {
@@ -14288,6 +14314,8 @@ extension Workspace: BonsplitDelegate {
                     preferredWindow: presentingWindow,
                     debugSource: "surfaceTabBar.cloudVM"
                 )
+            case .sortAssistant:
+                SortAssistantCoordinator.shared.activateEntry()
             case .newTerminal, .newBrowser, .splitRight, .splitDown:
                 break
             }

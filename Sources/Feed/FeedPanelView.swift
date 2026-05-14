@@ -71,6 +71,8 @@ struct FeedPanelView: View {
         }
     }
 
+    @ObservedObject var tabManager: TabManager
+    @ObservedObject var workspaceTabStore: WorkspaceTabStore
     @State private var filter: Filter = .actionable
     @StateObject private var viewModel = FeedPanelViewModel()
 
@@ -144,6 +146,301 @@ private struct FeedSecondaryFilterButton: View {
         .buttonStyle(.plain)
         .onHover { isHovered = $0 }
         .help(filter.label)
+    }
+}
+
+struct SortAssistantThreadView: View {
+    @ObservedObject var coordinator: SortAssistantCoordinator
+    @ObservedObject var tabManager: TabManager
+    @ObservedObject var workspaceTabStore: WorkspaceTabStore
+
+    @State private var draft = ""
+    @FocusState private var inputFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            header
+            messages
+            if let question = coordinator.dimensionQuestion {
+                dimensionQuestion(question)
+            }
+            if let result = coordinator.latestResult {
+                resultCard(result)
+            }
+            if let candidate = coordinator.memoryCandidate {
+                memoryCandidateCard(candidate)
+            }
+            if !coordinator.memories.isEmpty {
+                memoryStrip
+            }
+            inputRow
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .onAppear {
+            coordinator.drainExternalGoal(
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore
+            )
+            focusInputIfRequested()
+        }
+        .onChange(of: coordinator.externalGoalSequence) { _, _ in
+            coordinator.drainExternalGoal(
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore
+            )
+        }
+        .onChange(of: coordinator.entryFocusSequence) { _, _ in
+            focusInputIfRequested()
+        }
+    }
+
+    private var header: some View {
+        HStack(spacing: 6) {
+            SortAssistantMascotButton(
+                presentation: .threadHeader,
+                isActive: coordinator.isSorting,
+                action: coordinator.activateEntry
+            )
+            .accessibilityIdentifier("SortAssistantHeaderMascotButton")
+            Text(String(localized: "sortAssistant.feed.title", defaultValue: "Sort Assistant"))
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+            Spacer(minLength: 0)
+            if coordinator.isSorting {
+                ProgressView()
+                    .controlSize(.small)
+                    .scaleEffect(0.55)
+                    .frame(width: 14, height: 14)
+            }
+        }
+    }
+
+    private var messages: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            if coordinator.messages.isEmpty {
+                SortAssistantMascotIntroView(
+                    isSorting: coordinator.isSorting,
+                    action: coordinator.activateEntry
+                )
+            } else {
+                ForEach(coordinator.messages.suffix(4)) { message in
+                    SortAssistantMessageRow(message: message)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private func dimensionQuestion(_ question: SortAssistantDimensionQuestion) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(String(
+                localized: "sortAssistant.dimension.question",
+                defaultValue: "Choose the priority dimension for this sort."
+            ))
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.primary)
+
+            HStack(spacing: 6) {
+                dimensionButton(id: "urgency", label: String(localized: "sortAssistant.dimension.urgency", defaultValue: "Urgency"), goal: question.goal)
+                dimensionButton(id: "importance", label: String(localized: "sortAssistant.dimension.importance", defaultValue: "Importance"), goal: question.goal)
+                dimensionButton(id: "progress", label: String(localized: "sortAssistant.dimension.progress", defaultValue: "Progress"), goal: question.goal)
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.primary.opacity(0.055))
+        )
+    }
+
+    private func dimensionButton(id: String, label: String, goal: String) -> some View {
+        Button(label) {
+            coordinator.answerDimensionQuestion(
+                dimensionId: id,
+                goal: goal,
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore
+            )
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .font(.system(size: 10, weight: .medium))
+    }
+
+    private func resultCard(_ result: SortAssistantSortResult) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(result.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+            if !result.changes.isEmpty {
+                VStack(alignment: .leading, spacing: 3) {
+                    ForEach(result.changes, id: \.self) { change in
+                        Text(change)
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+            }
+            if let rationale = result.rationale {
+                Text(rationale)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
+            HStack(spacing: 6) {
+                Button {
+                    coordinator.undo(tabManager: tabManager)
+                } label: {
+                    Label(String(localized: "sortAssistant.undo", defaultValue: "Undo"), systemImage: "arrow.uturn.backward")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(!result.canUndo)
+
+                Button {
+                    coordinator.createMemoryCandidateFromResult()
+                } label: {
+                    Label(String(localized: "sortAssistant.remember", defaultValue: "Remember"), systemImage: "bookmark")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .font(.system(size: 10, weight: .medium))
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.accentColor.opacity(0.08))
+        )
+    }
+
+    private func memoryCandidateCard(_ candidate: SortAssistantMemoryCandidate) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(String(localized: "sortAssistant.memory.candidate", defaultValue: "Memory candidate"))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+            TextField(
+                String(localized: "sortAssistant.memory.placeholder", defaultValue: "Sorting preference"),
+                text: Binding(
+                    get: { coordinator.memoryCandidate?.text ?? candidate.text },
+                    set: { coordinator.updateMemoryCandidate(text: $0) }
+                ),
+                axis: .vertical
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 11))
+            .lineLimit(2...5)
+            HStack(spacing: 6) {
+                Button(String(localized: "sortAssistant.memory.save", defaultValue: "Save")) {
+                    coordinator.confirmMemoryCandidate()
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                Button(String(localized: "sortAssistant.memory.discard", defaultValue: "Discard")) {
+                    coordinator.discardMemoryCandidate()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .font(.system(size: 10, weight: .medium))
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.primary.opacity(0.055))
+        )
+    }
+
+    private var memoryStrip: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(String(localized: "sortAssistant.memory.saved", defaultValue: "Saved memories"))
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(.secondary)
+            ForEach(coordinator.memories.prefix(3)) { memory in
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Text(memory.text)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Button {
+                        coordinator.deleteMemory(memory)
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 8, weight: .bold))
+                    }
+                    .buttonStyle(.plain)
+                    .help(String(localized: "sortAssistant.memory.delete", defaultValue: "Delete memory"))
+                }
+            }
+        }
+    }
+
+    private var inputRow: some View {
+        HStack(alignment: .bottom, spacing: 6) {
+            TextField(
+                String(localized: "sortAssistant.input.placeholder", defaultValue: "Sort workspaces or say what to remember..."),
+                text: $draft,
+                axis: .vertical
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 11))
+            .lineLimit(1...4)
+            .focused($inputFocused)
+            .accessibilityIdentifier("SortAssistantInput")
+            .onSubmit(sendDraft)
+
+            Button(action: sendDraft) {
+                Image(systemName: "arrow.up.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(draftTrimmed.isEmpty ? Color.secondary : Color.accentColor)
+            }
+            .buttonStyle(.plain)
+            .disabled(draftTrimmed.isEmpty || coordinator.isSorting)
+            .help(String(localized: "sortAssistant.input.send", defaultValue: "Send"))
+        }
+    }
+
+    private var draftTrimmed: String {
+        draft.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func sendDraft() {
+        let text = draftTrimmed
+        guard !text.isEmpty else { return }
+        draft = ""
+        coordinator.submit(
+            text,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+    }
+
+    private func focusInputIfRequested() {
+        guard coordinator.entryFocusSequence > 0 else { return }
+        DispatchQueue.main.async {
+            inputFocused = true
+        }
+    }
+}
+
+private struct SortAssistantMessageRow: View {
+    let message: SortAssistantMessage
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 5) {
+            Image(systemName: message.icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(message.tint)
+                .frame(width: 12)
+            Text(message.text)
+                .font(.system(size: 11))
+                .foregroundStyle(message.kind == .error ? Color.red : Color.primary.opacity(0.88))
+                .lineLimit(3)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -3885,6 +4182,553 @@ private struct ResolvedDivider: View {
         Rectangle()
             .fill(Color.primary.opacity(0.08))
             .frame(height: 1)
+    }
+}
+
+struct SortAssistantMessage: Identifiable, Equatable {
+    enum Kind: Equatable {
+        case user
+        case assistant
+        case progress
+        case error
+    }
+
+    let id = UUID()
+    let kind: Kind
+    let text: String
+
+    var icon: String {
+        switch kind {
+        case .user: return "person"
+        case .assistant: return "sparkles"
+        case .progress: return "arrow.triangle.2.circlepath"
+        case .error: return "exclamationmark.triangle"
+        }
+    }
+
+    var tint: Color {
+        switch kind {
+        case .user: return .secondary
+        case .assistant: return .accentColor
+        case .progress: return .blue
+        case .error: return .red
+        }
+    }
+}
+
+struct SortAssistantDimensionQuestion: Equatable {
+    let goal: String
+}
+
+struct SortAssistantSortResult: Identifiable, Equatable {
+    let id = UUID()
+    let title: String
+    let goal: String
+    let dimensionLabel: String
+    let changes: [String]
+    let rationale: String?
+    var canUndo: Bool
+}
+
+struct SortAssistantMemory: Identifiable, Equatable {
+    let id: UUID
+    var text: String
+    let createdAt: Date
+}
+
+struct SortAssistantMemoryCandidate: Identifiable, Equatable {
+    let id = UUID()
+    var text: String
+    let sourceSummary: String?
+}
+
+private struct SortAssistantUndoSnapshot: Equatable {
+    let order: [UUID]
+    let titleById: [UUID: String]
+}
+
+private struct SortAssistantMemoryEvent: Codable {
+    enum EventType: String, Codable {
+        case created
+    }
+
+    let schemaVersion: String
+    let eventType: EventType
+    let memoryId: String
+    let text: String
+    let createdAt: String
+}
+
+@MainActor
+final class SortAssistantCoordinator: ObservableObject {
+    static let shared = SortAssistantCoordinator()
+
+    @Published private(set) var messages: [SortAssistantMessage] = []
+    @Published private(set) var latestResult: SortAssistantSortResult?
+    @Published private(set) var dimensionQuestion: SortAssistantDimensionQuestion?
+    @Published private(set) var memoryCandidate: SortAssistantMemoryCandidate?
+    @Published private(set) var memories: [SortAssistantMemory] = []
+    @Published private(set) var isSorting = false
+    @Published private(set) var presentationSequence = 0
+    @Published private(set) var externalGoalSequence = 0
+    @Published private(set) var entryFocusSequence = 0
+
+    private static let workstreamId = "cmux-sort-assistant"
+    private static let memoryToolName = "cmux.sort_memory"
+    private static let memorySchemaVersion = "cmux.sort_memory.v1"
+    private static let iso8601Formatter = ISO8601DateFormatter()
+    private let memoryFileURL = WorkstreamPersistence.defaultFileURL()
+    private var pendingExternalGoal: String?
+    private var undoSnapshot: SortAssistantUndoSnapshot?
+
+    private init() {
+        memories = Self.loadMemories(from: memoryFileURL)
+    }
+
+    func activateEntry() {
+        if messages.isEmpty {
+            append(.init(
+                kind: .assistant,
+                text: String(localized: "sortAssistant.entry.ready", defaultValue: "Tell me how to sort the workspace sidebar.")
+            ))
+        }
+        requestPresentation()
+        entryFocusSequence += 1
+    }
+
+    func submitExternalGoal(_ goal: String) {
+        let trimmed = normalized(goal)
+        guard !trimmed.isEmpty else { return }
+        pendingExternalGoal = trimmed
+        requestPresentation()
+        externalGoalSequence += 1
+    }
+
+    func requestPresentation() {
+        presentationSequence += 1
+    }
+
+    func drainExternalGoal(
+        tabManager: TabManager,
+        workspaceTabStore: WorkspaceTabStore
+    ) {
+        guard let goal = pendingExternalGoal else { return }
+        pendingExternalGoal = nil
+        submit(
+            goal,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+    }
+
+    func submit(
+        _ text: String,
+        tabManager: TabManager,
+        workspaceTabStore: WorkspaceTabStore
+    ) {
+        let trimmed = normalized(text)
+        guard !trimmed.isEmpty else { return }
+        append(.init(kind: .user, text: trimmed))
+
+        if looksLikeUndo(trimmed) {
+            undo(tabManager: tabManager)
+            return
+        }
+
+        if looksLikeRemember(trimmed) {
+            memoryCandidate = SortAssistantMemoryCandidate(
+                text: memoryText(from: trimmed),
+                sourceSummary: nil
+            )
+            append(.init(
+                kind: .assistant,
+                text: String(localized: "sortAssistant.memory.reviewPrompt", defaultValue: "Review this memory before saving it.")
+            ))
+            return
+        }
+
+        if looksLikeForget(trimmed) {
+            append(.init(
+                kind: .assistant,
+                text: memories.isEmpty
+                    ? String(localized: "sortAssistant.memory.none", defaultValue: "There are no saved sorting memories.")
+                    : String(localized: "sortAssistant.memory.deleteHint", defaultValue: "Use the x button beside a saved memory to delete it.")
+            ))
+            return
+        }
+
+        if looksLikeExplain(trimmed) {
+            explainCurrentOrder(workspaceTabStore: workspaceTabStore)
+            return
+        }
+
+        startSort(
+            goal: trimmed,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+    }
+
+    func answerDimensionQuestion(
+        dimensionId: String,
+        goal: String,
+        tabManager: TabManager,
+        workspaceTabStore: WorkspaceTabStore
+    ) {
+        dimensionQuestion = nil
+        workspaceTabStore.setSort(.dimension(id: dimensionId))
+        startSort(
+            goal: goal,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+    }
+
+    func undo(tabManager: TabManager) {
+        guard let undoSnapshot else {
+            append(.init(
+                kind: .assistant,
+                text: String(localized: "sortAssistant.undo.none", defaultValue: "There is no assistant sort to undo.")
+            ))
+            return
+        }
+        _ = tabManager.reorderWorkspaces(to: undoSnapshot.order)
+        self.undoSnapshot = nil
+        latestResult?.canUndo = false
+        append(.init(
+            kind: .assistant,
+            text: String(localized: "sortAssistant.undo.done", defaultValue: "Restored the previous workspace order.")
+        ))
+    }
+
+    func createMemoryCandidateFromResult() {
+        guard let latestResult else { return }
+        let text = String(
+            localized: "sortAssistant.memory.fromResult",
+            defaultValue: "When sorting workspaces, consider: \(latestResult.goal)"
+        )
+        memoryCandidate = SortAssistantMemoryCandidate(
+            text: text,
+            sourceSummary: latestResult.rationale
+        )
+    }
+
+    func updateMemoryCandidate(text: String) {
+        guard var candidate = memoryCandidate else { return }
+        candidate.text = text
+        memoryCandidate = candidate
+    }
+
+    func confirmMemoryCandidate() {
+        guard let candidate = memoryCandidate else { return }
+        let text = normalized(candidate.text)
+        guard !text.isEmpty else { return }
+        let memory = SortAssistantMemory(id: UUID(), text: text, createdAt: Date())
+        memories.insert(memory, at: 0)
+        persistCreatedMemory(memory)
+        memoryCandidate = nil
+        append(.init(
+            kind: .assistant,
+            text: String(localized: "sortAssistant.memory.savedReply", defaultValue: "Saved that sorting memory.")
+        ))
+    }
+
+    func discardMemoryCandidate() {
+        memoryCandidate = nil
+        append(.init(
+            kind: .assistant,
+            text: String(localized: "sortAssistant.memory.discardedReply", defaultValue: "Discarded the memory candidate.")
+        ))
+    }
+
+    func deleteMemory(_ memory: SortAssistantMemory) {
+        memories.removeAll { $0.id == memory.id }
+        Task { @MainActor in
+            await FeedCoordinator.shared.store?.rewritePersistedToolResults(
+                toolName: Self.memoryToolName,
+                containing: memory.id.uuidString
+            )
+        }
+    }
+
+    private func startSort(
+        goal: String,
+        tabManager: TabManager,
+        workspaceTabStore: WorkspaceTabStore
+    ) {
+        guard !isSorting else {
+            append(.init(
+                kind: .assistant,
+                text: String(localized: "sortAssistant.sort.busy", defaultValue: "A workspace sort is already running.")
+            ))
+            return
+        }
+
+        let selectedSort = workspaceTabStore.selectedSort
+        guard selectedSort.isDimension else {
+            dimensionQuestion = SortAssistantDimensionQuestion(goal: goal)
+            append(.init(
+                kind: .assistant,
+                text: String(localized: "sortAssistant.dimension.needChoice", defaultValue: "The current sort is not a priority dimension, so I need one choice first.")
+            ))
+            return
+        }
+
+        let before = SortAssistantUndoSnapshot(
+            order: tabManager.tabs.map(\.id),
+            titleById: Dictionary(uniqueKeysWithValues: tabManager.tabs.map { ($0.id, $0.title) })
+        )
+        undoSnapshot = before
+        latestResult = nil
+        isSorting = true
+        append(.init(
+            kind: .progress,
+            text: String(localized: "sortAssistant.sort.running", defaultValue: "Scoring workspaces with the current priority dimension...")
+        ))
+
+        let assistantContext = WorkspaceSidebarAssistantContext(
+            requestId: UUID().uuidString,
+            goal: goal,
+            memorySnippets: memories.prefix(8).map(\.text)
+        )
+        workspaceTabStore.refreshSummaryPriority(
+            force: true,
+            sort: selectedSort,
+            assistantContext: assistantContext
+        ) { [weak self, weak tabManager] result in
+            guard let self else { return }
+            self.isSorting = false
+            guard let tabManager else { return }
+            switch result {
+            case .failure(let error):
+                self.latestResult = nil
+                self.undoSnapshot = nil
+                self.append(.init(
+                    kind: .error,
+                    text: String(localized: "sortAssistant.sort.failed", defaultValue: "Sort failed: ") + Self.displayMessage(for: error)
+                ))
+            case .success(let state):
+                self.applyResult(
+                    state,
+                    sort: selectedSort,
+                    goal: goal,
+                    before: before,
+                    tabManager: tabManager
+                )
+            }
+        }
+    }
+
+    private func applyResult(
+        _ state: WorkspaceSidebarSummaryPriorityState,
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        goal: String,
+        before: SortAssistantUndoSnapshot,
+        tabManager: TabManager
+    ) {
+        let ordered = WorkspaceTabStore.orderedWorkspaceIds(
+            from: state,
+            tabs: tabManager.tabs,
+            sort: sort
+        )
+        guard !ordered.isEmpty else {
+            latestResult = nil
+            undoSnapshot = nil
+            append(.init(
+                kind: .error,
+                text: String(localized: "sortAssistant.sort.noOrder", defaultValue: "Digest returned no applicable workspace order.")
+            ))
+            return
+        }
+        _ = tabManager.reorderWorkspaces(to: ordered)
+        let after = tabManager.tabs.map(\.id)
+        let changes = Self.topChanges(
+            before: before.order,
+            after: after,
+            titleById: before.titleById
+        )
+        let dimensionLabel = Self.dimensionLabel(sort)
+        latestResult = SortAssistantSortResult(
+            title: String(localized: "sortAssistant.result.title", defaultValue: "Sorted by \(dimensionLabel)"),
+            goal: goal,
+            dimensionLabel: dimensionLabel,
+            changes: changes,
+            rationale: Self.topRationale(from: state, sort: sort),
+            canUndo: true
+        )
+        append(.init(
+            kind: .assistant,
+            text: String(localized: "sortAssistant.sort.done", defaultValue: "Applied the workspace sort.")
+        ))
+    }
+
+    private func explainCurrentOrder(workspaceTabStore: WorkspaceTabStore) {
+        guard let summary = workspaceTabStore.summaryPriority,
+              let first = summary.items.first else {
+            append(.init(
+                kind: .assistant,
+                text: String(localized: "sortAssistant.explain.empty", defaultValue: "Refresh summary priority first so I can explain the current order.")
+            ))
+            return
+        }
+        append(.init(
+            kind: .assistant,
+            text: first.scores.rankReason.isEmpty
+                ? String(localized: "sortAssistant.explain.noReason", defaultValue: "The current order follows the selected priority dimension and pinned workspace rules.")
+                : first.scores.rankReason
+        ))
+    }
+
+    private func persistCreatedMemory(_ memory: SortAssistantMemory) {
+        let event = SortAssistantMemoryEvent(
+            schemaVersion: Self.memorySchemaVersion,
+            eventType: .created,
+            memoryId: memory.id.uuidString,
+            text: memory.text,
+            createdAt: Self.iso8601Formatter.string(from: memory.createdAt)
+        )
+        guard let data = try? JSONEncoder().encode(event),
+              let resultJSON = String(data: data, encoding: .utf8) else {
+            return
+        }
+        let item = WorkstreamItem(
+            workstreamId: Self.workstreamId,
+            source: .cmux,
+            kind: .toolResult,
+            title: String(localized: "sortAssistant.memory.eventTitle", defaultValue: "Sort memory"),
+            payload: .toolResult(
+                toolName: Self.memoryToolName,
+                resultJSON: resultJSON,
+                isError: false
+            )
+        )
+        FeedCoordinator.shared.store?.ingestLocal(item, persist: true)
+    }
+
+    private func append(_ message: SortAssistantMessage) {
+        messages.append(message)
+        if messages.count > 40 {
+            messages.removeFirst(messages.count - 40)
+        }
+    }
+
+    private static func loadMemories(from fileURL: URL) -> [SortAssistantMemory] {
+        guard let data = try? Data(contentsOf: fileURL) else { return [] }
+        let itemDecoder = JSONDecoder()
+        itemDecoder.dateDecodingStrategy = .iso8601
+        let eventDecoder = JSONDecoder()
+        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        var memoriesById: [UUID: SortAssistantMemory] = [:]
+        for line in lines {
+            let lineData = Data(line)
+            guard let item = try? itemDecoder.decode(WorkstreamItem.self, from: lineData),
+                  case .toolResult(let toolName, let resultJSON, false) = item.payload,
+                  toolName == memoryToolName,
+                  let eventData = resultJSON.data(using: .utf8),
+                  let event = try? eventDecoder.decode(SortAssistantMemoryEvent.self, from: eventData),
+                  event.schemaVersion == memorySchemaVersion,
+                  let memoryId = UUID(uuidString: event.memoryId) else {
+                continue
+            }
+            switch event.eventType {
+            case .created:
+                let createdAt = iso8601Formatter.date(from: event.createdAt) ?? item.createdAt
+                memoriesById[memoryId] = SortAssistantMemory(
+                    id: memoryId,
+                    text: event.text,
+                    createdAt: createdAt
+                )
+            }
+        }
+        return memoriesById.values.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private static func topChanges(
+        before: [UUID],
+        after: [UUID],
+        titleById: [UUID: String]
+    ) -> [String] {
+        let beforeIndex = Dictionary(uniqueKeysWithValues: before.enumerated().map { ($0.element, $0.offset) })
+        var changes: [String] = []
+        for (index, id) in after.enumerated() {
+            guard let previous = beforeIndex[id], previous != index else { continue }
+            let title = titleById[id] ?? String(localized: "sortAssistant.workspace.fallback", defaultValue: "Workspace")
+            changes.append("\(index + 1). \(title)")
+            if changes.count >= 5 { break }
+        }
+        if changes.isEmpty {
+            return [String(localized: "sortAssistant.result.noVisibleChanges", defaultValue: "Order was already up to date.")]
+        }
+        return changes
+    }
+
+    private static func topRationale(
+        from state: WorkspaceSidebarSummaryPriorityState,
+        sort: WorkspaceSidebarSummaryPrioritySort
+    ) -> String? {
+        let dimensionId = sort.dimensionId ?? "urgency"
+        return nonEmpty(state.items.first?.scores.dimensions[dimensionId]?.reason)
+            ?? nonEmpty(state.items.first?.scores.rankReason)
+    }
+
+    private static func nonEmpty(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func dimensionLabel(_ sort: WorkspaceSidebarSummaryPrioritySort) -> String {
+        switch sort.dimensionId ?? "urgency" {
+        case "importance":
+            return String(localized: "sortAssistant.dimension.importance", defaultValue: "Importance")
+        case "progress":
+            return String(localized: "sortAssistant.dimension.progress", defaultValue: "Progress")
+        default:
+            return String(localized: "sortAssistant.dimension.urgency", defaultValue: "Urgency")
+        }
+    }
+
+    private static func displayMessage(for error: Error) -> String {
+        if let socketError = error as? CmuxSocketError {
+            return socketError.message
+        }
+        return String(describing: error)
+    }
+
+    private func looksLikeRemember(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return containsAny(lower, ["remember", "from now on", "以后", "记住", "下次", "以后都"])
+    }
+
+    private func looksLikeForget(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return containsAny(lower, ["forget", "delete memory", "忘记", "别记", "删除记忆"])
+    }
+
+    private func looksLikeUndo(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return containsAny(lower, ["undo", "revert", "撤销", "恢复刚才", "还原"])
+    }
+
+    private func looksLikeExplain(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        return containsAny(lower, ["why", "explain", "为什么", "解释"])
+    }
+
+    private func containsAny(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { text.contains($0) }
+    }
+
+    private func memoryText(from text: String) -> String {
+        var output = text
+        for marker in ["remember", "Remember", "from now on", "以后都", "以后", "记住", "下次"] {
+            output = output.replacingOccurrences(of: marker, with: "")
+        }
+        return normalized(output).isEmpty ? text : normalized(output)
+    }
+
+    private func normalized(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 

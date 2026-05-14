@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct ExtensionColumnSortQuickPopover: View {
@@ -172,7 +173,11 @@ struct ExtensionColumnSortQuickPopover: View {
         let goal = trimmedGoal
         guard !goal.isEmpty else { return }
         lastGoal = goal
-        workspaceTabStore.setSort(.goalDriven(goal: goal))
+        SortAssistantCoordinator.shared.submitExternalGoal(goal)
+        _ = AppDelegate.shared?.focusRightSidebarInActiveMainWindow(
+            focusFirstItem: false,
+            preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow
+        )
         onClose()
     }
 
@@ -182,7 +187,11 @@ struct ExtensionColumnSortQuickPopover: View {
         guard !name.isEmpty, !goal.isEmpty else { return }
         lastGoal = goal
         workspaceTabStore.addSavedSort(name: name, goal: goal)
-        workspaceTabStore.setSort(.goalDriven(goal: goal))
+        SortAssistantCoordinator.shared.submitExternalGoal(goal)
+        _ = AppDelegate.shared?.focusRightSidebarInActiveMainWindow(
+            focusFirstItem: false,
+            preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow
+        )
         onClose()
     }
 }
