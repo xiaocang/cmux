@@ -29,6 +29,7 @@ struct SortAssistantThreadView: View {
 
     private enum KeyboardOption {
         case dimension(String)
+        case choice(SortAssistantChoicePrompt.Option)
         case memorySave
         case memoryDiscard
         case result(SortAssistantResultAction)
@@ -40,6 +41,9 @@ struct SortAssistantThreadView: View {
                 header
             }
             messages
+            if let prompt = coordinator.choicePrompt {
+                choicePromptCard(prompt)
+            }
             if let question = coordinator.dimensionQuestion {
                 dimensionQuestion(question)
             }
@@ -289,6 +293,74 @@ struct SortAssistantThreadView: View {
         )
     }
 
+    private func choicePromptCard(_ prompt: SortAssistantChoicePrompt) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(prompt.title)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+            if let message = prompt.message {
+                Text(message)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                ForEach(Array(prompt.options.enumerated()), id: \.element.id) { index, option in
+                    Button {
+                        coordinator.answerChoicePrompt(
+                            option,
+                            tabManager: tabManager,
+                            workspaceTabStore: workspaceTabStore
+                        )
+                    } label: {
+                        HStack(alignment: .top, spacing: 7) {
+                            Image(systemName: "target")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+                                .frame(width: 14, height: 14)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option.title)
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+                                if let subtitle = option.subtitle {
+                                    Text(subtitle)
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(3)
+                                }
+                            }
+                            Spacer(minLength: 0)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 8, weight: .bold))
+                                .foregroundStyle(.tertiary)
+                                .padding(.top, 3)
+                        }
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(Color.primary.opacity(0.045))
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .help(keyboardOptionHelp(index: index))
+                    .overlay {
+                        keyboardSelectionOverlay(isSelected: index == keyboardOptionSelection)
+                    }
+                }
+            }
+        }
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color.accentColor.opacity(0.075))
+        )
+    }
+
     @ViewBuilder
     private func resultMarkdown(_ markdown: String) -> some View {
         if let attributed = try? AttributedString(markdown: markdown) {
@@ -393,6 +465,9 @@ struct SortAssistantThreadView: View {
     }
 
     private var keyboardOptions: [KeyboardOption] {
+        if let choicePrompt = coordinator.choicePrompt {
+            return choicePrompt.options.map { .choice($0) }
+        }
         if coordinator.dimensionQuestion != nil {
             return [.dimension("urgency"), .dimension("importance"), .dimension("progress")]
         }
@@ -421,6 +496,10 @@ struct SortAssistantThreadView: View {
     }
 
     private func activateCancelKeyboardOption() -> Bool {
+        if coordinator.choicePrompt != nil {
+            coordinator.dismissChoicePrompt()
+            return true
+        }
         if coordinator.memoryCandidate != nil {
             coordinator.discardMemoryCandidate()
             return true
@@ -453,6 +532,13 @@ struct SortAssistantThreadView: View {
             coordinator.answerDimensionQuestion(
                 dimensionId: id,
                 goal: question.goal,
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore
+            )
+            return true
+        case .choice(let choice):
+            coordinator.answerChoicePrompt(
+                choice,
                 tabManager: tabManager,
                 workspaceTabStore: workspaceTabStore
             )
@@ -508,7 +594,7 @@ struct SortAssistantThreadView: View {
 
     private func keyboardOptionHelp(index: Int) -> String {
         String(
-            format: String(localized: "sortAssistant.option.keyboardHelp", defaultValue: "Press %d, or use Left/Right then Return."),
+            format: String(localized: "sortAssistant.option.keyboardHelp", defaultValue: "Press %d, or use arrow keys then Return."),
             index + 1
         )
     }
@@ -934,13 +1020,23 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
         func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             switch commandSelector {
             case #selector(NSResponder.moveDown(_:)):
-                guard parent.hasCompletion else { return false }
-                parent.onMoveCompletion(+1)
+                if parent.hasCompletion {
+                    parent.onMoveCompletion(+1)
+                } else if parent.isDraftEmpty, parent.onMoveKeyboardOption(+1) {
+                    parent.selection = textView.selectedRange()
+                } else {
+                    return false
+                }
                 parent.selection = textView.selectedRange()
                 return true
             case #selector(NSResponder.moveUp(_:)):
-                guard parent.hasCompletion else { return false }
-                parent.onMoveCompletion(-1)
+                if parent.hasCompletion {
+                    parent.onMoveCompletion(-1)
+                } else if parent.isDraftEmpty, parent.onMoveKeyboardOption(-1) {
+                    parent.selection = textView.selectedRange()
+                } else {
+                    return false
+                }
                 parent.selection = textView.selectedRange()
                 return true
             case #selector(NSResponder.insertTab(_:)):
@@ -991,11 +1087,11 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
                     return true
                 }
                 switch event.keyCode {
-                case 123:
+                case 123, 126:
                     guard parent.onMoveKeyboardOption(-1) else { return false }
                     publishSelection(from: parentField)
                     return true
-                case 124:
+                case 124, 125:
                     guard parent.onMoveKeyboardOption(+1) else { return false }
                     publishSelection(from: parentField)
                     return true
@@ -1525,6 +1621,57 @@ struct SortAssistantMessage: Identifiable, Equatable {
 struct SortAssistantDimensionQuestion: Equatable {
     let goal: String
     let mode: SortAssistantRunMode
+}
+
+struct SortAssistantChoicePrompt: Identifiable, Equatable, Sendable {
+    struct Option: Identifiable, Equatable, Sendable {
+        let id: String
+        let title: String
+        let subtitle: String?
+        let goal: String
+    }
+
+    let id: UUID
+    let title: String
+    let message: String?
+    let options: [Option]
+    let followUpIntent: SortAssistantIntent?
+    let forceApply: Bool
+    let workspaceTarget: SortAssistantWorkspaceTarget?
+
+    init(
+        id: UUID = UUID(),
+        title: String,
+        message: String?,
+        options: [Option],
+        followUpIntent: SortAssistantIntent? = nil,
+        forceApply: Bool = false,
+        workspaceTarget: SortAssistantWorkspaceTarget? = nil
+    ) {
+        self.id = id
+        self.title = title
+        self.message = message
+        self.options = options
+        self.followUpIntent = followUpIntent
+        self.forceApply = forceApply
+        self.workspaceTarget = workspaceTarget
+    }
+
+    func preparedForFollowUp(
+        intent: SortAssistantIntent,
+        forceApply: Bool,
+        workspaceTarget: SortAssistantWorkspaceTarget?
+    ) -> SortAssistantChoicePrompt {
+        SortAssistantChoicePrompt(
+            id: id,
+            title: title,
+            message: message,
+            options: options,
+            followUpIntent: followUpIntent ?? intent,
+            forceApply: self.forceApply || forceApply,
+            workspaceTarget: self.workspaceTarget ?? workspaceTarget
+        )
+    }
 }
 
 enum SortAssistantResultMode: Equatable, Sendable {
@@ -2891,6 +3038,17 @@ struct SortAssistantMCPRunResult: Sendable {
 
     let message: String
     let card: Card?
+    let choicePrompt: SortAssistantChoicePrompt?
+
+    init(
+        message: String,
+        card: Card?,
+        choicePrompt: SortAssistantChoicePrompt? = nil
+    ) {
+        self.message = message
+        self.card = card
+        self.choicePrompt = choicePrompt
+    }
 
     static func parse(_ raw: String) throws -> SortAssistantMCPRunResult {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2905,9 +3063,12 @@ struct SortAssistantMCPRunResult: Sendable {
 
         if let nested = Self.string(object["result"]),
            nested != trimmed,
-           object["message"] == nil,
-           object["assistant_message"] == nil,
-           object["card"] == nil {
+           isAbsent(object["message"]),
+           isAbsent(object["assistant_message"]),
+           isAbsent(object["card"]),
+           isAbsent(object["choicePrompt"]),
+           isAbsent(object["choice_prompt"]),
+           isAbsent(object["clarification"]) {
             return try parse(nested)
         }
 
@@ -2919,10 +3080,15 @@ struct SortAssistantMCPRunResult: Sendable {
         let cardObject = object["card"] as? [String: Any]
             ?? object["result"] as? [String: Any]
         let card = cardObject.flatMap(Self.card)
-        if message.isEmpty, card == nil {
+        let promptObject = object["choicePrompt"] as? [String: Any]
+            ?? object["choice_prompt"] as? [String: Any]
+            ?? object["clarification"] as? [String: Any]
+            ?? object["choice"] as? [String: Any]
+        let choicePrompt = promptObject.flatMap(Self.choicePrompt)
+        if message.isEmpty, card == nil, choicePrompt == nil {
             throw SortAssistantMCPRunResultParseError(raw: raw)
         }
-        return SortAssistantMCPRunResult(message: message, card: card)
+        return SortAssistantMCPRunResult(message: message, card: card, choicePrompt: choicePrompt)
     }
 
     private static func card(_ object: [String: Any]) -> Card? {
@@ -2943,6 +3109,91 @@ struct SortAssistantMCPRunResult: Sendable {
             mode: mode,
             actions: resultActions(object["actions"] ?? object["result_actions"] ?? object["cmux_result_actions"])
         )
+    }
+
+    private static func choicePrompt(_ object: [String: Any]) -> SortAssistantChoicePrompt? {
+        let title = string(object["title"])
+            ?? string(object["question"])
+            ?? string(object["label"])
+        let message = string(object["message"])
+            ?? string(object["body"])
+            ?? string(object["description"])
+        let options = choiceOptions(object["options"] ?? object["choices"])
+        guard let title, !options.isEmpty else { return nil }
+        let followUpIntent = string(object["intent"] ?? object["followUpIntent"] ?? object["follow_up_intent"])
+            .flatMap(SortAssistantIntent.init(rawValue:))
+        let forceApply = bool(object["forceApply"] ?? object["force_apply"]) ?? false
+        return SortAssistantChoicePrompt(
+            title: title,
+            message: message,
+            options: options,
+            followUpIntent: followUpIntent,
+            forceApply: forceApply
+        )
+    }
+
+    private static func choiceOptions(_ value: Any?) -> [SortAssistantChoicePrompt.Option] {
+        let parsed: [SortAssistantChoicePrompt.Option]
+        if let list = value as? [[String: Any]] {
+            parsed = list.enumerated().compactMap { index, object in
+                choiceOption(object, fallbackIndex: index)
+            }
+        } else if let list = value as? [Any] {
+            parsed = list.enumerated().compactMap { index, value in
+                if let object = value as? [String: Any] {
+                    return choiceOption(object, fallbackIndex: index)
+                }
+                guard let title = string(value) else { return nil }
+                return SortAssistantChoicePrompt.Option(
+                    id: optionId(title, fallbackIndex: index),
+                    title: title,
+                    subtitle: nil,
+                    goal: title
+                )
+            }
+        } else {
+            parsed = []
+        }
+
+        var seen: Set<String> = []
+        return parsed.filter { option in
+            seen.insert(option.id).inserted
+        }
+    }
+
+    private static func choiceOption(
+        _ object: [String: Any],
+        fallbackIndex: Int
+    ) -> SortAssistantChoicePrompt.Option? {
+        guard let title = string(object["title"] ?? object["label"] ?? object["name"]) else {
+            return nil
+        }
+        let subtitle = string(object["subtitle"] ?? object["description"] ?? object["detail"])
+        let goal = string(object["goal"] ?? object["prompt"] ?? object["value"])
+            ?? [title, subtitle].compactMap { $0 }.joined(separator: ": ")
+        return SortAssistantChoicePrompt.Option(
+            id: string(object["id"]) ?? optionId(title, fallbackIndex: fallbackIndex),
+            title: title,
+            subtitle: subtitle,
+            goal: goal
+        )
+    }
+
+    private static func optionId(_ title: String, fallbackIndex: Int) -> String {
+        let normalized = title
+            .lowercased()
+            .unicodeScalars
+            .map { scalar -> Character in
+                CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : "-"
+            }
+            .reduce(into: "") { partial, character in
+                if character == "-", partial.last == "-" {
+                    return
+                }
+                partial.append(character)
+            }
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return normalized.isEmpty ? "choice-\(fallbackIndex + 1)" : normalized
     }
 
     private static func firstJSONObject(in content: String) -> String? {
@@ -2972,6 +3223,10 @@ struct SortAssistantMCPRunResult: Sendable {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    private static func isAbsent(_ value: Any?) -> Bool {
+        value == nil || value is NSNull
+    }
+
     private static func stringArray(_ value: Any?) -> [String] {
         if let list = value as? [String] {
             return list
@@ -2980,6 +3235,23 @@ struct SortAssistantMCPRunResult: Sendable {
             return list.compactMap(string)
         }
         return []
+    }
+
+    private static func bool(_ value: Any?) -> Bool? {
+        if let value = value as? Bool {
+            return value
+        }
+        if let number = value as? NSNumber {
+            return number.boolValue
+        }
+        if let string = string(value)?.lowercased() {
+            switch string {
+            case "true", "yes", "1": return true
+            case "false", "no", "0": return false
+            default: return nil
+            }
+        }
+        return nil
     }
 
     private static func contentText(_ value: Any?) -> String? {
@@ -3148,6 +3420,18 @@ struct SortAssistantMCPClient: Sendable {
         Return only one strict JSON object:
         {
           "message": "short user-facing sentence",
+          "choicePrompt": {
+            "title": "short question title",
+            "message": "optional context sentence",
+            "options": [
+              {
+                "id": "stable_snake_case_id",
+                "title": "short option title",
+                "subtitle": "one-line option description",
+                "goal": "complete follow-up sort goal to run when selected"
+              }
+            ]
+          },
           "card": {
             "title": "short title",
             "mode": "preview|applied",
@@ -3158,6 +3442,7 @@ struct SortAssistantMCPClient: Sendable {
             "actions": ["apply","partial_apply","ignore","explain","undo","remember"]
           }
         }
+        Use null for choicePrompt when no choice should be shown.
         Use null for card when no result card should be shown.
 
         Behavior:
@@ -3171,6 +3456,7 @@ struct SortAssistantMCPClient: Sendable {
         - For ask_context about repositories or GitHub, call repository_context and github_context first. Do not answer with a generic self-description.
         - Context tools may return null or empty data when integrations are disabled or no PR is linked; report that briefly instead of inventing context.
         - Never tell the user that sprite sort assistant tools are unavailable. The cmux_sprite MCP tools in this session are the available tools. If one tool returns empty/error data, use the other available tool outputs and explain the limitation concretely.
+        - If a sort request is ambiguous and requires the user to pick an interpretation, return choicePrompt instead of a prose bullet-list question. For example, "urgent" can mean unfinished local work, linked PR review/CI activity, or current workspace urgency signals. Each option must include a complete follow-up goal; do not ask the user to type a free-form reply for those common choices.
         - For propose_sort, call memory_query, sort_context, then sort_preview. Return a preview card only if sort_preview succeeds.
         - For apply_sort, call memory_query, sort_context, sort_preview, then sort_apply. Return an applied card only if sort_apply succeeds.
         - For explain_current_order or ask_context, call sort_context and/or sort_explain/list_state and return a concise explanation.
@@ -4370,6 +4656,7 @@ final class SortAssistantCoordinator: ObservableObject {
         }
     }
     @Published private(set) var latestResultAnchorMessageId: UUID?
+    @Published private(set) var choicePrompt: SortAssistantChoicePrompt?
     @Published private(set) var dimensionQuestion: SortAssistantDimensionQuestion?
     @Published private(set) var memoryCandidate: SortAssistantMemoryCandidate?
     @Published private(set) var memories: [SortAssistantMemory] = []
@@ -4416,6 +4703,7 @@ final class SortAssistantCoordinator: ObservableObject {
     var hasCurrentSessionState: Bool {
         !messages.isEmpty
             || latestResult != nil
+            || choicePrompt != nil
             || dimensionQuestion != nil
             || memoryCandidate != nil
             || isSorting
@@ -4428,7 +4716,7 @@ final class SortAssistantCoordinator: ObservableObject {
         if messages.last?.kind == .error {
             return .failed
         }
-        if memoryCandidate != nil || dimensionQuestion != nil {
+        if memoryCandidate != nil || dimensionQuestion != nil || choicePrompt != nil {
             return .waiting
         }
         if let latestResult {
@@ -4459,6 +4747,7 @@ final class SortAssistantCoordinator: ObservableObject {
         pendingPreviewSort = nil
         latestResult = nil
         latestResultAnchorMessageId = nil
+        choicePrompt = nil
         dimensionQuestion = nil
         memoryCandidate = nil
         messages.removeAll()
@@ -4536,6 +4825,7 @@ final class SortAssistantCoordinator: ObservableObject {
     ) {
         let trimmed = normalized(text)
         guard !trimmed.isEmpty else { return }
+        choicePrompt = nil
         rememberStores(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
         let workspaceMention = Self.workspaceMentionResolution(in: trimmed, tabManager: tabManager)
         let workspaceTarget = workspaceMention?.target
@@ -5264,6 +5554,7 @@ final class SortAssistantCoordinator: ObservableObject {
         }
 
         rememberStores(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+        choicePrompt = nil
         isSorting = true
         let conversationContext = semanticConversationContext(workspaceTarget: workspaceTarget)
         append(.init(
@@ -5295,7 +5586,8 @@ final class SortAssistantCoordinator: ObservableObject {
                     intent: intent,
                     route: route,
                     tabManager: tabManager,
-                    workspaceTabStore: workspaceTabStore
+                    workspaceTabStore: workspaceTabStore,
+                    workspaceTarget: workspaceTarget
                 )
             } catch {
                 guard self.sessionGeneration == generation else { return }
@@ -5314,7 +5606,8 @@ final class SortAssistantCoordinator: ObservableObject {
         intent: SortAssistantIntent,
         route: SortAssistantActionRoute,
         tabManager: TabManager,
-        workspaceTabStore: WorkspaceTabStore
+        workspaceTabStore: WorkspaceTabStore,
+        workspaceTarget: SortAssistantWorkspaceTarget?
     ) {
         let result = localFallbackResult(
             replacingUnavailableToolMessageIfNeeded: result,
@@ -5323,9 +5616,15 @@ final class SortAssistantCoordinator: ObservableObject {
             tabManager: tabManager,
             workspaceTabStore: workspaceTabStore
         )
+        let inferredChoicePrompt = result.choicePrompt ?? Self.inferredChoicePrompt(
+            from: result.message,
+            goal: goal,
+            intent: intent
+        )
+        let message = result.choicePrompt == nil && inferredChoicePrompt != nil ? "" : result.message
         let anchorMessageId: UUID?
-        if !result.message.isEmpty {
-            anchorMessageId = append(.init(kind: .assistant, text: result.message))
+        if !message.isEmpty {
+            anchorMessageId = append(.init(kind: .assistant, text: message))
         } else if memoryCandidate != nil {
             anchorMessageId = append(.init(
                 kind: .assistant,
@@ -5335,7 +5634,20 @@ final class SortAssistantCoordinator: ObservableObject {
             anchorMessageId = messages.last?.id
         }
 
+        if let inferredChoicePrompt {
+            latestResult = nil
+            pendingPreviewPatch = nil
+            pendingPreviewSort = nil
+            choicePrompt = inferredChoicePrompt.preparedForFollowUp(
+                intent: intent,
+                forceApply: route.mode == .applyAllowed && !route.needsConfirmation,
+                workspaceTarget: workspaceTarget
+            )
+            return
+        }
+
         guard let card = result.card else { return }
+        choicePrompt = nil
         let dimensionLabel = card.dimensionLabel ?? Self.dimensionLabel(workspaceTabStore.selectedSort)
         setLatestResult(SortAssistantSortResult(
             title: card.title,
@@ -5392,6 +5704,67 @@ final class SortAssistantCoordinator: ObservableObject {
             || lowercased.contains("aren't currently available")
             || lowercased.contains("need the sort context tools")
             || lowercased.contains("cannot access")
+    }
+
+    private static func inferredChoicePrompt(
+        from message: String,
+        goal: String,
+        intent: SortAssistantIntent
+    ) -> SortAssistantChoicePrompt? {
+        guard intent == .proposeSort || intent == .applySort else { return nil }
+        let lowercasedMessage = message.lowercased()
+        let lowercasedGoal = goal.lowercased()
+        guard lowercasedMessage.contains("unfinished work"),
+              lowercasedMessage.contains("pr activity"),
+              lowercasedMessage.contains("clarify"),
+              lowercasedMessage.contains("urgent") || lowercasedGoal.contains("urgent") || lowercasedGoal.contains("urgency") else {
+            return nil
+        }
+        return SortAssistantChoicePrompt(
+            title: String(localized: "sortAssistant.choice.urgent.title", defaultValue: "Choose urgent signal"),
+            message: String(
+                localized: "sortAssistant.choice.urgent.message",
+                defaultValue: "Pick the signal to use for this sort."
+            ),
+            options: [
+                SortAssistantChoicePrompt.Option(
+                    id: "unfinished_work",
+                    title: String(localized: "sortAssistant.choice.urgent.unfinished.title", defaultValue: "Unfinished work"),
+                    subtitle: String(
+                        localized: "sortAssistant.choice.urgent.unfinished.subtitle",
+                        defaultValue: "Prioritize local changes, active tasks, blockers, or other in-progress work."
+                    ),
+                    goal: String(
+                        localized: "sortAssistant.choice.urgent.unfinished.goal",
+                        defaultValue: "Sort by unfinished work: prioritize workspaces with uncommitted local changes, in-progress tasks, blockers, or other active work."
+                    )
+                ),
+                SortAssistantChoicePrompt.Option(
+                    id: "pr_activity",
+                    title: String(localized: "sortAssistant.choice.urgent.pr.title", defaultValue: "PR activity"),
+                    subtitle: String(
+                        localized: "sortAssistant.choice.urgent.pr.subtitle",
+                        defaultValue: "Prioritize linked PRs awaiting review, CI, or recent review activity."
+                    ),
+                    goal: String(
+                        localized: "sortAssistant.choice.urgent.pr.goal",
+                        defaultValue: "Sort by PR activity: prioritize workspaces with linked PRs awaiting review, failing or running CI, or recent review activity."
+                    )
+                ),
+                SortAssistantChoicePrompt.Option(
+                    id: "current_urgency",
+                    title: String(localized: "sortAssistant.choice.urgent.current.title", defaultValue: "Current urgency signals"),
+                    subtitle: String(
+                        localized: "sortAssistant.choice.urgent.current.subtitle",
+                        defaultValue: "Use digest, GitHub context, and saved sorting memory."
+                    ),
+                    goal: String(
+                        localized: "sortAssistant.choice.urgent.current.goal",
+                        defaultValue: "Sort by current urgency signals: use workspace digest status, GitHub context, and saved free-sort memories to rank urgency."
+                    )
+                ),
+            ]
+        )
     }
 
     private func localFallbackMessage(
@@ -5646,6 +6019,29 @@ final class SortAssistantCoordinator: ObservableObject {
             tabManager: tabManager,
             workspaceTabStore: workspaceTabStore
         )
+    }
+
+    func answerChoicePrompt(
+        _ option: SortAssistantChoicePrompt.Option,
+        tabManager: TabManager,
+        workspaceTabStore: WorkspaceTabStore
+    ) {
+        guard let prompt = choicePrompt else { return }
+        choicePrompt = nil
+        append(.init(kind: .user, text: option.title))
+        let intent = prompt.followUpIntent ?? .proposeSort
+        handleSubmitIntent(
+            intent,
+            trimmed: option.goal,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore,
+            forceApply: prompt.forceApply,
+            workspaceTarget: prompt.workspaceTarget
+        )
+    }
+
+    func dismissChoicePrompt() {
+        choicePrompt = nil
     }
 
     func undo(tabManager: TabManager) {
@@ -6169,6 +6565,7 @@ final class SortAssistantCoordinator: ObservableObject {
         _ result: SortAssistantSortResult,
         anchorMessageId: UUID? = nil
     ) {
+        choicePrompt = nil
         latestResultAnchorMessageId = anchorMessageId ?? messages.last?.id
         latestResult = result
     }
