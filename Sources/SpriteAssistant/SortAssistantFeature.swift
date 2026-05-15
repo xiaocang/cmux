@@ -4,11 +4,17 @@ import Foundation
 import SwiftUI
 
 struct SortAssistantThreadView: View {
+    enum CompletionLayout {
+        case inline
+        case overlay
+    }
+
     @ObservedObject var coordinator: SortAssistantCoordinator
     @ObservedObject var tabManager: TabManager
     @ObservedObject var workspaceTabStore: WorkspaceTabStore
     var showsHeader = true
     var showsAssistantMessageAvatar = true
+    var completionLayout: CompletionLayout = .inline
 
     @State private var draft = ""
     @State private var draftSelection = NSRange(location: 0, length: 0)
@@ -17,6 +23,9 @@ struct SortAssistantThreadView: View {
     @State private var keyboardOptionSelection = 0
     @State private var dismissedCompletionKey: String?
     @FocusState private var inputFocused: Bool
+
+    static let completionPanelMaxHeight: CGFloat = 156
+    static let completionPanelSpacing: CGFloat = 6
 
     private enum KeyboardOption {
         case dimension(String)
@@ -604,12 +613,32 @@ struct SortAssistantThreadView: View {
 
     @ViewBuilder
     private var inputSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let completionModel {
-                completionPanel(completionModel)
+        switch completionLayout {
+        case .inline:
+            VStack(alignment: .leading, spacing: Self.completionPanelSpacing) {
+                if let completionModel {
+                    completionPanel(completionModel)
+                }
+                inputRow
             }
+        case .overlay:
             inputRow
+                .overlay(alignment: .topLeading) {
+                    if let completionModel {
+                        completionPanel(completionModel)
+                            .frame(height: completionOverlayHeight(for: completionModel), alignment: .top)
+                            .offset(y: -completionOverlayHeight(for: completionModel) - Self.completionPanelSpacing)
+                            .zIndex(10)
+                    }
+                }
         }
+    }
+
+    private func completionOverlayHeight(for model: SortAssistantCompletionModel) -> CGFloat {
+        let rowHeight: CGFloat = 30
+        let chromeHeight: CGFloat = 8
+        let contentHeight = CGFloat(model.items.count) * rowHeight + chromeHeight
+        return min(Self.completionPanelMaxHeight, max(34, contentHeight))
     }
 
     private var inputRow: some View {
@@ -698,7 +727,7 @@ struct SortAssistantThreadView: View {
                 }
             }
         }
-        .frame(maxHeight: 184)
+        .frame(maxHeight: Self.completionPanelMaxHeight)
         .scrollIndicators(.automatic)
         .padding(4)
         .background(
@@ -2349,7 +2378,6 @@ private struct SortAssistantCompletionModel: Equatable {
                 if lhs.0 != rhs.0 { return lhs.0 < rhs.0 }
                 return lhs.1.title.localizedCaseInsensitiveCompare(rhs.1.title) == .orderedAscending
             }
-            .prefix(8)
             .map(\.1)
     }
 

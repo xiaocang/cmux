@@ -64,12 +64,14 @@ private final class SortAssistantFloatingPanelHostView: NSView {
     private weak var observedParentWindow: NSWindow?
     private var isPresented = false
     private var origin: CGPoint?
+    private var lastResolvedScreenOrigin: CGPoint?
     private var dragSession: DragSession?
     private var hasUserPositioned = false
 
     private let edgePadding: CGFloat = 12
     private let topPadding: CGFloat = WindowChromeMetrics.appTitlebarHeight + 14
     private let fallbackSize = NSSize(width: 404, height: 280)
+    private let topOverlayReserveHeight = SortAssistantFloatingPetContent.topOverlayReserveHeight
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -109,6 +111,7 @@ private final class SortAssistantFloatingPanelHostView: NSView {
         }
         childWindow = nil
         hostingView = nil
+        lastResolvedScreenOrigin = nil
         dragSession = nil
     }
 
@@ -180,14 +183,51 @@ private final class SortAssistantFloatingPanelHostView: NSView {
         return panel
     }
 
-    private func syncChildFrame() {
+    private func syncChildFrame(preserveExistingOrigin: Bool = true) {
         guard let hostingView else { return }
+        let previousFrame = childWindow?.frame
+        let preservedScreenOrigin = lastResolvedScreenOrigin ?? previousFrame?.origin
         hostingView.layoutSubtreeIfNeeded()
         var size = hostingView.fittingSize
         if size.width < 50 || size.height < 50 {
             size = fallbackSize
         }
         hostingView.frame = NSRect(origin: .zero, size: size)
+
+        // Content-driven height changes, such as completions appearing above the input,
+        // should grow the bubble upward without moving the pet's screen position.
+        if preserveExistingOrigin,
+           let previousFrame,
+           previousFrame.width > 0,
+           previousFrame.height > 0,
+           let preservedScreenOrigin,
+           let parentWindow = window,
+           let contentView = parentWindow.contentView,
+           let childWindow,
+           origin != nil {
+            let rectOnScreen = NSRect(origin: preservedScreenOrigin, size: size)
+            let rectInWindow = parentWindow.convertFromScreen(rectOnScreen)
+            let rectInContent = contentView.convert(rectInWindow, from: nil)
+            origin = rectInContent.origin
+            lastResolvedScreenOrigin = preservedScreenOrigin
+            if childWindow.frame != rectOnScreen {
+                childWindow.setFrame(rectOnScreen, display: true)
+            }
+            DispatchQueue.main.async { [weak self, weak childWindow] in
+                guard let self,
+                      let childWindow,
+                      self.childWindow === childWindow,
+                      self.lastResolvedScreenOrigin == preservedScreenOrigin else {
+                    return
+                }
+                let rect = NSRect(origin: preservedScreenOrigin, size: childWindow.frame.size)
+                if childWindow.frame.origin != preservedScreenOrigin {
+                    childWindow.setFrame(rect, display: true)
+                }
+            }
+            return
+        }
+
         repositionChildWindow(panelSize: size, clampToVisibleArea: !hasUserPositioned)
     }
 
@@ -203,14 +243,17 @@ private final class SortAssistantFloatingPanelHostView: NSView {
         }
         let size = panelSize ?? (hostingView.frame.size == .zero ? fallbackSize : hostingView.frame.size)
         let containerSize = contentView.bounds.size
-        let preferredOrigin = origin ?? defaultOrigin(panelSize: size, in: containerSize)
+        let positioningSize = positioningSize(for: size)
+        let preferredOrigin = origin ?? defaultOrigin(panelSize: positioningSize, in: containerSize)
         let resolvedOrigin = clampToVisibleArea
-            ? clampedOrigin(preferredOrigin, panelSize: size, in: containerSize)
+            ? clampedOrigin(preferredOrigin, panelSize: positioningSize, in: containerSize)
             : preferredOrigin
         origin = resolvedOrigin
-        let rectInContent = NSRect(origin: resolvedOrigin, size: size)
-        let rectInWindow = contentView.convert(rectInContent, to: nil)
-        let rectOnScreen = parentWindow.convertToScreen(rectInWindow)
+        let anchorRectInContent = NSRect(origin: resolvedOrigin, size: positioningSize)
+        let anchorRectInWindow = contentView.convert(anchorRectInContent, to: nil)
+        let anchorRectOnScreen = parentWindow.convertToScreen(anchorRectInWindow)
+        let rectOnScreen = NSRect(origin: anchorRectOnScreen.origin, size: size)
+        lastResolvedScreenOrigin = rectOnScreen.origin
         if childWindow.frame != rectOnScreen {
             childWindow.setFrame(rectOnScreen, display: true)
         }
@@ -220,6 +263,13 @@ private final class SortAssistantFloatingPanelHostView: NSView {
         CGPoint(
             x: max(edgePadding, containerSize.width - panelSize.width - 96),
             y: max(edgePadding, containerSize.height - panelSize.height - topPadding)
+        )
+    }
+
+    private func positioningSize(for panelSize: NSSize) -> NSSize {
+        NSSize(
+            width: panelSize.width,
+            height: max(50, panelSize.height - topOverlayReserveHeight)
         )
     }
 
@@ -241,10 +291,11 @@ private final class SortAssistantFloatingPanelHostView: NSView {
               let contentView = parentWindow.contentView,
               let hostingView else { return }
         let size = hostingView.frame.size == .zero ? fallbackSize : hostingView.frame.size
+        let positioningSize = positioningSize(for: size)
         hasUserPositioned = true
         dragSession = DragSession(
             startScreenPoint: screenPoint,
-            startOrigin: origin ?? defaultOrigin(panelSize: size, in: contentView.bounds.size)
+            startOrigin: origin ?? defaultOrigin(panelSize: positioningSize, in: contentView.bounds.size)
         )
     }
 
@@ -288,7 +339,7 @@ private final class SortAssistantFloatingPanelHostView: NSView {
         observers.append(
             center.addObserver(forName: NSWindow.didResizeNotification, object: parentWindow, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.syncChildFrame()
+                    self?.syncChildFrame(preserveExistingOrigin: false)
                 }
             }
         )
@@ -312,6 +363,9 @@ private final class SortAssistantFloatingPanelHostView: NSView {
 }
 
 private struct SortAssistantFloatingPetContent: View {
+    static let topOverlayReserveHeight =
+        SortAssistantThreadView.completionPanelMaxHeight + SortAssistantThreadView.completionPanelSpacing
+
     @ObservedObject var coordinator: SortAssistantCoordinator
     @ObservedObject var tabManager: TabManager
     @ObservedObject var workspaceTabStore: WorkspaceTabStore
@@ -323,9 +377,14 @@ private struct SortAssistantFloatingPetContent: View {
     private let widgetSpacing: CGFloat = 10
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: widgetSpacing) {
-            mascot
-            conversationBubble
+        VStack(spacing: 0) {
+            Color.clear
+                .frame(height: Self.topOverlayReserveHeight)
+                .allowsHitTesting(false)
+            HStack(alignment: .bottom, spacing: widgetSpacing) {
+                mascot
+                conversationBubble
+            }
         }
         .fixedSize(horizontal: false, vertical: true)
         .accessibilityIdentifier("SortAssistantFloatingPanel")
@@ -346,7 +405,8 @@ private struct SortAssistantFloatingPetContent: View {
             tabManager: tabManager,
             workspaceTabStore: workspaceTabStore,
             showsHeader: false,
-            showsAssistantMessageAvatar: false
+            showsAssistantMessageAvatar: false,
+            completionLayout: .overlay
         )
         .frame(width: conversationWidth, alignment: .topLeading)
         .background(alignment: .bottomTrailing) {
@@ -435,8 +495,10 @@ private final class SortAssistantFloatingPanelWindow: NSPanel {
     weak var dragOwner: SortAssistantFloatingPanelHostView?
     private var pendingDragStartPoint: CGPoint?
     private var isDraggingPet = false
-    private let avatarDragOrigin = CGPoint(x: 0, y: 8)
-    private let avatarDragSize = CGSize(width: 56, height: 56)
+    private var isForwardingMouseEventsToParent = false
+    private let avatarDragOrigin = CGPoint(x: 4, y: 10)
+    private let avatarDragSize = CGSize(width: 48, height: 52)
+    private let bubbleHitMinX: CGFloat = 66
     private let dragThresholdSquared: CGFloat = 9
 
     override var canBecomeKey: Bool { true }
@@ -446,10 +508,19 @@ private final class SortAssistantFloatingPanelWindow: NSPanel {
     override func sendEvent(_ event: NSEvent) {
         switch event.type {
         case .leftMouseDown:
+            guard isInInteractiveHitRegion(event.locationInWindow) else {
+                isForwardingMouseEventsToParent = true
+                forwardMouseEventToParent(event)
+                return
+            }
             pendingDragStartPoint = isInAvatarDragHotspot(event.locationInWindow) ? event.locationInWindow : nil
             isDraggingPet = false
             super.sendEvent(event)
         case .leftMouseDragged:
+            if isForwardingMouseEventsToParent {
+                forwardMouseEventToParent(event)
+                return
+            }
             if !isDraggingPet {
                 guard let start = pendingDragStartPoint else {
                     super.sendEvent(event)
@@ -467,6 +538,11 @@ private final class SortAssistantFloatingPanelWindow: NSPanel {
             }
             dragOwner?.updateDrag(screenPoint: currentMouseScreenPoint())
         case .leftMouseUp:
+            if isForwardingMouseEventsToParent {
+                isForwardingMouseEventsToParent = false
+                forwardMouseEventToParent(event)
+                return
+            }
             if isDraggingPet {
                 dragOwner?.endDrag()
                 isDraggingPet = false
@@ -475,20 +551,72 @@ private final class SortAssistantFloatingPanelWindow: NSPanel {
             }
             pendingDragStartPoint = nil
             super.sendEvent(event)
+        case .rightMouseDown, .otherMouseDown:
+            guard isInInteractiveHitRegion(event.locationInWindow) else {
+                isForwardingMouseEventsToParent = true
+                forwardMouseEventToParent(event)
+                return
+            }
+            super.sendEvent(event)
+        case .rightMouseDragged, .otherMouseDragged:
+            if isForwardingMouseEventsToParent {
+                forwardMouseEventToParent(event)
+                return
+            }
+            super.sendEvent(event)
+        case .rightMouseUp, .otherMouseUp:
+            if isForwardingMouseEventsToParent {
+                isForwardingMouseEventsToParent = false
+                forwardMouseEventToParent(event)
+                return
+            }
+            super.sendEvent(event)
         default:
             super.sendEvent(event)
         }
     }
 
     private func isInAvatarDragHotspot(_ point: CGPoint) -> Bool {
-        point.x >= avatarDragOrigin.x &&
-            point.x <= avatarDragOrigin.x + avatarDragSize.width &&
-            point.y >= avatarDragOrigin.y &&
-            point.y <= avatarDragOrigin.y + avatarDragSize.height
+        let rect = CGRect(origin: avatarDragOrigin, size: avatarDragSize)
+        guard rect.contains(point) else { return false }
+        let dx = (point.x - rect.midX) / max(rect.width * 0.5, 1)
+        let dy = (point.y - rect.midY) / max(rect.height * 0.5, 1)
+        return dx * dx + dy * dy <= 1.05
     }
 
     private func currentMouseScreenPoint() -> CGPoint {
         NSEvent.mouseLocation
+    }
+
+    private func isInInteractiveHitRegion(_ point: CGPoint) -> Bool {
+        if isInAvatarDragHotspot(point) {
+            return true
+        }
+        let bounds = contentView?.bounds ?? NSRect(origin: .zero, size: frame.size)
+        return point.x >= bubbleHitMinX &&
+            point.x <= bounds.maxX &&
+            point.y >= bounds.minY &&
+            point.y <= bounds.maxY
+    }
+
+    private func forwardMouseEventToParent(_ event: NSEvent) {
+        guard let parent else { return }
+        let screenRect = convertToScreen(NSRect(origin: event.locationInWindow, size: .zero))
+        let parentPoint = parent.convertFromScreen(screenRect).origin
+        guard let forwarded = NSEvent.mouseEvent(
+            with: event.type,
+            location: parentPoint,
+            modifierFlags: event.modifierFlags,
+            timestamp: event.timestamp,
+            windowNumber: parent.windowNumber,
+            context: nil,
+            eventNumber: event.eventNumber,
+            clickCount: event.clickCount,
+            pressure: event.pressure
+        ) else {
+            return
+        }
+        parent.sendEvent(forwarded)
     }
 }
 
