@@ -4823,6 +4823,16 @@ class TabManager: ObservableObject {
         tabs.remove(at: currentIndex)
         tabs.insert(workspace, at: clamped)
         postWorkspaceOrderDidChange(movedWorkspaceIds: [tabId])
+        let workspaceId = workspace.id
+        Task { @MainActor in
+            SortAssistantCoordinator.shared.recordUserDragMove(
+                itemId: workspaceId,
+                fromIndex: currentIndex,
+                toIndex: clamped,
+                revision: 0,
+                reason: "workspace_reorder"
+            )
+        }
         return true
     }
 

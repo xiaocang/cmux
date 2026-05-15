@@ -1,5 +1,57 @@
 import SwiftUI
 
+enum SortAssistantMascotState: Equatable {
+    case idle
+    case runningRight
+    case runningLeft
+    case waving
+    case jumping
+    case failed
+    case waiting
+    case running
+    case review
+
+    var row: Int {
+        switch self {
+        case .idle: return 0
+        case .runningRight: return 1
+        case .runningLeft: return 2
+        case .waving: return 3
+        case .jumping: return 4
+        case .failed: return 5
+        case .waiting: return 6
+        case .running: return 7
+        case .review: return 8
+        }
+    }
+
+    var frames: Int {
+        switch self {
+        case .idle, .waiting, .running, .review:
+            return 6
+        case .runningRight, .runningLeft, .failed:
+            return 8
+        case .waving:
+            return 4
+        case .jumping:
+            return 5
+        }
+    }
+
+    var duration: TimeInterval {
+        switch self {
+        case .idle: return 5.5
+        case .runningRight, .runningLeft: return 1.06
+        case .waving: return 0.7
+        case .jumping: return 0.84
+        case .failed: return 1.22
+        case .waiting: return 1.01
+        case .running: return 0.82
+        case .review: return 1.03
+        }
+    }
+}
+
 struct SortAssistantMascotButton: View {
     enum Presentation {
         case modeBar
@@ -18,17 +70,28 @@ struct SortAssistantMascotButton: View {
     }
 
     let presentation: Presentation
-    let isActive: Bool
+    let state: SortAssistantMascotState
     let action: () -> Void
 
     @State private var isHovered = false
     @State private var bobbing = false
 
+    init(
+        presentation: Presentation,
+        isActive: Bool = false,
+        state: SortAssistantMascotState? = nil,
+        action: @escaping () -> Void
+    ) {
+        self.presentation = presentation
+        self.state = state ?? (isActive ? .review : .idle)
+        self.action = action
+    }
+
     var body: some View {
         Button(action: action) {
             SortAssistantMascotView(
                 size: presentation.size,
-                isActive: isActive,
+                state: state,
                 isHovered: isHovered,
                 bobbing: bobbing
             )
@@ -54,13 +117,25 @@ struct SortAssistantMascotButton: View {
 
 struct SortAssistantMascotIntroView: View {
     let isSorting: Bool
+    let state: SortAssistantMascotState?
     let action: () -> Void
+
+    init(
+        isSorting: Bool,
+        state: SortAssistantMascotState? = nil,
+        action: @escaping () -> Void
+    ) {
+        self.isSorting = isSorting
+        self.state = state
+        self.action = action
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 9) {
             SortAssistantMascotButton(
                 presentation: .intro,
                 isActive: isSorting,
+                state: state,
                 action: action
             )
 
@@ -91,11 +166,12 @@ struct SortAssistantMascotIntroView: View {
 struct SortAssistantMascotAvatar: View {
     let size: CGFloat
     var isActive: Bool = false
+    var state: SortAssistantMascotState? = nil
 
     var body: some View {
         SortAssistantMascotView(
             size: size,
-            isActive: isActive,
+            state: state ?? (isActive ? .review : .idle),
             isHovered: false,
             bobbing: false
         )
@@ -105,49 +181,18 @@ struct SortAssistantMascotAvatar: View {
 
 private struct SortAssistantMascotView: View {
     let size: CGFloat
-    let isActive: Bool
+    let state: SortAssistantMascotState
     let isHovered: Bool
     let bobbing: Bool
-
-    private enum SpriteState {
-        case idle
-        case waving
-        case review
-
-        var row: Int {
-            switch self {
-            case .idle: return 0
-            case .waving: return 3
-            case .review: return 8
-            }
-        }
-
-        var frames: Int {
-            switch self {
-            case .idle: return 6
-            case .waving: return 4
-            case .review: return 6
-            }
-        }
-
-        var duration: TimeInterval {
-            switch self {
-            case .idle: return 5.5
-            case .waving: return 0.7
-            case .review: return 1.03
-            }
-        }
-    }
 
     private static let frameWidth: CGFloat = 192
     private static let frameHeight: CGFloat = 208
     private static let columns: CGFloat = 8
     private static let rows: CGFloat = 9
 
-    private var spriteState: SpriteState {
-        if isActive { return .review }
+    private var spriteState: SortAssistantMascotState {
         if isHovered { return .waving }
-        return .idle
+        return state
     }
 
     private var spriteWidth: CGFloat {
@@ -184,7 +229,7 @@ private struct SortAssistantMascotView: View {
             .scaleEffect(x: bobbing ? 0.9 : 1.05, y: 1, anchor: .center)
     }
 
-    private func sprite(state: SpriteState, frame: Int) -> some View {
+    private func sprite(state: SortAssistantMascotState, frame: Int) -> some View {
         Image("OpenPetsClawClaudeSprite")
             .interpolation(.none)
             .resizable()
@@ -202,7 +247,7 @@ private struct SortAssistantMascotView: View {
             .shadow(color: Color.black.opacity(isHovered ? 0.22 : 0.14), radius: isHovered ? 4 : 2, x: 0, y: 2)
     }
 
-    private func frameIndex(state: SpriteState, at date: Date) -> Int {
+    private func frameIndex(state: SortAssistantMascotState, at date: Date) -> Int {
         let elapsed = date.timeIntervalSinceReferenceDate
         let progress = elapsed.truncatingRemainder(dividingBy: state.duration) / state.duration
         return min(state.frames - 1, max(0, Int(progress * Double(state.frames))))

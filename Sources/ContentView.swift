@@ -352,6 +352,47 @@ private final class ExtensionColumnOverlayContainerView: NSView {
     }
 #endif
 }
+
+private struct PluginWindowOverlayHost: View {
+    let pluginSystem: CMUXPluginAppProviding
+    @ObservedObject var tabManager: TabManager
+    @ObservedObject var workspaceTabStore: WorkspaceTabStore
+    let placement: CMUXWindowOverlayPlacement
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            ForEach(pluginSystem.windowOverlays(placement: placement), id: \.id) { contribution in
+                PluginWindowOverlayContributionView(
+                    contribution: contribution,
+                    tabManager: tabManager,
+                    workspaceTabStore: workspaceTabStore
+                )
+                .zIndex(Double(contribution.priority))
+            }
+        }
+        .frame(width: 1, height: 1)
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+private struct PluginWindowOverlayContributionView: View {
+    let contribution: CMUXWindowOverlayContribution
+    @ObservedObject var tabManager: TabManager
+    @ObservedObject var workspaceTabStore: WorkspaceTabStore
+
+    var body: some View {
+        switch contribution.metadata["renderer"] {
+        case CMUXBuiltinWindowOverlayRenderer.spriteAssistant:
+            SortAssistantFloatingHost(
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore
+            )
+        default:
+            EmptyView()
+        }
+    }
+}
 #if DEBUG
 private func debugCommandPaletteWindowSummary(_ window: NSWindow?) -> String {
     guard let window else { return "nil" }
@@ -3071,9 +3112,11 @@ struct ContentView: View {
                     }
                 }
                 .overlay(alignment: .topLeading) {
-                    SortAssistantFloatingHost(
+                    PluginWindowOverlayHost(
+                        pluginSystem: pluginSystem,
                         tabManager: tabManager,
-                        workspaceTabStore: workspaceTabStore
+                        workspaceTabStore: workspaceTabStore,
+                        placement: .windowRootFloating
                     )
                 }
                 .frame(minWidth: CGFloat(SessionPersistencePolicy.minimumWindowWidth), minHeight: CGFloat(SessionPersistencePolicy.minimumWindowHeight))
@@ -3101,6 +3144,7 @@ struct ContentView: View {
                 lastSidebarSelectionIndex = tabManager.tabs.firstIndex { $0.id == selectedId }
             }
             syncSidebarSelectedWorkspaceIds()
+            workspaceTabStore.noteWorkspaceUsed(tabManager.selectedTabId)
             applyUITestSidebarSelectionIfNeeded(tabs: tabManager.tabs)
             updateTitlebarText()
             syncTrafficLightInset()
@@ -3164,6 +3208,7 @@ struct ContentView: View {
                 cmuxDebugLog("ws.view.selectedChange id=none selected=\(debugShortWorkspaceId(newValue))")
             }
 #endif
+            workspaceTabStore.noteWorkspaceUsed(newValue)
             tabManager.applyWindowBackgroundForSelectedTab()
             startWorkspaceHandoffIfNeeded(newSelectedId: newValue)
             reconcileMountedWorkspaceIds(selectedId: newValue)
@@ -10109,14 +10154,13 @@ struct VerticalTabsSidebar: View {
     ) {
         guard let summaryPriority else { return }
         guard !workspaceTabStore.selectedSort.isNative else { return }
-        let orderedWorkspaceIds = WorkspaceTabStore.orderedWorkspaceIds(
-            from: summaryPriority,
-            tabs: tabManager.tabs,
-            sort: workspaceTabStore.selectedSort
-        )
-        guard !orderedWorkspaceIds.isEmpty else { return }
-        guard tabManager.reorderWorkspaces(to: orderedWorkspaceIds) else { return }
+        guard SortAssistantCoordinator.shared.applySummaryPriorityWorkspaceOrder(
+            summaryPriority,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        ) else { return }
 #if DEBUG
+        let orderedWorkspaceIds = tabManager.tabs.map(\.id)
         cmuxDebugLog(
             "summaryPriority.sidebar.reorder order=" +
             orderedWorkspaceIds.map { $0.uuidString.prefix(8) }.joined(separator: ",")
@@ -12990,6 +13034,12 @@ struct WorkspaceSidebarSummaryPrioritySort: Codable, Equatable {
         direction: "asc"
     )
 
+    static let recent = WorkspaceSidebarSummaryPrioritySort(
+        mode: recentMode,
+        dimensionId: nil,
+        direction: "desc"
+    )
+
     static func dimension(id: String) -> WorkspaceSidebarSummaryPrioritySort {
         WorkspaceSidebarSummaryPrioritySort(
             mode: dimensionMode,
@@ -13028,6 +13078,7 @@ struct WorkspaceSidebarSummaryPrioritySort: Codable, Equatable {
     var isGoalDriven: Bool { mode == Self.goalDrivenMode }
     var isDimension: Bool { mode == Self.dimensionMode }
     var isNative: Bool { mode == Self.nativeMode }
+    var isRecent: Bool { mode == Self.recentMode }
 
     var requestPayload: [String: String] {
         var payload: [String: String] = [
@@ -13060,12 +13111,16 @@ struct WorkspaceSidebarAssistantContext: Codable, Equatable {
     let requestId: String
     let goal: String
     let memorySnippets: [String]
+    let resultMode: String?
+    let allowedResultActions: [String]
 
     var requestPayload: [String: Any] {
         [
             "requestId": requestId,
             "goal": goal,
-            "memorySnippets": memorySnippets
+            "memorySnippets": memorySnippets,
+            "resultMode": resultMode ?? "",
+            "allowedResultActions": allowedResultActions,
         ]
     }
 }
@@ -13159,6 +13214,7 @@ final class WorkspaceTabStore: ObservableObject {
     @Published var summaryPriority: WorkspaceSidebarSummaryPriorityState?
     @Published var selectedSort: WorkspaceSidebarSummaryPrioritySort
     @Published var savedSorts: [WorkspaceSidebarSavedSort]
+    @Published private(set) var recentWorkspaceIds: [UUID]
     @Published var isLoading = false
     @Published var errorMessage: String?
     @Published private(set) var tabContextSummaries: [UUID: WorkspaceTabContextSummary] = [:]
@@ -13168,6 +13224,8 @@ final class WorkspaceTabStore: ObservableObject {
 
     private static let selectedSortDefaultsKey = "workspaceTab.summaryPriority.selectedSort"
     private static let savedSortsDefaultsKey = "workspaceTab.summaryPriority.savedSorts"
+    private static let recentWorkspaceIdsDefaultsKey = "workspaceTab.summaryPriority.recentWorkspaceIds"
+    private static let maxRecentWorkspaceIds = 200
     // Keep this wider than the daemon LLM throttle. The app queue only prevents
     // unbounded socket pileups; expensive CLI calls are limited inside cmux-digest
     // at each LLM request, not for an entire workspace refresh lifecycle.
@@ -13218,6 +13276,7 @@ final class WorkspaceTabStore: ObservableObject {
         self.digestService = digestService
         selectedSort = Self.loadSelectedSort()
         savedSorts = Self.loadSavedSorts()
+        recentWorkspaceIds = Self.loadRecentWorkspaceIds()
     }
 
     private static func loadSelectedSort() -> WorkspaceSidebarSummaryPrioritySort {
@@ -13247,6 +13306,36 @@ final class WorkspaceTabStore: ObservableObject {
     private func persistSavedSorts() {
         guard let data = try? Self.jsonEncoder.encode(savedSorts) else { return }
         UserDefaults.standard.set(data, forKey: Self.savedSortsDefaultsKey)
+    }
+
+    private static func loadRecentWorkspaceIds() -> [UUID] {
+        guard let strings = UserDefaults.standard.array(forKey: recentWorkspaceIdsDefaultsKey) as? [String] else {
+            return []
+        }
+        var seen = Set<UUID>()
+        return strings.compactMap(UUID.init(uuidString:)).filter { seen.insert($0).inserted }
+    }
+
+    private func persistRecentWorkspaceIds() {
+        UserDefaults.standard.set(
+            recentWorkspaceIds.map(\.uuidString),
+            forKey: Self.recentWorkspaceIdsDefaultsKey
+        )
+    }
+
+    func noteWorkspaceUsed(_ workspaceId: UUID?) {
+        guard let workspaceId else { return }
+        var next = recentWorkspaceIds.filter { $0 != workspaceId }
+        next.insert(workspaceId, at: 0)
+        if next.count > Self.maxRecentWorkspaceIds {
+            next = Array(next.prefix(Self.maxRecentWorkspaceIds))
+        }
+        guard next != recentWorkspaceIds else { return }
+        recentWorkspaceIds = next
+        persistRecentWorkspaceIds()
+        if selectedSort.isRecent {
+            applyCachedSortLocally(selectedSort)
+        }
     }
 
     func addSavedSort(name: String, goal: String) {
@@ -13743,7 +13832,8 @@ final class WorkspaceTabStore: ObservableObject {
     static func orderedWorkspaceIds(
         from summaryPriority: WorkspaceSidebarSummaryPriorityState,
         tabs: [Workspace],
-        sort: WorkspaceSidebarSummaryPrioritySort
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        recentWorkspaceIds: [UUID] = []
     ) -> [UUID] {
         guard !sort.isNative else {
             return []
@@ -13761,7 +13851,11 @@ final class WorkspaceTabStore: ObservableObject {
         guard hasCachedScoreForSort(currentItems, sort: sort) else {
             return []
         }
-        return sortedSummaryPriorityItems(currentItems, sort: sort).compactMap {
+        return sortedSummaryPriorityItems(
+            currentItems,
+            sort: sort,
+            recentWorkspaceIds: recentWorkspaceIds
+        ).compactMap {
             UUID(uuidString: $0.workspaceId)
         }
     }
@@ -13774,7 +13868,11 @@ final class WorkspaceTabStore: ObservableObject {
             return
         }
         let sortedItems = Self.hasCachedScoreForSort(current.items, sort: sort)
-            ? Self.sortedSummaryPriorityItems(current.items, sort: sort)
+            ? Self.sortedSummaryPriorityItems(
+                current.items,
+                sort: sort,
+                recentWorkspaceIds: recentWorkspaceIds
+            )
             : current.items
         summaryPriority = WorkspaceSidebarSummaryPriorityState(
             profileId: current.profileId,
@@ -14354,7 +14452,11 @@ final class WorkspaceTabStore: ObservableObject {
             items.append(item)
         }
 
-        let sortedItems = Self.sortedSummaryPriorityItems(items, sort: current.sort)
+        let sortedItems = Self.sortedSummaryPriorityItems(
+            items,
+            sort: current.sort,
+            recentWorkspaceIds: recentWorkspaceIds
+        )
         let topScore = sortedItems
             .map { Self.activeScore(item: $0, sort: current.sort) }
             .max() ?? 0
@@ -14391,9 +14493,11 @@ final class WorkspaceTabStore: ObservableObject {
 
     private static func sortedSummaryPriorityItems(
         _ items: [WorkspaceSidebarSummaryPriorityItem],
-        sort: WorkspaceSidebarSummaryPrioritySort
+        sort: WorkspaceSidebarSummaryPrioritySort,
+        recentWorkspaceIds: [UUID] = []
     ) -> [WorkspaceSidebarSummaryPriorityItem] {
-        items.sorted { lhs, rhs in
+        let recentScoreById = recentUsageScoreById(recentWorkspaceIds)
+        return items.sorted { lhs, rhs in
             if lhs.pinned != rhs.pinned {
                 return lhs.pinned && !rhs.pinned
             }
@@ -14403,7 +14507,18 @@ final class WorkspaceTabStore: ObservableObject {
             case WorkspaceSidebarSummaryPrioritySort.nativeMode:
                 comparison = compare(lhs.nativeOrder, rhs.nativeOrder)
             case WorkspaceSidebarSummaryPrioritySort.recentMode:
-                comparison = compare(lhs.generatedAt, rhs.generatedAt)
+                let lhsScore = workspaceId(for: lhs).flatMap { recentScoreById[$0] }
+                let rhsScore = workspaceId(for: rhs).flatMap { recentScoreById[$0] }
+                switch (lhsScore, rhsScore) {
+                case let (lhsScore?, rhsScore?):
+                    comparison = compare(lhsScore, rhsScore)
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                case (nil, nil):
+                    comparison = .orderedSame
+                }
             default:
                 let id = sort.dimensionId ?? "urgency"
                 let lhsScore = lhs.scores.dimensions[id]?.rawScore
@@ -14435,6 +14550,19 @@ final class WorkspaceTabStore: ObservableObject {
         sort: WorkspaceSidebarSummaryPrioritySort
     ) -> Double {
         return item.scores.dimensions[sort.dimensionId ?? "urgency"]?.rawScore ?? 0
+    }
+
+    private static func recentUsageScoreById(_ workspaceIds: [UUID]) -> [UUID: Double] {
+        let count = workspaceIds.count
+        var scoreById: [UUID: Double] = [:]
+        for (index, workspaceId) in workspaceIds.enumerated() where scoreById[workspaceId] == nil {
+            scoreById[workspaceId] = Double(count - index)
+        }
+        return scoreById
+    }
+
+    private static func workspaceId(for item: WorkspaceSidebarSummaryPriorityItem) -> UUID? {
+        UUID(uuidString: item.workspaceId)
     }
 
     private static func compare<T: Comparable>(_ lhs: T, _ rhs: T) -> ComparisonResult {
@@ -14771,7 +14899,13 @@ private struct SummaryPriorityWorkspaceList: View {
         _ items: [WorkspaceSidebarSummaryPriorityItem],
         by sort: WorkspaceSidebarSummaryPrioritySort
     ) -> [WorkspaceSidebarSummaryPriorityItem] {
-        items.sorted { lhs, rhs in
+        var recentScoreById: [UUID: Double] = [:]
+        for (index, workspaceId) in store.recentWorkspaceIds.enumerated()
+            where recentScoreById[workspaceId] == nil
+        {
+            recentScoreById[workspaceId] = Double(store.recentWorkspaceIds.count - index)
+        }
+        return items.sorted { lhs, rhs in
             if lhs.pinned != rhs.pinned {
                 return lhs.pinned
             }
@@ -14784,7 +14918,18 @@ private struct SummaryPriorityWorkspaceList: View {
                     currentNativeOrder(for: rhs) ?? rhs.nativeOrder
                 )
             case WorkspaceSidebarSummaryPrioritySort.recentMode:
-                comparison = compare(dateValue(lhs.generatedAt), dateValue(rhs.generatedAt))
+                let lhsScore = UUID(uuidString: lhs.workspaceId).flatMap { recentScoreById[$0] }
+                let rhsScore = UUID(uuidString: rhs.workspaceId).flatMap { recentScoreById[$0] }
+                switch (lhsScore, rhsScore) {
+                case let (lhsScore?, rhsScore?):
+                    comparison = compare(lhsScore, rhsScore)
+                case (_?, nil):
+                    return true
+                case (nil, _?):
+                    return false
+                case (nil, nil):
+                    comparison = .orderedSame
+                }
             default:
                 let dimensionId = sort.dimensionId ?? "urgency"
                 let lhsScore = lhs.scores.dimensions[dimensionId]?.rawScore
@@ -14816,12 +14961,6 @@ private struct SummaryPriorityWorkspaceList: View {
         if lhs < rhs { return .orderedAscending }
         if lhs > rhs { return .orderedDescending }
         return .orderedSame
-    }
-
-    private static let iso8601Formatter = ISO8601DateFormatter()
-
-    private func dateValue(_ value: String) -> TimeInterval {
-        Self.iso8601Formatter.date(from: value)?.timeIntervalSince1970 ?? 0
     }
 
     private func shortcutLabel(nativeOrder: Int) -> String? {
@@ -14932,11 +15071,7 @@ struct SummaryPriorityToolbar: View {
                 )
                 sortMenuItem(
                     title: String(localized: "sidebar.workspaceSummary.sort.recent", defaultValue: "Recent"),
-                    sort: WorkspaceSidebarSummaryPrioritySort(
-                        mode: WorkspaceSidebarSummaryPrioritySort.recentMode,
-                        dimensionId: nil,
-                        direction: "desc"
-                    )
+                    sort: .recent
                 )
             } label: {
                 HStack(spacing: 4) {
@@ -19933,6 +20068,28 @@ struct ExtensionColumnOverlay: View {
 
             Divider()
 
+            Button {
+                workspaceTabStore.setSort(.recent)
+            } label: {
+                Label {
+                    Text(String(localized: "sidebar.workspaceSummary.sort.recent", defaultValue: "Recent"))
+                } icon: {
+                    Image(systemName: workspaceTabStore.selectedSort.isRecent ? "checkmark" : "clock.arrow.circlepath")
+                }
+            }
+
+            Button {
+                workspaceTabStore.setSort(.native)
+            } label: {
+                Label {
+                    Text(String(localized: "sidebar.workspaceSummary.sort.native", defaultValue: "Native"))
+                } icon: {
+                    Image(systemName: workspaceTabStore.selectedSort.isNative ? "checkmark" : "line.3.horizontal")
+                }
+            }
+
+            Divider()
+
             if !workspaceTabStore.savedSorts.isEmpty {
                 Menu {
                     ForEach(workspaceTabStore.savedSorts) { preset in
@@ -20003,9 +20160,12 @@ struct ExtensionColumnOverlay: View {
     }
 
     private var sortMenuLabel: some View {
-        let isGoalDriven = workspaceTabStore.selectedSort.isGoalDriven
+        let selectedSort = workspaceTabStore.selectedSort
+        let isGoalDriven = selectedSort.isGoalDriven
         let info = ExtensionColumnDimensions.info(for: sortKey)
-        let glyph = isGoalDriven ? "sparkles" : info.glyph
+        let glyph = isGoalDriven
+            ? "sparkles"
+            : (selectedSort.isRecent ? "clock.arrow.circlepath" : (selectedSort.isNative ? "line.3.horizontal" : info.glyph))
         return HStack(spacing: 4) {
             Image(systemName: glyph)
                 .font(.system(size: 9, weight: .semibold))
