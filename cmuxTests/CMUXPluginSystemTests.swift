@@ -830,6 +830,7 @@ final class CMUXRegistryTests: XCTestCase {
                 prompt: CMUXAppPromptRegistry(),
                 commands: commands,
                 sidebarExtensions: sidebarExtensions,
+                windowOverlays: CMUXAppWindowOverlayRegistry(),
                 settings: settings
             )
             let host = CMUXPluginHost(context: pluginContext, logger: logger)
@@ -1260,6 +1261,10 @@ private final class RecordingPluginAppProvider: CMUXPluginAppProviding {
         return sidebarContributions.filter { $0.placement == placement }
     }
 
+    func windowOverlays(placement _: CMUXWindowOverlayPlacement) -> [CMUXWindowOverlayContribution] {
+        []
+    }
+
     func toggleSidebarExtension(id: String) -> Bool {
         toggledIds.append(id)
         return sidebarContributions.contains { $0.id == id }
@@ -1280,6 +1285,7 @@ private final class TestPluginContext: CMUXPluginContext {
     let prompt: CMUXPromptRegistry = CMUXAppPromptRegistry()
     let commands: CMUXCommandRegistry = CMUXAppCommandRegistry()
     let sidebarExtensions: CMUXSidebarExtensionRegistry = CMUXAppSidebarExtensionRegistry()
+    let windowOverlays: CMUXWindowOverlayRegistry = CMUXAppWindowOverlayRegistry()
     let settings: CMUXSettingsRegistry = CMUXAppSettingsRegistry()
 }
 

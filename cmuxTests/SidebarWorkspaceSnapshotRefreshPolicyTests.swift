@@ -110,6 +110,8 @@ final class SidebarWorkspaceSnapshotRefreshPolicyTests: XCTestCase {
             latestConversationMessage: latestConversationMessage,
             metadataEntries: [],
             metadataBlocks: [],
+            ghprBadges: [],
+            ghprJiraEntry: nil,
             latestLog: nil,
             progress: nil,
             compactGitBranchSummaryText: nil,

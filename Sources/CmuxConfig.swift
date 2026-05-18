@@ -1512,7 +1512,7 @@ struct CmuxResolvedConfigAction: Identifiable, Sendable, Hashable {
             keywords = ["cloud", "vm", "virtual", "machine", "remote"]
         case .sortAssistant:
             title = String(localized: "sortAssistant.feed.title", defaultValue: "Sort Assistant")
-            keywords = ["sort", "assistant", "workspace", "priority"]
+            keywords = ["sprite", "sort", "assistant", "workspace", "priority"]
         case .newTerminal:
             title = String(localized: "command.newTerminalTab.title", defaultValue: "New Terminal Tab")
             keywords = ["new", "terminal", "tab", "surface"]

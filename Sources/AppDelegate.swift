@@ -5407,7 +5407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     private func contextForMainWindow(_ window: NSWindow?) -> MainWindowContext? {
-        guard let window else { return nil }
+        guard let window = shortcutContextOwnerWindow(for: window) else { return nil }
         return contextForMainTerminalWindow(window)
     }
 
@@ -5421,7 +5421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     }
 
     func activeTabManagerForCommands(preferredWindow: NSWindow? = nil) -> TabManager? {
-        if let context = contextForMainWindow(preferredWindow) {
+        if let context = contextForMainWindow(shortcutContextOwnerWindow(for: preferredWindow)) {
             return context.tabManager
         }
         if let context = contextForMainWindow(NSApp.keyWindow) {
@@ -5487,7 +5487,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
         let eventWindowNumber = event.map { String($0.windowNumber) } ?? "nil"
         let eventWindow = event?.window
-        return "eventWinNum=\(eventWindowNumber) eventWin={\(debugWindowToken(eventWindow))} keyWin={\(debugWindowToken(NSApp.keyWindow))} mainWin={\(debugWindowToken(NSApp.mainWindow))} activeMgr=\(debugManagerToken(activeManager)) activeWinId=\(activeWindowId) activeSelected=\(selectedWorkspace) contexts=[\(contexts)]"
+        let ownerWindow = shortcutContextOwnerWindow(for: eventWindow)
+        return "eventWinNum=\(eventWindowNumber) eventWin={\(debugWindowToken(eventWindow))} ownerWin={\(debugWindowToken(ownerWindow))} keyWin={\(debugWindowToken(NSApp.keyWindow))} mainWin={\(debugWindowToken(NSApp.mainWindow))} activeMgr=\(debugManagerToken(activeManager)) activeWinId=\(activeWindowId) activeSelected=\(selectedWorkspace) contexts=[\(contexts)]"
     }
 #endif
 
@@ -5507,11 +5508,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
     private func resolvedShortcutEventWindow(_ event: NSEvent) -> NSWindow? {
         if let window = event.window {
-            return window
+            return shortcutContextOwnerWindow(for: window)
         }
         let eventWindowNumber = event.windowNumber
         guard eventWindowNumber > 0 else { return nil }
-        return NSApp.window(withWindowNumber: eventWindowNumber)
+        return shortcutContextOwnerWindow(for: NSApp.window(withWindowNumber: eventWindowNumber))
+    }
+
+    private func shortcutContextOwnerWindow(for window: NSWindow?) -> NSWindow? {
+        guard let window else { return nil }
+        if isMainTerminalWindow(window) {
+            return window
+        }
+        guard window.identifier?.rawValue == "cmux.sortAssistantFloatingPet",
+              let parentWindow = window.parent,
+              isMainTerminalWindow(parentWindow) else {
+            return window
+        }
+        return parentWindow
     }
 
     /// Re-sync app-level active window pointers from the currently focused main terminal window.
@@ -6942,7 +6956,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     ) -> MainWindowContext? {
         guard let event else { return nil }
 
-        if let eventWindow = event.window,
+        if let eventWindow = shortcutContextOwnerWindow(for: event.window),
            let context = contextForMainTerminalWindow(eventWindow) {
             #if DEBUG
             logWorkspaceCreationRouting(
@@ -6957,7 +6971,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
 
         if event.windowNumber > 0,
-           let numberedWindow = NSApp.window(withWindowNumber: event.windowNumber),
+           let numberedWindow = shortcutContextOwnerWindow(for: NSApp.window(withWindowNumber: event.windowNumber)),
            let context = contextForMainTerminalWindow(numberedWindow) {
             #if DEBUG
             logWorkspaceCreationRouting(
@@ -11571,6 +11585,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         }
 
+        if matchConfiguredShortcut(event: event, action: .toggleSpriteAssistant) {
+            SortAssistantCoordinator.shared.activateEntry()
+            return true
+        }
+
         if matchConfiguredShortcut(event: event, action: .quit) {
             return handleQuitShortcutWarning()
         }
@@ -13346,6 +13365,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             return true
         case .setWorkspaceTag:
             return beginSetWorkspaceTagFlow()
+        case .toggleSpriteAssistant:
+            SortAssistantCoordinator.shared.activateEntry()
+            return true
         default:
             break
         }
@@ -13375,6 +13397,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             tabManager.movePaneFocus(direction: .up)
         case .toggleCopyMode:
             _ = tabManager.toggleFocusedTerminalCopyMode()
+        case .toggleSpriteAssistant:
+            break
         case .selectTab0:
             ws.selectSurface(at: 9)
         case .selectTab1:

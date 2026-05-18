@@ -1490,7 +1490,7 @@ private final class CMUXTmuxPrefixPlugin: CMUXPlugin {
                     title: String(localized: "settings.section.tmuxPrefix", defaultValue: "tmux Prefix"),
                     subtitle: String(localized: "settings.section.keyboardShortcuts", defaultValue: "Keyboard Shortcuts"),
                     symbolName: "keyboard",
-                    searchText: "leader key tmux prefix ctrl-b control-b workspace tags",
+                    searchText: "leader key tmux prefix ctrl-b control-b sprite assistant workspace tags",
                     anchorID: SettingsSearchIndex.settingID(for: .keyboardShortcuts, idSuffix: "tmux-prefix")
                 )
             )

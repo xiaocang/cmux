@@ -538,6 +538,7 @@
               "reopenPreviousSession",
               "goToWorkspace",
               "commandPalette",
+              "toggleSpriteAssistant",
               "sendFeedback",
               "showNotifications",
               "jumpToUnread",

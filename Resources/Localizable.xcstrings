@@ -21195,6 +21195,40 @@
         }
       }
     },
+    "command.openSpriteAssistant.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sprite"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スプライト"
+          }
+        }
+      }
+    },
+    "command.openSpriteAssistant.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Sprite Assistant"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スプライトアシスタントを開く"
+          }
+        }
+      }
+    },
     "command.openFolder.subtitle": {
       "extractionState": "manual",
       "localizations": {
@@ -50498,6 +50532,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "コピーモード切替"
+          }
+        }
+      }
+    },
+    "leader.action.toggleSpriteAssistant.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toggle Sprite Assistant"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sprite Assistantを切り替え"
           }
         }
       }
@@ -103733,6 +103784,23 @@
         }
       }
     },
+    "shortcut.toggleSpriteAssistant.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toggle Sprite Assistant"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sprite Assistantを切り替え"
+          }
+        }
+      }
+    },
     "shortcut.markOldestUnreadAndJumpNext.label": {
       "extractionState": "manual",
       "localizations": {
@@ -115984,6 +116052,516 @@
         }
       }
     },
+    "sortAssistant.choice.cancel": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "キャンセル"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.submit": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Submit choices"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "選択を送信"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose details"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "詳細を選択"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.colorDetails.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Current groups: %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在のグループ: %@。"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.colorDetails.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sort by color"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色で並べ替え"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.colorFirst.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ workspaces at the top."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ のワークスペースを上に置きます。"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.colorFirst.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ first"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ を先頭"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.colorOrder.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remaining colors keep their current relative order."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "残りの色は現在の相対順序を保ちます。"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.colorOrder.prompt": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Group by color - choose the missing details."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色でグループ化します。足りない詳細を選んでください。"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.colorOrder.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Which color should come first?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "どの色を先頭にしますか？"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.uncolored.first.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uncolored workspaces stay above colored groups."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色なしのワークスペースを色付きグループの上に置きます。"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.uncolored.first.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uncolored first"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色なしを先頭"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.uncolored.last.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Colored groups stay above uncolored workspaces."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色付きグループを色なしのワークスペースの上に置きます。"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.uncolored.last.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uncolored last"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色なしを最後"
+          }
+        }
+      }
+    },
+    "sortAssistant.choice.uncolored.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Where should uncolored workspaces go?"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色なしのワークスペースをどこに置きますか？"
+          }
+        }
+      }
+    },
+    "sortAssistant.colorGroup.currentOrder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "current color order"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在の色順"
+          }
+        }
+      }
+    },
+    "sortAssistant.colorGroup.noColors": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No workspace colors are available to group."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "グループ化できるワークスペースカラーがありません。"
+          }
+        }
+      }
+    },
+    "sortAssistant.colorGroup.noColorSummary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No color groups found."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色グループが見つかりません。"
+          }
+        }
+      }
+    },
+    "sortAssistant.colorGroup.rationale": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Group workspaces by color using %@, with %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ を使って色ごとにグループ化し、%@ にします。"
+          }
+        }
+      }
+    },
+    "sortAssistant.colorGroup.uncolored": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uncolored"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色なし"
+          }
+        }
+      }
+    },
+    "sortAssistant.colorGroup.uncoloredFirst": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "uncolored first"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色なしを先頭"
+          }
+        }
+      }
+    },
+    "sortAssistant.colorGroup.uncoloredLast": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "uncolored last"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色なしを最後"
+          }
+        }
+      }
+    },
+    "sortAssistant.dimension.color": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Color"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "色"
+          }
+        }
+      }
+    },
+    "sortAssistant.workspaceColor.cleared": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cleared the workspace color."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースカラーをクリアしました。"
+          }
+        }
+      }
+    },
+    "sortAssistant.workspaceColor.current": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Current workspace color is %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在のワークスペースカラーは %@ です。"
+          }
+        }
+      }
+    },
+    "sortAssistant.workspaceColor.invalid": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Invalid workspace color. Use #RRGGBB or one of: %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "無効なワークスペースカラーです。#RRGGBB または次のいずれかを使用してください: %@。"
+          }
+        }
+      }
+    },
+    "sortAssistant.workspaceColor.missingColor": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tell me a workspace color name or a #RRGGBB value."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースカラー名または #RRGGBB の値を指定してください。"
+          }
+        }
+      }
+    },
+    "sortAssistant.workspaceColor.none": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No custom workspace color is set."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "カスタムワークスペースカラーは設定されていません。"
+          }
+        }
+      }
+    },
+    "sortAssistant.workspaceColor.set": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set workspace color to %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースカラーを %@ に設定しました。"
+          }
+        }
+      }
+    },
+    "sortAssistant.workspaceColor.workspaceMissing": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No workspace is selected."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースが選択されていません。"
+          }
+        }
+      }
+    },
     "sortPanel.preview.heading": {
       "extractionState": "manual",
       "localizations": {
@@ -127028,6 +127606,210 @@
           "stringUnit": {
             "state": "translated",
             "value": "Робоча область"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.forget.summary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forget sort memory"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "並べ替えメモリを削除"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.forgetSprite.summary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Forget sprite workspace memory"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スプライトのワークスペースメモリを削除"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.memory.goal": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "List saved free-sort memories."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存済みの自由並べ替えメモリを一覧表示してください。"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.memory.summary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "List saved sort memories"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存済みの並べ替えメモリを表示"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.memorySprite.goal": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "List saved sprite workspace memories."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存済みのスプライト用ワークスペースメモリを一覧表示してください。"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.memorySprite.summary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "List sprite workspace memories"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スプライトのワークスペースメモリを表示"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.remember.summary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Propose a sort memory"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "並べ替えメモリを提案"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.rememberSprite.summary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save sprite workspace memory"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スプライトのワークスペースメモリを保存"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.sort.defaultGoal": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sort workspaces using the current signals."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "現在のシグナルを使ってワークスペースを並べ替えてください。"
+          }
+        }
+      }
+    },
+    "sortAssistant.slash.sort.summary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sort workspaces"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースを並べ替え"
+          }
+        }
+      }
+    },
+    "sortAssistant.memory.showLess": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show less"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "表示を減らす"
+          }
+        }
+      }
+    },
+    "sortAssistant.memory.showMoreFormat": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "+%d more"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ほか%d件"
           }
         }
       }

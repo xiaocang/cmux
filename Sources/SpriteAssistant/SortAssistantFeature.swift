@@ -1,5 +1,7 @@
 import AppKit
 import CMUXWorkstream
+import Combine
+import Darwin
 import Foundation
 import SwiftUI
 
@@ -22,10 +24,16 @@ struct SortAssistantThreadView: View {
     @State private var completionSelection = 0
     @State private var keyboardOptionSelection = 0
     @State private var dismissedCompletionKey: String?
+    @State private var memoriesExpanded = false
+    @State private var expandedMessageIds: Set<UUID> = []
+    @State private var keyboardFocusedMessageId: UUID?
+    @StateObject private var messageScrollController = SortAssistantMessageScrollController()
     @FocusState private var inputFocused: Bool
 
     static let completionPanelMaxHeight: CGFloat = 156
     static let completionPanelSpacing: CGFloat = 6
+    private static let memoryStripCollapsedCount = 3
+    private static let floatingScrollableContentMaxHeight: CGFloat = 320
 
     private enum KeyboardOption {
         case dimension(String)
@@ -40,19 +48,7 @@ struct SortAssistantThreadView: View {
             if showsHeader {
                 header
             }
-            messages
-            if let prompt = coordinator.choicePrompt {
-                choicePromptCard(prompt)
-            }
-            if let question = coordinator.dimensionQuestion {
-                dimensionQuestion(question)
-            }
-            if let candidate = coordinator.memoryCandidate {
-                memoryCandidateCard(candidate)
-            }
-            if !coordinator.memories.isEmpty {
-                memoryStrip
-            }
+            promptAndMessageContent
             inputSection
         }
         .padding(.horizontal, showsHeader ? 10 : 12)
@@ -86,6 +82,45 @@ struct SortAssistantThreadView: View {
                 tabManager: tabManager,
                 workspaceTabStore: workspaceTabStore
             )
+        }
+        .onChange(of: coordinator.memories.count) { _, count in
+            if count <= Self.memoryStripCollapsedCount {
+                memoriesExpanded = false
+            }
+        }
+        .onChange(of: coordinator.messages.map(\.id)) { _, _ in
+            pruneMessageKeyboardState()
+        }
+    }
+
+    @ViewBuilder
+    private var promptAndMessageContent: some View {
+        if completionLayout == .overlay {
+            ScrollView {
+                promptAndMessageStack
+            }
+            .frame(maxHeight: Self.floatingScrollableContentMaxHeight)
+            .scrollIndicators(.automatic)
+        } else {
+            promptAndMessageStack
+        }
+    }
+
+    private var promptAndMessageStack: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            messages
+            if let prompt = coordinator.choicePrompt {
+                choicePromptCard(prompt)
+            }
+            if let question = coordinator.dimensionQuestion {
+                dimensionQuestion(question)
+            }
+            if let candidate = coordinator.memoryCandidate {
+                memoryCandidateCard(candidate)
+            }
+            if !coordinator.memories.isEmpty {
+                memoryStrip
+            }
         }
     }
 
@@ -152,7 +187,12 @@ struct SortAssistantThreadView: View {
                                 VStack(alignment: .leading, spacing: 8) {
                                     SortAssistantMessageRow(
                                         message: message,
-                                        showsAssistantAvatar: showsAssistantMessageAvatar
+                                        showsAssistantAvatar: showsAssistantMessageAvatar,
+                                        isExpanded: expandedMessageIds.contains(message.id),
+                                        isKeyboardFocused: keyboardFocusedMessageId == message.id,
+                                        onToggleExpanded: {
+                                            toggleMessageExpansion(message.id)
+                                        }
                                     )
                                     .id(message.id)
 
@@ -168,6 +208,11 @@ struct SortAssistantThreadView: View {
                             }
                         }
                         .padding(.vertical, 4)
+                        .background(
+                            SortAssistantScrollViewResolver { scrollView in
+                                messageScrollController.attach(scrollView: scrollView)
+                            }
+                        )
                     }
                     .frame(maxHeight: 220)
                     .scrollIndicators(.automatic)
@@ -175,10 +220,18 @@ struct SortAssistantThreadView: View {
                         scrollToLatestMessage(proxy)
                     }
                     .onChange(of: coordinator.messages.last?.id) { _, _ in
-                        scrollToLatestMessage(proxy)
+                        if keyboardFocusedMessageId == nil {
+                            scrollToLatestMessage(proxy)
+                        }
                     }
                     .onChange(of: coordinator.latestResult?.id) { _, _ in
-                        scrollToLatestMessage(proxy)
+                        if keyboardFocusedMessageId == nil {
+                            scrollToLatestMessage(proxy)
+                        }
+                    }
+                    .onChange(of: keyboardFocusedMessageId) { _, messageId in
+                        guard let messageId else { return }
+                        scrollToMessage(messageId, proxy: proxy, anchor: .center)
                     }
                 }
             }
@@ -198,6 +251,72 @@ struct SortAssistantThreadView: View {
             withAnimation(.easeOut(duration: 0.16)) {
                 proxy.scrollTo(id, anchor: .bottom)
             }
+        }
+    }
+
+    private func scrollToMessage(_ id: UUID, proxy: ScrollViewProxy, anchor: UnitPoint) {
+        DispatchQueue.main.async {
+            withAnimation(.easeOut(duration: 0.12)) {
+                proxy.scrollTo(id, anchor: anchor)
+            }
+        }
+    }
+
+    private func toggleMessageExpansion(_ id: UUID) {
+        withAnimation(.easeInOut(duration: 0.12)) {
+            if expandedMessageIds.contains(id) {
+                expandedMessageIds.remove(id)
+            } else {
+                expandedMessageIds.insert(id)
+            }
+            keyboardFocusedMessageId = id
+        }
+    }
+
+    private var collapsedMessageIds: [UUID] {
+        coordinator.messages.compactMap { message in
+            guard SortAssistantMessageCollapseRules.isCollapsible(message),
+                  !expandedMessageIds.contains(message.id) else {
+                return nil
+            }
+            return message.id
+        }
+    }
+
+    private func moveCollapsedMessageFocus(delta: Int) -> Bool {
+        let ids = collapsedMessageIds
+        guard !ids.isEmpty else { return false }
+
+        guard let focused = keyboardFocusedMessageId else {
+            keyboardFocusedMessageId = delta < 0 ? ids.last : ids.first
+            return true
+        }
+        guard let currentIndex = ids.firstIndex(of: focused) else {
+            return false
+        }
+
+        let nextIndex = (currentIndex + delta + ids.count) % ids.count
+        keyboardFocusedMessageId = ids[nextIndex]
+        return true
+    }
+
+    private func activateFocusedCollapsedMessage() -> Bool {
+        guard let focused = keyboardFocusedMessageId,
+              collapsedMessageIds.contains(focused) else {
+            return false
+        }
+        withAnimation(.easeInOut(duration: 0.12)) {
+            expandedMessageIds.insert(focused)
+        }
+        return true
+    }
+
+    private func pruneMessageKeyboardState() {
+        let liveIds = Set(coordinator.messages.map(\.id))
+        expandedMessageIds.formIntersection(liveIds)
+        if let focused = keyboardFocusedMessageId,
+           !liveIds.contains(focused) {
+            keyboardFocusedMessageId = nil
         }
     }
 
@@ -306,50 +425,30 @@ struct SortAssistantThreadView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
-            VStack(alignment: .leading, spacing: 5) {
-                ForEach(Array(prompt.options.enumerated()), id: \.element.id) { index, option in
-                    Button {
-                        coordinator.answerChoicePrompt(
-                            option,
-                            tabManager: tabManager,
-                            workspaceTabStore: workspaceTabStore
-                        )
-                    } label: {
-                        HStack(alignment: .top, spacing: 7) {
-                            Image(systemName: "target")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(Color.accentColor)
-                                .frame(width: 14, height: 14)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(option.title)
-                                    .font(.system(size: 10, weight: .semibold))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(2)
-                                if let subtitle = option.subtitle {
-                                    Text(subtitle)
-                                        .font(.system(size: 9))
-                                        .foregroundStyle(.secondary)
-                                        .lineLimit(3)
-                                }
-                            }
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right")
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundStyle(.tertiary)
-                                .padding(.top, 3)
+            if prompt.isMultiQuestion {
+                multiQuestionChoicePrompt(prompt)
+            } else {
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Array(prompt.options.enumerated()), id: \.element.id) { index, option in
+                        Button {
+                            coordinator.answerChoicePrompt(
+                                option,
+                                tabManager: tabManager,
+                                workspaceTabStore: workspaceTabStore
+                            )
+                        } label: {
+                            choicePromptOptionRow(
+                                option,
+                                icon: "target",
+                                trailingIcon: "chevron.right",
+                                isSelected: false
+                            )
                         }
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 6)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(
-                            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                .fill(Color.primary.opacity(0.045))
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .help(keyboardOptionHelp(index: index))
-                    .overlay {
-                        keyboardSelectionOverlay(isSelected: index == keyboardOptionSelection)
+                        .buttonStyle(.plain)
+                        .help(keyboardOptionHelp(index: index))
+                        .overlay {
+                            keyboardSelectionOverlay(isSelected: index == keyboardOptionSelection)
+                        }
                     }
                 }
             }
@@ -358,6 +457,118 @@ struct SortAssistantThreadView: View {
         .background(
             RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .fill(Color.accentColor.opacity(0.075))
+        )
+    }
+
+    private func multiQuestionChoicePrompt(_ prompt: SortAssistantChoicePrompt) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(prompt.questions) { question in
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(question.title)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                    if let message = question.message {
+                        Text(message)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                    }
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(question.options) { option in
+                            let selected = coordinator.choicePromptSelections[question.id]?.id == option.id
+                            Button {
+                                coordinator.selectChoicePromptOption(
+                                    option,
+                                    questionId: question.id
+                                )
+                            } label: {
+                                choicePromptOptionRow(
+                                    option,
+                                    icon: selected ? "checkmark.circle.fill" : "circle",
+                                    trailingIcon: nil,
+                                    isSelected: selected
+                                )
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+            }
+
+            HStack(spacing: 6) {
+                Button {
+                    coordinator.submitChoicePromptSelections(
+                        tabManager: tabManager,
+                        workspaceTabStore: workspaceTabStore
+                    )
+                } label: {
+                    Label(
+                        String(localized: "sortAssistant.choice.submit", defaultValue: "Submit choices"),
+                        systemImage: "checkmark"
+                    )
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                .disabled(!coordinator.isChoicePromptReady(prompt))
+
+                Button {
+                    coordinator.dismissChoicePrompt()
+                } label: {
+                    Label(
+                        String(localized: "sortAssistant.choice.cancel", defaultValue: "Cancel"),
+                        systemImage: "xmark"
+                    )
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            .font(.system(size: 10, weight: .medium))
+        }
+    }
+
+    private func choicePromptOptionRow(
+        _ option: SortAssistantChoicePrompt.Option,
+        icon: String,
+        trailingIcon: String?,
+        isSelected: Bool
+    ) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                .frame(width: 14, height: 14)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(option.title)
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                if let subtitle = option.subtitle {
+                    Text(subtitle)
+                        .font(.system(size: 9))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+            }
+            Spacer(minLength: 0)
+            if let trailingIcon {
+                Image(systemName: trailingIcon)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 3)
+            }
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .fill(
+                    isSelected
+                        ? Color.accentColor.opacity(0.16)
+                        : Color.primary.opacity(0.045)
+                )
         )
     }
 
@@ -466,6 +677,7 @@ struct SortAssistantThreadView: View {
 
     private var keyboardOptions: [KeyboardOption] {
         if let choicePrompt = coordinator.choicePrompt {
+            guard !choicePrompt.isMultiQuestion else { return [] }
             return choicePrompt.options.map { .choice($0) }
         }
         if coordinator.dimensionQuestion != nil {
@@ -489,7 +701,9 @@ struct SortAssistantThreadView: View {
 
     private func activatePrimaryKeyboardOption() -> Bool {
         let options = keyboardOptions
-        guard !options.isEmpty else { return false }
+        guard !options.isEmpty else {
+            return activateFocusedCollapsedMessage()
+        }
         let index = clampedKeyboardOptionSelection(count: options.count)
         keyboardOptionSelection = index
         return activateKeyboardOption(options[index])
@@ -504,6 +718,10 @@ struct SortAssistantThreadView: View {
             coordinator.discardMemoryCandidate()
             return true
         }
+        if keyboardFocusedMessageId != nil {
+            keyboardFocusedMessageId = nil
+            return true
+        }
         guard let result = coordinator.latestResult,
               result.actions.contains(.ignore),
               isResultActionEnabled(.ignore, result: result) else {
@@ -515,7 +733,12 @@ struct SortAssistantThreadView: View {
 
     private func moveKeyboardOptionSelection(delta: Int) -> Bool {
         let count = keyboardOptions.count
-        guard count > 0 else { return false }
+        guard count > 0 else {
+            if moveCollapsedMessageFocus(delta: delta) {
+                return true
+            }
+            return messageScrollController.scroll(direction: delta)
+        }
         keyboardOptionSelection = (clampedKeyboardOptionSelection(count: count) + delta + count) % count
         return true
     }
@@ -673,28 +896,80 @@ struct SortAssistantThreadView: View {
     }
 
     private var memoryStrip: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        let allMemories = coordinator.memories
+        let hiddenCount = max(0, allMemories.count - Self.memoryStripCollapsedCount)
+        let visibleMemories = memoriesExpanded
+            ? allMemories
+            : Array(allMemories.prefix(Self.memoryStripCollapsedCount))
+
+        return VStack(alignment: .leading, spacing: 4) {
             Text(String(localized: "sortAssistant.memory.saved", defaultValue: "Free sort memories"))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
-            ForEach(coordinator.memories.prefix(3)) { memory in
-                HStack(alignment: .firstTextBaseline, spacing: 5) {
-                    Text(memory.text)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                    Spacer(minLength: 0)
-                    Button {
-                        coordinator.deleteMemory(memory)
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.system(size: 8, weight: .bold))
-                    }
-                    .buttonStyle(.plain)
-                    .help(String(localized: "sortAssistant.memory.delete", defaultValue: "Delete memory"))
+
+            if memoriesExpanded && allMemories.count > Self.memoryStripCollapsedCount {
+                ScrollView {
+                    memoryRows(visibleMemories)
                 }
+                .frame(maxHeight: 128)
+                .scrollIndicators(.automatic)
+            } else {
+                memoryRows(visibleMemories)
+            }
+
+            if hiddenCount > 0 {
+                Button {
+                    memoriesExpanded.toggle()
+                } label: {
+                    Label {
+                        Text(memoryOverflowTitle(hiddenCount: hiddenCount))
+                    } icon: {
+                        Image(systemName: memoriesExpanded ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 8, weight: .semibold))
+                    }
+                    .labelStyle(.titleAndIcon)
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func memoryRows(_ memories: [SortAssistantMemory]) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(memories) { memory in
+                memoryRow(memory)
+            }
+        }
+    }
+
+    private func memoryRow(_ memory: SortAssistantMemory) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 5) {
+            Text(memory.text)
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Button {
+                coordinator.deleteMemory(memory)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .buttonStyle(.plain)
+            .help(String(localized: "sortAssistant.memory.delete", defaultValue: "Delete memory"))
+        }
+    }
+
+    private func memoryOverflowTitle(hiddenCount: Int) -> String {
+        if memoriesExpanded {
+            return String(localized: "sortAssistant.memory.showLess", defaultValue: "Show less")
+        }
+        return String(
+            format: String(localized: "sortAssistant.memory.showMoreFormat", defaultValue: "+%d more"),
+            hiddenCount
+        )
     }
 
     @ViewBuilder
@@ -869,21 +1144,32 @@ struct SortAssistantThreadView: View {
         completionSelection = (clampedCompletionSelection(for: completionModel) + delta + count) % count
     }
 
-    private func acceptSelectedCompletion() {
-        guard let completionModel, !completionModel.items.isEmpty else { return }
+    @discardableResult
+    private func acceptSelectedCompletion() -> Bool {
+        guard let completionModel, !completionModel.items.isEmpty else { return false }
         acceptCompletion(
             completionModel.items[clampedCompletionSelection(for: completionModel)],
             model: completionModel
         )
+        return true
     }
 
     private func acceptCompletion(_ item: SortAssistantCompletionItem, model: SortAssistantCompletionModel) {
         let applied = model.applying(item, to: draft)
         draft = applied.text
-        draftSelection = NSRange(location: applied.cursorLocation, length: 0)
+        let acceptedSelection = NSRange(location: applied.cursorLocation, length: 0)
+        draftSelection = acceptedSelection
         draftSelectionRevision += 1
         completionSelection = 0
-        dismissedCompletionKey = nil
+        if let acceptedModel = SortAssistantCompletionModel.make(
+            text: applied.text,
+            selectedRange: acceptedSelection,
+            tabManager: tabManager
+        ) {
+            dismissedCompletionKey = completionSuppressionKey(for: acceptedModel)
+        } else {
+            dismissedCompletionKey = nil
+        }
         inputFocused = true
     }
 
@@ -902,6 +1188,7 @@ struct SortAssistantThreadView: View {
         draftSelectionRevision += 1
         completionSelection = 0
         dismissedCompletionKey = nil
+        keyboardFocusedMessageId = nil
         coordinator.submit(
             text,
             tabManager: tabManager,
@@ -924,6 +1211,7 @@ struct SortAssistantThreadView: View {
 
 private final class SortAssistantNativeTextField: NSTextField {
     var onHandleKeyEvent: ((NSEvent, NSTextView?) -> Bool)?
+    var onWindowReady: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -938,6 +1226,11 @@ private final class SortAssistantNativeTextField: NSTextField {
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        onWindowReady?()
     }
 
     override func keyDown(with event: NSEvent) {
@@ -971,7 +1264,7 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
     let hasCompletion: Bool
     let onSubmit: () -> Void
     let onMoveCompletion: (Int) -> Void
-    let onAcceptCompletion: () -> Void
+    let onAcceptCompletion: () -> Bool
     let onDismissCompletion: () -> Void
     let keyboardOptionCount: Int
     let onActivateKeyboardOption: (Int) -> Bool
@@ -1040,13 +1333,12 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
                 parent.selection = textView.selectedRange()
                 return true
             case #selector(NSResponder.insertTab(_:)):
-                guard parent.hasCompletion else { return false }
-                parent.onAcceptCompletion()
+                guard acceptCompletionIfAvailable(editor: textView) || parent.hasCompletion else { return false }
                 return true
             case #selector(NSResponder.insertNewline(_:)):
                 guard !textView.hasMarkedText() else { return false }
-                if parent.hasCompletion {
-                    parent.onAcceptCompletion()
+                if acceptCompletionIfAvailable(editor: textView) || parent.hasCompletion {
+                    return true
                 } else if parent.isDraftEmpty, parent.onActivatePrimaryKeyboardOption() {
                     parent.selection = textView.selectedRange()
                 } else {
@@ -1120,15 +1412,11 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
                 publishSelection(from: parentField)
                 return true
             case 48:
-                guard parent.hasCompletion else { return false }
-                parent.onAcceptCompletion()
+                guard acceptCompletionIfAvailable(editor: editor) || parent.hasCompletion else { return false }
                 return true
             case 36, 76:
-                if parent.hasCompletion {
-                    parent.onAcceptCompletion()
-                } else {
-                    parent.onSubmit()
-                }
+                if acceptCompletionIfAvailable(editor: editor) || parent.hasCompletion { return true }
+                parent.onSubmit()
                 return true
             case 53:
                 if parent.hasCompletion {
@@ -1150,6 +1438,29 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
             if parent.selection != selectedRange {
                 parent.selection = selectedRange
             }
+        }
+
+        private func acceptCompletionIfAvailable(editor: NSTextView?) -> Bool {
+            guard parent.onAcceptCompletion() else { return false }
+            syncEditorAfterProgrammaticMutation(editor: editor)
+            return true
+        }
+
+        private func syncEditorAfterProgrammaticMutation(editor: NSTextView?) {
+            guard let field = parentField else { return }
+            let targetText = parent.text
+            let targetSelection = SortAssistantInputTextField.clamped(parent.selection, text: targetText)
+            let activeEditor = editor ?? field.currentEditor() as? NSTextView
+            if let activeEditor, !activeEditor.hasMarkedText() {
+                isProgrammaticMutation = true
+                activeEditor.string = targetText
+                field.stringValue = targetText
+                isProgrammaticMutation = false
+                activeEditor.setSelectedRange(targetSelection)
+            } else {
+                field.stringValue = targetText
+            }
+            appliedSelectionRevision = parent.selectionRevision
         }
 
         func applySelectionToEditorIfNeeded(
@@ -1183,6 +1494,44 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
                 }
             }
         }
+
+        func requestFocusIfNeeded() {
+            guard let parentField else { return }
+            requestFocusIfNeeded(field: parentField)
+        }
+
+        func requestFocusIfNeeded(field: SortAssistantNativeTextField) {
+            guard parent.isFocused,
+                  let window = field.window,
+                  !isFieldFirstResponder(field, in: window),
+                  !pendingFocusRequest else {
+                return
+            }
+
+            pendingFocusRequest = true
+            DispatchQueue.main.async { [weak self, weak field] in
+                guard let self else { return }
+                self.pendingFocusRequest = false
+                guard self.parent.isFocused,
+                      let field,
+                      let window = field.window else {
+                    return
+                }
+                if !window.isKeyWindow {
+                    window.makeKey()
+                }
+                window.makeFirstResponder(field)
+                self.applySelectionToEditorIfNeeded(field: field, force: true)
+                self.appliedSelectionRevision = self.parent.selectionRevision
+            }
+        }
+
+        private func isFieldFirstResponder(_ field: SortAssistantNativeTextField, in window: NSWindow) -> Bool {
+            let firstResponder = window.firstResponder
+            return firstResponder === field ||
+                field.currentEditor() != nil ||
+                ((firstResponder as? NSTextView)?.delegate as? NSTextField) === field
+        }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -1198,6 +1547,9 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
         field.setAccessibilityIdentifier("SortAssistantInputField")
         field.onHandleKeyEvent = { [weak coordinator = context.coordinator] event, editor in
             coordinator?.handleKeyEvent(event, editor: editor) ?? false
+        }
+        field.onWindowReady = { [weak coordinator = context.coordinator] in
+            coordinator?.requestFocusIfNeeded()
         }
         context.coordinator.parentField = field
         return field
@@ -1225,29 +1577,13 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
             nsView.stringValue = text
         }
 
-        guard let window = nsView.window else { return }
-        let firstResponder = window.firstResponder
-        let isFirstResponder =
-            firstResponder === nsView ||
-            nsView.currentEditor() != nil ||
-            ((firstResponder as? NSTextView)?.delegate as? NSTextField) === nsView
-
-        if isFocused, !isFirstResponder, !context.coordinator.pendingFocusRequest {
-            context.coordinator.pendingFocusRequest = true
-            DispatchQueue.main.async { [weak nsView, weak coordinator = context.coordinator] in
-                coordinator?.pendingFocusRequest = false
-                guard let coordinator, coordinator.parent.isFocused else { return }
-                guard let nsView, let window = nsView.window else { return }
-                window.makeFirstResponder(nsView)
-                coordinator.applySelectionToEditorIfNeeded(field: nsView, force: true)
-                coordinator.appliedSelectionRevision = coordinator.parent.selectionRevision
-            }
-        }
+        context.coordinator.requestFocusIfNeeded(field: nsView)
     }
 
     static func dismantleNSView(_ nsView: SortAssistantNativeTextField, coordinator: Coordinator) {
         nsView.delegate = nil
         nsView.onHandleKeyEvent = nil
+        nsView.onWindowReady = nil
         coordinator.parentField = nil
     }
 
@@ -1278,14 +1614,94 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
     }
 }
 
+@MainActor
+private final class SortAssistantMessageScrollController: ObservableObject {
+    private weak var scrollView: NSScrollView?
+    private let lineStep: CGFloat = 42
+
+    func attach(scrollView: NSScrollView?) {
+        self.scrollView = scrollView
+    }
+
+    @discardableResult
+    func scroll(direction: Int) -> Bool {
+        guard direction != 0,
+              let scrollView,
+              let documentView = scrollView.documentView else {
+            return false
+        }
+
+        let clipView = scrollView.contentView
+        let maxOriginY = max(0, documentView.bounds.height - clipView.bounds.height)
+        guard maxOriginY > 0 else { return false }
+
+        let directionMultiplier: CGFloat = direction > 0 ? 1 : -1
+        let flippedMultiplier: CGFloat = documentView.isFlipped ? 1 : -1
+        let currentY = clipView.bounds.origin.y
+        let targetY = min(max(currentY + directionMultiplier * flippedMultiplier * lineStep, 0), maxOriginY)
+        guard abs(targetY - currentY) > 0.01 else { return false }
+
+        clipView.scroll(to: CGPoint(x: clipView.bounds.origin.x, y: targetY))
+        scrollView.reflectScrolledClipView(clipView)
+        return true
+    }
+}
+
+private struct SortAssistantScrollViewResolver: NSViewRepresentable {
+    let onResolve: (NSScrollView?) -> Void
+
+    func makeNSView(context: Context) -> SortAssistantScrollViewResolverView {
+        let view = SortAssistantScrollViewResolverView()
+        view.onResolve = onResolve
+        return view
+    }
+
+    func updateNSView(_ nsView: SortAssistantScrollViewResolverView, context: Context) {
+        nsView.onResolve = onResolve
+        nsView.resolveSoon()
+    }
+}
+
+private final class SortAssistantScrollViewResolverView: NSView {
+    var onResolve: ((NSScrollView?) -> Void)?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        resolveSoon()
+    }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        resolveSoon()
+    }
+
+    func resolveSoon() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.onResolve?(self.enclosingScrollView)
+        }
+    }
+}
+
+private enum SortAssistantMessageCollapseRules {
+    static let lineLimit = 6
+
+    static func isCollapsible(_ message: SortAssistantMessage) -> Bool {
+        guard message.kind == .assistant || message.kind == .error else { return false }
+        return message.text.count > 260 ||
+            message.text.filter { $0 == "\n" }.count + 1 > lineLimit
+    }
+}
+
 private struct SortAssistantMessageRow: View {
     let message: SortAssistantMessage
     var showsAssistantAvatar = true
+    let isExpanded: Bool
+    let isKeyboardFocused: Bool
+    let onToggleExpanded: () -> Void
 
-    @State private var isExpanded = false
     @State private var copied = false
     @State private var copyFeedbackToken: UUID?
-    private let collapsedLineLimit = 6
 
     var body: some View {
         Group {
@@ -1352,7 +1768,7 @@ private struct SortAssistantMessageRow: View {
                 Text(message.text)
                     .font(.system(size: 12, design: .monospaced))
                     .foregroundStyle(foreground)
-                    .lineLimit(isMessageExpanded ? nil : collapsedLineLimit)
+                    .lineLimit(isMessageExpanded ? nil : SortAssistantMessageCollapseRules.lineLimit)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
@@ -1379,9 +1795,7 @@ private struct SortAssistantMessageRow: View {
 
                     if showsExpandButton {
                         Button {
-                            withAnimation(.easeInOut(duration: 0.12)) {
-                                isExpanded.toggle()
-                            }
+                            onToggleExpanded()
                         } label: {
                             Label(
                                 isExpanded
@@ -1412,7 +1826,10 @@ private struct SortAssistantMessageRow: View {
         )
         .overlay(
             SortAssistantPixelPanelShape(cornerLength: message.kind == .assistant ? 0 : 4)
-                .stroke(stroke, lineWidth: message.kind == .assistant ? 0 : 1)
+                .stroke(
+                    isKeyboardFocused ? Color.accentColor.opacity(0.78) : stroke,
+                    lineWidth: isKeyboardFocused ? 1 : (message.kind == .assistant ? 0 : 1)
+                )
         )
         .overlay(alignment: tailEdge.alignment) {
             if message.kind != .assistant {
@@ -1429,9 +1846,7 @@ private struct SortAssistantMessageRow: View {
     }
 
     private var showsExpandButton: Bool {
-        guard message.kind == .assistant || message.kind == .error else { return false }
-        return message.text.count > 260
-            || message.text.filter { $0 == "\n" }.count + 1 > collapsedLineLimit
+        SortAssistantMessageCollapseRules.isCollapsible(message)
     }
 
     private var isMessageExpanded: Bool {
@@ -1631,45 +2046,76 @@ struct SortAssistantChoicePrompt: Identifiable, Equatable, Sendable {
         let goal: String
     }
 
+    struct Question: Identifiable, Equatable, Sendable {
+        let id: String
+        let title: String
+        let message: String?
+        let options: [Option]
+    }
+
     let id: UUID
     let title: String
     let message: String?
     let options: [Option]
+    let questions: [Question]
     let followUpIntent: SortAssistantIntent?
     let forceApply: Bool
     let workspaceTarget: SortAssistantWorkspaceTarget?
+    let explicitSlashCommand: Bool
+
+    var isMultiQuestion: Bool {
+        questions.count > 1
+    }
 
     init(
         id: UUID = UUID(),
         title: String,
         message: String?,
         options: [Option],
+        questions: [Question]? = nil,
         followUpIntent: SortAssistantIntent? = nil,
         forceApply: Bool = false,
-        workspaceTarget: SortAssistantWorkspaceTarget? = nil
+        workspaceTarget: SortAssistantWorkspaceTarget? = nil,
+        explicitSlashCommand: Bool = false
     ) {
         self.id = id
         self.title = title
         self.message = message
         self.options = options
+        if let questions, !questions.isEmpty {
+            self.questions = questions
+        } else {
+            self.questions = [
+                Question(
+                    id: "primary",
+                    title: title,
+                    message: message,
+                    options: options
+                )
+            ]
+        }
         self.followUpIntent = followUpIntent
         self.forceApply = forceApply
         self.workspaceTarget = workspaceTarget
+        self.explicitSlashCommand = explicitSlashCommand
     }
 
     func preparedForFollowUp(
         intent: SortAssistantIntent,
         forceApply: Bool,
-        workspaceTarget: SortAssistantWorkspaceTarget?
+        workspaceTarget: SortAssistantWorkspaceTarget?,
+        explicitSlashCommand: Bool = false
     ) -> SortAssistantChoicePrompt {
         SortAssistantChoicePrompt(
             id: id,
             title: title,
             message: message,
             options: options,
+            questions: questions,
             followUpIntent: followUpIntent ?? intent,
             forceApply: self.forceApply || forceApply,
-            workspaceTarget: self.workspaceTarget ?? workspaceTarget
+            workspaceTarget: self.workspaceTarget ?? workspaceTarget,
+            explicitSlashCommand: self.explicitSlashCommand || explicitSlashCommand
         )
     }
 }
@@ -2034,13 +2480,34 @@ enum SortAssistantIntent: String, Equatable, Sendable {
     case rememberSpriteMemory = "remember_sprite_memory"
     case forgetSpriteMemory = "forget_sprite_memory"
     case undoSort = "undo_sort"
+    case workspaceColor = "workspace_color"
     case normalChat = "normal_chat"
+}
+
+enum SortAssistantSortRoute: String, Equatable, Sendable {
+    case colorGroup = "color_group"
 }
 
 struct SortAssistantIntentDecision: Equatable, Sendable {
     let intent: SortAssistantIntent
     let confidence: Double
     let reason: String?
+    let sortRoute: SortAssistantSortRoute?
+    let isFallback: Bool
+
+    init(
+        intent: SortAssistantIntent,
+        confidence: Double,
+        reason: String?,
+        sortRoute: SortAssistantSortRoute? = nil,
+        isFallback: Bool = false
+    ) {
+        self.intent = intent
+        self.confidence = confidence
+        self.reason = reason
+        self.sortRoute = sortRoute
+        self.isFallback = isFallback
+    }
 }
 
 enum SortAssistantActionMode: String, Equatable, Sendable {
@@ -2077,6 +2544,15 @@ struct SortAssistantActionRoute: Equatable, Sendable {
     var runMode: SortAssistantRunMode {
         mode == .applyAllowed && !needsConfirmation ? .apply : .preview
     }
+
+    func bypassingPreOperationConfirmation() -> SortAssistantActionRoute {
+        SortAssistantActionRoute(
+            mode: mode,
+            needsConfirmation: false,
+            allowedTools: allowedTools,
+            memoryWritePolicy: memoryWritePolicy
+        )
+    }
 }
 
 struct SortAssistantSlashCommand: Equatable {
@@ -2088,7 +2564,8 @@ struct SortAssistantSlashCommand: Equatable {
         case explainCurrentOrder(String)
         case proposeSort(String)
         case applySort(String)
-        case listMemories
+        case listSortMemories
+        case listSpriteMemories
         case rememberSpriteMemory(String)
         case forgetSpriteMemory(String)
         case rememberFreeSortMemory(String)
@@ -2138,9 +2615,9 @@ struct SortAssistantSlashCommand: Equatable {
             return SortAssistantSlashCommand(name: name, argument: argument, operation: .explainCurrentOrder(goal))
         case "/sort":
             let goal = argument.isEmpty
-                ? String(localized: "sortAssistant.slash.sort.defaultGoal", defaultValue: "Suggest a workspace sort.")
+                ? String(localized: "sortAssistant.slash.sort.defaultGoal", defaultValue: "Sort workspaces using the current signals.")
                 : argument
-            return SortAssistantSlashCommand(name: name, argument: argument, operation: .proposeSort(goal))
+            return SortAssistantSlashCommand(name: name, argument: argument, operation: .applySort(goal))
         case "/apply":
             let goal = argument.isEmpty
                 ? String(localized: "sortAssistant.slash.apply.defaultGoal", defaultValue: "Apply a workspace sort using the current signals.")
@@ -2150,15 +2627,33 @@ struct SortAssistantSlashCommand: Equatable {
             return SortAssistantSlashCommand(
                 name: name,
                 argument: argument,
-                operation: .listMemories
+                operation: .listSortMemories
             )
         case "/remember":
             return SortAssistantSlashCommand(
                 name: name,
                 argument: argument,
-                operation: .rememberSpriteMemory(argument)
+                operation: .rememberFreeSortMemory(argument)
             )
         case "/forget":
+            return SortAssistantSlashCommand(
+                name: name,
+                argument: argument,
+                operation: .forgetFreeSortMemory(argument)
+            )
+        case "/memory-sprite", "/mem-sprite":
+            return SortAssistantSlashCommand(
+                name: name,
+                argument: argument,
+                operation: .listSpriteMemories
+            )
+        case "/remember-sprite":
+            return SortAssistantSlashCommand(
+                name: name,
+                argument: argument,
+                operation: .rememberSpriteMemory(argument)
+            )
+        case "/forget-sprite":
             return SortAssistantSlashCommand(
                 name: name,
                 argument: argument,
@@ -2253,7 +2748,7 @@ extension SortAssistantSlashCommand {
                 name: "/sort",
                 aliases: [],
                 argumentHint: "[goal]",
-                summary: String(localized: "sortAssistant.slash.sort.summary", defaultValue: "Preview a workspace sort")
+                summary: String(localized: "sortAssistant.slash.sort.summary", defaultValue: "Sort workspaces")
             ),
             SortAssistantSlashCommandDescriptor(
                 name: "/apply",
@@ -2277,31 +2772,37 @@ extension SortAssistantSlashCommand {
                 name: "/memory",
                 aliases: ["/mem"],
                 argumentHint: nil,
-                summary: String(localized: "sortAssistant.slash.memory.summary", defaultValue: "List saved memories")
+                summary: String(localized: "sortAssistant.slash.memory.summary", defaultValue: "List saved sort memories")
             ),
             SortAssistantSlashCommandDescriptor(
                 name: "/remember",
-                aliases: [],
-                argumentHint: "<memory>",
-                summary: String(localized: "sortAssistant.slash.remember.summary", defaultValue: "Save sprite workspace memory")
+                aliases: ["/remember-sort"],
+                argumentHint: "<preference>",
+                summary: String(localized: "sortAssistant.slash.remember.summary", defaultValue: "Propose a sort memory")
             ),
             SortAssistantSlashCommandDescriptor(
                 name: "/forget",
-                aliases: [],
+                aliases: ["/forget-sort"],
                 argumentHint: "<memory>",
-                summary: String(localized: "sortAssistant.slash.forget.summary", defaultValue: "Forget sprite workspace memory")
+                summary: String(localized: "sortAssistant.slash.forget.summary", defaultValue: "Forget sort memory")
             ),
             SortAssistantSlashCommandDescriptor(
-                name: "/remember-sort",
-                aliases: [],
-                argumentHint: "<preference>",
-                summary: String(localized: "sortAssistant.slash.rememberSort.summary", defaultValue: "Propose a free-sort memory")
+                name: "/memory-sprite",
+                aliases: ["/mem-sprite"],
+                argumentHint: nil,
+                summary: String(localized: "sortAssistant.slash.memorySprite.summary", defaultValue: "List sprite workspace memories")
             ),
             SortAssistantSlashCommandDescriptor(
-                name: "/forget-sort",
+                name: "/remember-sprite",
                 aliases: [],
                 argumentHint: "<memory>",
-                summary: String(localized: "sortAssistant.slash.forgetSort.summary", defaultValue: "Forget free-sort memory")
+                summary: String(localized: "sortAssistant.slash.rememberSprite.summary", defaultValue: "Save sprite workspace memory")
+            ),
+            SortAssistantSlashCommandDescriptor(
+                name: "/forget-sprite",
+                aliases: [],
+                argumentHint: "<memory>",
+                summary: String(localized: "sortAssistant.slash.forgetSprite.summary", defaultValue: "Forget sprite workspace memory")
             ),
             SortAssistantSlashCommandDescriptor(
                 name: "/pin",
@@ -2633,12 +3134,36 @@ struct SortAssistantIntentRouter: Sendable {
         "当前仓库", "仓库", "代码库", "当前目录", "目录", "分支", "远端",
         "拉取请求", "评审", "子模块"
     ]
+    private static let workspaceColorSubjectKeywords = [
+        "workspace color", "workspace colour", "workspace tab color", "workspace tab colour",
+        "tab color", "tab colour", "sidebar color", "sidebar colour", "color picker", "colour picker",
+        "工作区颜色", "标签颜色", "侧边栏颜色", "颜色"
+    ]
+    private static let workspaceColorMutationKeywords = [
+        "set", "change", "make", "paint", "assign", "apply", "clear", "remove", "reset",
+        "设", "设置", "改", "更改", "清除", "移除", "重置", "换成"
+    ]
+    private static let workspaceColorReadKeywords = [
+        "what", "which", "show", "read", "get", "current", "is", "color?",
+        "什么", "哪个", "显示", "读取", "当前", "现在"
+    ]
+    private static let sortPermissionGrantKeywords = [
+        "grant", "allow", "approve", "yes", "ok", "okay", "go ahead", "do it",
+        "write access", "give write access", "授权", "允许", "批准", "可以", "执行"
+    ]
+    private static let sortPermissionDenyKeywords = [
+        "deny", "don't", "do not", "not grant", "not allow", "no permission",
+        "拒绝", "不要", "不允许"
+    ]
 
     func immediateIntent(for text: String, externalGoal: Bool = false) -> SortAssistantIntent? {
         if Self.clearSessionCommands.contains(Self.slashCommandName(text)) {
             return .clearSession
         }
-        if externalGoal {
+        if Self.isWorkspaceColorRequest(text) {
+            return .workspaceColor
+        }
+        if Self.isWorkspaceSortPermissionGrant(text) {
             return .applySort
         }
         return nil
@@ -2661,21 +3186,27 @@ struct SortAssistantIntentRouter: Sendable {
                     conversationContext: conversationContext
                 )
                 guard decision.intent != .clearSession else {
-                    return Self.fallbackDecision(for: text)
+                    return Self.fallbackDecision(for: text, externalGoal: externalGoal)
                 }
                 guard decision.confidence >= Self.semanticConfidenceFloor else {
-                    return Self.fallbackDecision(for: text)
+                    return Self.fallbackDecision(for: text, externalGoal: externalGoal)
                 }
                 return decision
             } catch {
-                return Self.fallbackDecision(for: text)
+                return Self.fallbackDecision(for: text, externalGoal: externalGoal)
             }
         }.value
     }
 
-    private static func fallbackDecision(for text: String) -> SortAssistantIntentDecision {
+    private static func fallbackDecision(
+        for text: String,
+        externalGoal: Bool = false
+    ) -> SortAssistantIntentDecision {
         let lower = normalizedIntentText(text)
         let intent: SortAssistantIntent
+        if isWorkspaceColorRequest(text) {
+            return SortAssistantIntentDecision(intent: .workspaceColor, confidence: 0.85, reason: "workspace_color")
+        }
         let isSortRelated = containsAny(lower, sortKeywords + [
             "workspace", "first", "top", "bottom", "urgent", "urgency",
             "工作区", "放到", "移动", "置顶", "紧急"
@@ -2683,15 +3214,17 @@ struct SortAssistantIntentRouter: Sendable {
         if containsAny(lower, ["undo", "revert", "撤销", "恢复刚才", "还原"]) {
             intent = .undoSort
         } else if containsAny(lower, ["forget", "delete memory", "忘记", "别记", "删除记忆"]) {
-            intent = isSortRelated ? .forgetPreference : .forgetSpriteMemory
+            intent = .forgetPreference
         } else if containsAny(lower, ["remember", "from now on", "以后", "记住", "下次", "以后都"]) {
-            intent = isSortRelated ? .rememberPreference : .rememberSpriteMemory
+            intent = .rememberPreference
         } else if !isSortRelated && containsAny(lower, contextKeywords) {
             intent = .askContext
         } else if isSortRelated && containsAny(lower, ["why", "explain", "为什么", "解释"]) {
             intent = .explainCurrentOrder
         } else if containsAny(lower, ["feedback", "i moved", "我拖", "我移动", "刚才拖"]) {
             intent = .manualReorderFeedback
+        } else if externalGoal {
+            intent = .applySort
         } else if isSortRelated && containsAny(lower, ["apply", "sort it", "directly", "直接", "排好", "执行"]) {
             intent = .applySort
         } else if isSortRelated && containsAny(lower, ["suggest", "proposal", "preview", "recommend", "建议", "怎么排", "如何排", "先看看"]) {
@@ -2701,7 +3234,38 @@ struct SortAssistantIntentRouter: Sendable {
         } else {
             intent = .normalChat
         }
-        return SortAssistantIntentDecision(intent: intent, confidence: 0.2, reason: "fallback")
+        return SortAssistantIntentDecision(
+            intent: intent,
+            confidence: 0.2,
+            reason: "fallback",
+            isFallback: true
+        )
+    }
+
+    private static func isWorkspaceColorRequest(_ text: String) -> Bool {
+        let lower = normalizedIntentText(text)
+        let compact = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard containsAny(compact, workspaceColorSubjectKeywords) else { return false }
+        if containsAny(lower, workspaceColorMutationKeywords) {
+            return true
+        }
+        if containsAny(lower, workspaceColorReadKeywords) {
+            return true
+        }
+        return compact.contains("#")
+    }
+
+    private static func isWorkspaceSortPermissionGrant(_ text: String) -> Bool {
+        let lower = normalizedIntentText(text)
+        let compact = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let mentionsSortApply = compact.contains("sort_apply") || compact.contains("sort.apply")
+        let mentionsWorkspaceSorting = containsAny(lower, sortKeywords + [
+            "workspace", "workspaces", "complete the sort", "workspace sorting",
+            "工作区", "排序"
+        ])
+        guard mentionsSortApply || mentionsWorkspaceSorting else { return false }
+        guard !containsAny(lower, sortPermissionDenyKeywords) else { return false }
+        return containsAny(lower, sortPermissionGrantKeywords)
     }
 
     private static func classifyWithClaudeCode(
@@ -2741,7 +3305,7 @@ struct SortAssistantIntentRouter: Sendable {
         """
         You are the semantic intent router for cmux's workspace sidebar sort assistant.
         Return only one strict JSON object with this schema:
-        {"intent":"ask_context|clear_session|explain_current_order|propose_sort|apply_sort|manual_reorder_feedback|remember_preference|forget_preference|remember_sprite_memory|forget_sprite_memory|undo_sort|normal_chat","confidence":0.0,"reason":"short"}
+        {"intent":"ask_context|clear_session|explain_current_order|propose_sort|apply_sort|manual_reorder_feedback|remember_preference|forget_preference|remember_sprite_memory|forget_sprite_memory|undo_sort|workspace_color|normal_chat","sortRoute":"default|color_group|null","confidence":0.0,"reason":"short"}
 
         Intent meanings:
         - ask_context: the user asks what list/context/signals you can see, including GitHub, ghpr, PR, CI, review, Jira, Git, branch, submodule, current directory, or repository context.
@@ -2755,6 +3319,7 @@ struct SortAssistantIntentRouter: Sendable {
         - remember_sprite_memory: the user asks you to remember a project/session fact in the workspace memory.md, not a sorting preference.
         - forget_sprite_memory: the user asks you to forget/delete a project/session fact from workspace memory.md, not a sorting preference.
         - undo_sort: the user asks to undo/revert the assistant's previous sort.
+        - workspace_color: the user asks to read, set, change, clear, reset, or remove a workspace/sidebar/tab color.
         - normal_chat: greetings, identity questions, help/meta questions, or anything not about workspace sorting/memory/order.
 
         Important routing rules:
@@ -2766,8 +3331,13 @@ struct SortAssistantIntentRouter: Sendable {
         - If the input is not about sorting the workspace sidebar, classify normal_chat.
         - If it is about organizing workspaces but does not request mutation, prefer propose_sort.
         - If it explicitly asks to apply/do/execute the reorder, classify apply_sort.
+        - If externalGoal is true and the input is a sort/order request, classify apply_sort unless it is clearly asking only for a preview/explanation.
+        - For propose_sort/apply_sort, set sortRoute to color_group when the requested sort criterion is workspace/sidebar/tab color or custom color. Short sort-command arguments such as "by color" mean sorting workspaces by color.
+        - For all other intents and non-color sort criteria, set sortRoute to null or default.
+        - Plain remember/forget requests in this sort assistant should default to remember_preference/forget_preference.
         - Remember/forget requests about workspace sorting/sidebar order are remember_preference/forget_preference.
-        - Remember/forget requests about project facts, current task context, user instructions, or general session memory are remember_sprite_memory/forget_sprite_memory.
+        - Use remember_sprite_memory/forget_sprite_memory only when the user explicitly asks for sprite/workspace memory.md/project/session memory rather than a sorting preference.
+        - Workspace/sidebar/tab color requests are workspace_color, not normal_chat and not a sorting request.
         """
     }
 
@@ -2883,11 +3453,30 @@ struct SortAssistantIntentRouter: Sendable {
         }
         let confidence = doubleValue(object["confidence"]) ?? 0
         let reason = object["reason"] as? String
+        let parsedSortRoute = sortRouteValue(
+            object["sortRoute"] ?? object["sort_route"] ?? object["route"] ?? object["sort_path"]
+        )
+        let sortRoute = (intent == .proposeSort || intent == .applySort) ? parsedSortRoute : nil
         return SortAssistantIntentDecision(
             intent: intent,
             confidence: min(max(confidence, 0), 1),
-            reason: reason
+            reason: reason,
+            sortRoute: sortRoute
         )
+    }
+
+    private static func sortRouteValue(_ value: Any?) -> SortAssistantSortRoute? {
+        guard let raw = value as? String else { return nil }
+        let normalized = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .replacingOccurrences(of: "-", with: "_")
+        switch normalized {
+        case "color_group", "group_by_color", "color", "colors", "colour", "colours":
+            return .colorGroup
+        default:
+            return nil
+        }
     }
 
     private static func firstJSONObject(in content: String) -> String? {
@@ -2948,80 +3537,104 @@ struct SortAssistantActionRouter {
         "github_pr_context",
         "ghpr_context",
         "ghpr_status",
+        "workspace_color_get",
         "workspace_digest_get",
         "workspace_digest_progress",
+    ]
+    private static let workspaceColorTools = [
+        "workspace_color_get",
+        "workspace_color_set",
+        "workspace_color_clear",
+        "list_state",
     ]
 
     private static func withContextReadTools(_ tools: [String]) -> [String] {
         tools + contextReadTools
     }
 
-    func route(for intent: SortAssistantIntent) -> SortAssistantActionRoute {
+    func route(
+        for intent: SortAssistantIntent,
+        explicitSlashCommand: Bool = false
+    ) -> SortAssistantActionRoute {
+        let route: SortAssistantActionRoute
         switch intent {
         case .askContext, .clearSession, .explainCurrentOrder, .normalChat:
-            return SortAssistantActionRoute(
+            route = SortAssistantActionRoute(
                 mode: .readOnly,
                 needsConfirmation: false,
                 allowedTools: Self.withContextReadTools(["memory_query", "sort_context", "sort_explain", "list_state"]),
                 memoryWritePolicy: .none
             )
         case .proposeSort:
-            return SortAssistantActionRoute(
+            route = SortAssistantActionRoute(
                 mode: .previewOnly,
                 needsConfirmation: true,
                 allowedTools: Self.withContextReadTools(["memory_query", "sort_context", "sort_preview", "sort_explain", "list_state"]),
                 memoryWritePolicy: .eventLog
             )
         case .applySort:
-            return SortAssistantActionRoute(
+            route = SortAssistantActionRoute(
                 mode: .applyAllowed,
                 needsConfirmation: false,
                 allowedTools: Self.withContextReadTools(["memory_query", "sort_context", "sort_preview", "sort_apply", "sort_undo", "list_state"]),
                 memoryWritePolicy: .eventLog
             )
         case .manualReorderFeedback:
-            return SortAssistantActionRoute(
+            route = SortAssistantActionRoute(
                 mode: .readOnly,
                 needsConfirmation: false,
                 allowedTools: Self.withContextReadTools(["memory_write_candidate", "memory_query"]),
                 memoryWritePolicy: .candidate
             )
         case .rememberPreference:
-            return SortAssistantActionRoute(
+            route = SortAssistantActionRoute(
                 mode: .readOnly,
                 needsConfirmation: true,
                 allowedTools: Self.withContextReadTools(["memory_write_candidate", "memory_query"]),
                 memoryWritePolicy: .candidate
             )
         case .forgetPreference:
-            return SortAssistantActionRoute(
+            route = SortAssistantActionRoute(
                 mode: .readOnly,
                 needsConfirmation: true,
                 allowedTools: ["memory_forget", "memory_query"],
                 memoryWritePolicy: .longTerm
             )
         case .rememberSpriteMemory:
-            return SortAssistantActionRoute(
+            route = SortAssistantActionRoute(
                 mode: .readOnly,
                 needsConfirmation: false,
                 allowedTools: Self.withContextReadTools(["sprite_memory_write", "sprite_memory_query"]),
                 memoryWritePolicy: .longTerm
             )
         case .forgetSpriteMemory:
-            return SortAssistantActionRoute(
+            route = SortAssistantActionRoute(
                 mode: .readOnly,
                 needsConfirmation: true,
                 allowedTools: ["sprite_memory_forget", "sprite_memory_query"],
                 memoryWritePolicy: .longTerm
             )
         case .undoSort:
-            return SortAssistantActionRoute(
+            route = SortAssistantActionRoute(
                 mode: .applyAllowed,
                 needsConfirmation: false,
                 allowedTools: ["sort_undo", "list_state"],
                 memoryWritePolicy: .eventLog
             )
+        case .workspaceColor:
+            route = SortAssistantActionRoute(
+                mode: .applyAllowed,
+                needsConfirmation: false,
+                allowedTools: Self.workspaceColorTools,
+                memoryWritePolicy: .none
+            )
         }
+
+        guard explicitSlashCommand,
+              intent == .proposeSort || intent == .applySort else {
+            return route
+        }
+        return route.bypassingPreOperationConfirmation()
     }
 }
 
@@ -3119,16 +3732,56 @@ struct SortAssistantMCPRunResult: Sendable {
             ?? string(object["body"])
             ?? string(object["description"])
         let options = choiceOptions(object["options"] ?? object["choices"])
-        guard let title, !options.isEmpty else { return nil }
+        let questions = choiceQuestions(object["questions"] ?? object["steps"])
+        guard !questions.isEmpty || (title != nil && !options.isEmpty) else { return nil }
         let followUpIntent = string(object["intent"] ?? object["followUpIntent"] ?? object["follow_up_intent"])
             .flatMap(SortAssistantIntent.init(rawValue:))
         let forceApply = bool(object["forceApply"] ?? object["force_apply"]) ?? false
         return SortAssistantChoicePrompt(
-            title: title,
+            title: title ?? String(localized: "sortAssistant.choice.title", defaultValue: "Choose details"),
             message: message,
-            options: options,
+            options: options.isEmpty ? (questions.first?.options ?? []) : options,
+            questions: questions.isEmpty ? nil : questions,
             followUpIntent: followUpIntent,
             forceApply: forceApply
+        )
+    }
+
+    private static func choiceQuestions(_ value: Any?) -> [SortAssistantChoicePrompt.Question] {
+        let parsed: [SortAssistantChoicePrompt.Question]
+        if let list = value as? [[String: Any]] {
+            parsed = list.enumerated().compactMap { index, object in
+                choiceQuestion(object, fallbackIndex: index)
+            }
+        } else if let list = value as? [Any] {
+            parsed = list.enumerated().compactMap { index, value in
+                guard let object = value as? [String: Any] else { return nil }
+                return choiceQuestion(object, fallbackIndex: index)
+            }
+        } else {
+            parsed = []
+        }
+
+        var seen: Set<String> = []
+        return parsed.filter { question in
+            seen.insert(question.id).inserted
+        }
+    }
+
+    private static func choiceQuestion(
+        _ object: [String: Any],
+        fallbackIndex: Int
+    ) -> SortAssistantChoicePrompt.Question? {
+        guard let title = string(object["title"] ?? object["question"] ?? object["label"]) else {
+            return nil
+        }
+        let options = choiceOptions(object["options"] ?? object["choices"])
+        guard !options.isEmpty else { return nil }
+        return SortAssistantChoicePrompt.Question(
+            id: string(object["id"]) ?? optionId(title, fallbackIndex: fallbackIndex),
+            title: title,
+            message: string(object["message"] ?? object["body"] ?? object["description"]),
+            options: options
         )
     }
 
@@ -3333,6 +3986,7 @@ struct SortAssistantMCPRequest: Sendable {
     let intent: SortAssistantIntent
     let route: SortAssistantActionRoute
     let conversationContext: [String]
+    let explicitSlashCommand: Bool
     let workspaceId: String?
     let workspaceDirectory: String?
     let socketPath: String
@@ -3363,7 +4017,23 @@ struct SortAssistantMCPClientProcessError: LocalizedError, Sendable {
     }
 }
 
+struct SortAssistantMCPClientTimeoutError: LocalizedError, Sendable {
+    let timeoutSeconds: TimeInterval
+
+    var errorDescription: String? {
+        String(
+            format: String(
+                localized: "sortAssistant.mcp.timedOut",
+                defaultValue: "Sprite MCP request timed out after %d seconds."
+            ),
+            Int(timeoutSeconds.rounded())
+        )
+    }
+}
+
 struct SortAssistantMCPClient: Sendable {
+    private static let runTimeoutSeconds: TimeInterval = 60
+
     func run(_ request: SortAssistantMCPRequest) async throws -> SortAssistantMCPRunResult {
         try await Task.detached(priority: .userInitiated) {
             try Self.perform(request)
@@ -3381,7 +4051,8 @@ struct SortAssistantMCPClient: Sendable {
 
         let output = try runClaudeCode(
             executable: executable,
-            arguments: claudeArguments(request: request, mcpConfigURL: configURL)
+            arguments: claudeArguments(request: request, mcpConfigURL: configURL),
+            timeoutSeconds: runTimeoutSeconds
         )
         guard output.status == 0 else {
             throw SortAssistantMCPClientProcessError(
@@ -3414,8 +4085,8 @@ struct SortAssistantMCPClient: Sendable {
 
     private static var systemPrompt: String {
         """
-        You are the super-agent brain for cmux's sprite workspace sort assistant.
-        You must use the provided cmux_sprite MCP tools for workspace sorting, memory, list state, preview, apply, undo, explanations, and contextual data. Do not claim you changed sorting unless a tool result confirms it.
+        You are the super-agent brain for cmux's sprite workspace assistant.
+        You must use the provided cmux_sprite MCP tools for workspace sorting, workspace colors, memory, list state, preview, apply, undo, explanations, and contextual data. Do not claim you changed sorting or workspace colors unless a tool result confirms it.
 
         Return only one strict JSON object:
         {
@@ -3423,6 +4094,21 @@ struct SortAssistantMCPClient: Sendable {
           "choicePrompt": {
             "title": "short question title",
             "message": "optional context sentence",
+            "questions": [
+              {
+                "id": "stable_question_id",
+                "title": "short question title",
+                "message": "optional context sentence",
+                "options": [
+                  {
+                    "id": "stable_snake_case_id",
+                    "title": "short option title",
+                    "subtitle": "one-line option description",
+                    "goal": "complete follow-up instruction fragment for this choice"
+                  }
+                ]
+              }
+            ],
             "options": [
               {
                 "id": "stable_snake_case_id",
@@ -3444,6 +4130,7 @@ struct SortAssistantMCPClient: Sendable {
         }
         Use null for choicePrompt when no choice should be shown.
         Use null for card when no result card should be shown.
+        Use choicePrompt.questions when more than one uncertainty must be resolved. Use choicePrompt.options only for a single question.
 
         Behavior:
         - Keep two memory domains separate:
@@ -3452,20 +4139,28 @@ struct SortAssistantMCPClient: Sendable {
         - Use memory_query before relying on prior sorting preferences.
         - Use sprite_memory_query before relying on general project/session memory.
         - Use context_collect for plugin-contributed context, repository_context for the current local Git repository, ghpr_context or github_pr_context for linked pull-request details, github_context for cached sidebar GitHub metadata, and workspace_digest_get for digest context.
+        - For workspace_color, call workspace_color_get for read requests, workspace_color_set for set/change requests, and workspace_color_clear for clear/reset/remove requests. Use the active workspace unless the user specified another workspace.
         - If the user asks about the current repository, current directory, Git, branch, remotes, GitHub, ghpr, PRs, CI, reviews, Jira, or asks to sort by urgency/priority signals that may come from PRs, gather the relevant MCP context before answering or sorting.
         - For ask_context about repositories or GitHub, call repository_context and github_context first. Do not answer with a generic self-description.
         - Context tools may return null or empty data when integrations are disabled or no PR is linked; report that briefly instead of inventing context.
         - Never tell the user that sprite sort assistant tools are unavailable. The cmux_sprite MCP tools in this session are the available tools. If one tool returns empty/error data, use the other available tool outputs and explain the limitation concretely.
-        - If a sort request is ambiguous and requires the user to pick an interpretation, return choicePrompt instead of a prose bullet-list question. For example, "urgent" can mean unfinished local work, linked PR review/CI activity, or current workspace urgency signals. Each option must include a complete follow-up goal; do not ask the user to type a free-form reply for those common choices.
+        - Clarification budget: at most one user interaction before previewing or applying. If a request is ambiguous, ask every necessary uncertainty in one choicePrompt. Do not ask prose clarification questions.
+        - If multiple uncertainties exist, return one choicePrompt with multiple questions. The UI will let the user choose each answer and submit once.
+        - If a sort request is ambiguous and requires the user to pick an interpretation, return choicePrompt instead of a prose bullet-list question. For example, "urgent" can mean unfinished local work, linked PR review/CI activity, or current workspace urgency signals. Each option must include a complete follow-up goal or instruction fragment; do not ask the user to type a free-form reply for those common choices.
+        - For "group by color", call list_state immediately before computing the order and use item custom_color/customColor from that latest result. Do not ask whether to fetch colors. sort_preview and sort_apply must receive explicit itemIds derived from the latest list_state; never omit itemIds for color grouping. If the user did not specify all details, ask one multi-question choicePrompt covering color order and uncolored placement. If the user named a color order such as "olive first", apply or preview with that order and place unspecified colors after it while preserving relative order.
         - For propose_sort, call memory_query, sort_context, then sort_preview. Return a preview card only if sort_preview succeeds.
         - For apply_sort, call memory_query, sort_context, sort_preview, then sort_apply. Return an applied card only if sort_apply succeeds.
+        - If explicitSlashCommand is true, or route.needsConfirmation is false, treat the user as having already confirmed that command. Do not return a confirmation-only choicePrompt before sort_preview or sort_apply. Proceed with the allowed tools; use choicePrompt only when missing sort details are required to compute a concrete order.
+        - Never ask the user to grant sort_apply or workspace sorting write permission. If route.allowedTools includes sort_apply, use it. If it does not, return a preview card with an apply action instead of asking for permission.
+        - A submitted choicePrompt is the user's confirmation for that sort run. When route.mode is apply_allowed, handle follow-up choices by calling sort_preview and sort_apply instead of asking for another confirmation. When route.mode is preview_only, return a preview card.
         - For explain_current_order or ask_context, call sort_context and/or sort_explain/list_state and return a concise explanation.
         - For normal_chat, answer conversationally using recentConversation and current context when relevant. If the user asks a follow-up about a repository, directory, branch, submodule, GitHub, PR, CI, Jira, or prior context answer, gather context tools instead of returning a generic capability statement.
-        - For remember_preference or manual_reorder_feedback, call memory_write_candidate and tell the user to review it before it is saved as a free-sort memory.
+        - For remember_preference or manual_reorder_feedback, call memory_query first, compare the proposed memory with existing free-sort memories, and polish it into a concise sorting preference. If it duplicates or conflicts with an existing memory, return one choicePrompt that lets the user choose how to proceed. Otherwise call memory_write_candidate with the polished text and a sourceSummary describing any related existing memories, then tell the user to review it before it is saved as a free-sort memory.
         - For forget_preference, call memory_forget only when the user supplied an id or concrete text to forget; otherwise explain what is saved from memory_query.
         - For remember_sprite_memory, call sprite_memory_write and report the saved memory.md path from the tool result. The sprite decides what to save; do not ask the user to confirm a candidate first.
         - For forget_sprite_memory, call sprite_memory_forget only when the user supplied an id or concrete text to forget; otherwise explain what is saved from sprite_memory_query.
         - For undo_sort, call sort_undo and report the tool result.
+        - For workspace_color, report the confirmed color value from the tool result. If the color is null, say no custom workspace color is set.
         - Never invent patch ids, workspace ids, changes, or memory ids.
         - Include result card actions only when the tool result supports the action.
         """
@@ -3478,6 +4173,7 @@ struct SortAssistantMCPClient: Sendable {
             "workspaceId": request.workspaceId.map { $0 as Any } ?? NSNull(),
             "workspaceDirectory": request.workspaceDirectory.map { $0 as Any } ?? NSNull(),
             "recentConversation": request.conversationContext,
+            "explicitSlashCommand": request.explicitSlashCommand,
             "route": [
                 "mode": request.route.mode.rawValue,
                 "needsConfirmation": request.route.needsConfirmation,
@@ -3551,9 +4247,27 @@ struct SortAssistantMCPClient: Sendable {
         let status: Int32
     }
 
+    private final class ProcessTimeoutFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+
+        func markTimedOut() {
+            lock.lock()
+            value = true
+            lock.unlock()
+        }
+
+        var didTimeOut: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
     private static func runClaudeCode(
         executable: String,
-        arguments: [String]
+        arguments: [String],
+        timeoutSeconds: TimeInterval
     ) throws -> ProcessOutput {
         let process = Process()
         if executable.contains("/") {
@@ -3573,7 +4287,30 @@ struct SortAssistantMCPClient: Sendable {
         } catch {
             throw error
         }
+        let timeoutFlag = ProcessTimeoutFlag()
+        let timeout = DispatchWorkItem {
+            if process.isRunning {
+                timeoutFlag.markTimedOut()
+                process.terminate()
+                let pid = process.processIdentifier
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                    if process.isRunning {
+                        kill(pid, SIGKILL)
+                    }
+                }
+            }
+        }
+        DispatchQueue.global(qos: .utility).asyncAfter(
+            deadline: .now() + timeoutSeconds,
+            execute: timeout
+        )
         process.waitUntilExit()
+        timeout.cancel()
+        if timeoutFlag.didTimeOut {
+            stdout.fileHandleForReading.closeFile()
+            stderr.fileHandleForReading.closeFile()
+            throw SortAssistantMCPClientTimeoutError(timeoutSeconds: timeoutSeconds)
+        }
         return ProcessOutput(
             stdout: String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
             stderr: String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
@@ -4653,12 +5390,25 @@ final class SortAssistantCoordinator: ObservableObject {
             if latestResult == nil {
                 latestResultAnchorMessageId = nil
             }
+            invalidateFloatingLayout(reason: "latestResult")
         }
     }
     @Published private(set) var latestResultAnchorMessageId: UUID?
-    @Published private(set) var choicePrompt: SortAssistantChoicePrompt?
-    @Published private(set) var dimensionQuestion: SortAssistantDimensionQuestion?
-    @Published private(set) var memoryCandidate: SortAssistantMemoryCandidate?
+    @Published private(set) var choicePromptSelections: [String: SortAssistantChoicePrompt.Option] = [:]
+    @Published private(set) var choicePrompt: SortAssistantChoicePrompt? {
+        didSet {
+            if choicePrompt?.id != oldValue?.id {
+                choicePromptSelections = [:]
+            }
+            invalidateFloatingLayout(reason: "choicePrompt")
+        }
+    }
+    @Published private(set) var dimensionQuestion: SortAssistantDimensionQuestion? {
+        didSet { invalidateFloatingLayout(reason: "dimensionQuestion") }
+    }
+    @Published private(set) var memoryCandidate: SortAssistantMemoryCandidate? {
+        didSet { invalidateFloatingLayout(reason: "memoryCandidate") }
+    }
     @Published private(set) var memories: [SortAssistantMemory] = []
     @Published private(set) var spriteMemories: [SortAssistantMemory] = []
     @Published private(set) var isSorting = false
@@ -4666,6 +5416,7 @@ final class SortAssistantCoordinator: ObservableObject {
     @Published private(set) var presentationToggleSequence = 0
     @Published private(set) var externalGoalSequence = 0
     @Published private(set) var entryFocusSequence = 0
+    @Published private(set) var floatingLayoutRevision = 0
 
     private static let workstreamId = "cmux-sort-assistant"
     private static let memoryToolName = "cmux.sort_memory"
@@ -4685,10 +5436,42 @@ final class SortAssistantCoordinator: ObservableObject {
     private var pendingIntentRequestId: UUID?
     private weak var lastTabManager: TabManager?
     private weak var lastWorkspaceTabStore: WorkspaceTabStore?
+    // Workspace-color binding for the sprite assistant's recovery handle.
+    // Published so SwiftUI can re-render the colored marker when the active
+    // workspace's customColor changes (or when the selected workspace itself
+    // changes). `lastResolvedColorHex` dedupes the published value because
+    // `TabManager.objectWillChange` fires very frequently — without dedupe every
+    // tab edit would invalidate the floating panel's SwiftUI tree.
+    @Published private(set) var spriteColor: NSColor?
+    private var spriteColorCancellables: Set<AnyCancellable> = []
+    private var lastResolvedColorHex: String?
+    // True when the floating sprite panel can no longer fit its natural rect
+    // inside the visible screen frame and has been clamped by
+    // `manualDragScreenRect` to keep just the recovery hotspot visible. The
+    // floating SwiftUI content reads this to swap the full avatar for the
+    // window-edge mini-sprite. Driven by `SortAssistantFloatingPanelHostView`
+    // after each layout pass; deduped so we don't republish on no-op layouts.
+    @Published private(set) var isPanelEdgeRecovery: Bool = false
     private var currentSpriteMemoryDirectory: String?
     private var currentSpriteMemoryFileURL: URL?
     private var spriteMemorySources: [UUID: SpriteMemorySource] = [:]
+    private var pendingCreatedMemories: [UUID: SortAssistantMemory] = [:]
+    private var pendingDeletedMemoryIds: Set<UUID> = []
     private var sessionGeneration = UUID()
+#if DEBUG
+    private struct SpriteGeometryDebugSnapshot {
+        var source: String
+        var frame: NSRect
+        var avatarSprite: NSRect
+        var avatarHotspot: NSRect
+        var recoveryHotspot: NSRect
+        var visibleFrames: [NSRect]
+        var isAvatarSpriteVisibleOnScreen: Bool
+        var edgeRecovery: Bool
+    }
+
+    private var latestSpriteGeometryDebugSnapshot: SpriteGeometryDebugSnapshot?
+#endif
 
     private init() {
         let eventLog = SortAssistantSortEventLog(fileURL: memoryFileURL)
@@ -4733,6 +5516,15 @@ final class SortAssistantCoordinator: ObservableObject {
         return .idle
     }
 
+    private func prepareEntryMessageIfNeeded() {
+        if messages.isEmpty {
+            append(.init(
+                kind: .assistant,
+                text: String(localized: "sortAssistant.entry.ready", defaultValue: "Tell me how to sort the workspace sidebar.")
+            ))
+        }
+    }
+
     func attach(
         tabManager: TabManager,
         workspaceTabStore: WorkspaceTabStore
@@ -4761,13 +5553,14 @@ final class SortAssistantCoordinator: ObservableObject {
     }
 
     func activateEntry() {
-        if messages.isEmpty {
-            append(.init(
-                kind: .assistant,
-                text: String(localized: "sortAssistant.entry.ready", defaultValue: "Tell me how to sort the workspace sidebar.")
-            ))
-        }
+        prepareEntryMessageIfNeeded()
         togglePresentation()
+        entryFocusSequence += 1
+    }
+
+    func openEntry() {
+        prepareEntryMessageIfNeeded()
+        requestPresentation()
         entryFocusSequence += 1
     }
 
@@ -4825,6 +5618,11 @@ final class SortAssistantCoordinator: ObservableObject {
     ) {
         let trimmed = normalized(text)
         guard !trimmed.isEmpty else { return }
+#if DEBUG
+        debugLogSpriteGeometrySnapshot(
+            "conversation.beforeSubmit externalGoal=\(externalGoal) forceApply=\(forceApply)"
+        )
+#endif
         choicePrompt = nil
         rememberStores(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
         let workspaceMention = Self.workspaceMentionResolution(in: trimmed, tabManager: tabManager)
@@ -4894,7 +5692,9 @@ final class SortAssistantCoordinator: ObservableObject {
                 tabManager: tabManager,
                 workspaceTabStore: workspaceTabStore,
                 forceApply: forceApply,
-                workspaceTarget: workspaceTarget
+                workspaceTarget: workspaceTarget,
+                sortRoute: decision.sortRoute,
+                allowKeywordSortRouteFallback: decision.isFallback
             )
         }
     }
@@ -5115,13 +5915,14 @@ final class SortAssistantCoordinator: ObservableObject {
                 )
                 return
             }
-            handleSubmitIntent(
+            resolveSortRouteThenSubmit(
                 .proposeSort,
                 trimmed: goal,
                 tabManager: tabManager,
                 workspaceTabStore: workspaceTabStore,
                 forceApply: false,
-                workspaceTarget: workspaceTarget
+                workspaceTarget: workspaceTarget,
+                explicitSlashCommand: true
             )
         case .applySort(let goal):
             append(.init(kind: .user, text: originalText))
@@ -5135,23 +5936,39 @@ final class SortAssistantCoordinator: ObservableObject {
                 )
                 return
             }
-            handleSubmitIntent(
+            resolveSortRouteThenSubmit(
                 .applySort,
                 trimmed: goal,
                 tabManager: tabManager,
                 workspaceTabStore: workspaceTabStore,
                 forceApply: true,
-                workspaceTarget: workspaceTarget
+                workspaceTarget: workspaceTarget,
+                explicitSlashCommand: true
             )
-        case .listMemories:
+        case .listSortMemories:
             append(.init(kind: .user, text: originalText))
             startMCPAssistant(
-                goal: String(localized: "sortAssistant.slash.memory.goal", defaultValue: "List saved free-sort memories and sprite workspace memories."),
+                goal: String(localized: "sortAssistant.slash.memory.goal", defaultValue: "List saved free-sort memories."),
                 intent: .normalChat,
                 route: SortAssistantActionRoute(
                     mode: .readOnly,
                     needsConfirmation: false,
-                    allowedTools: ["memory_query", "sprite_memory_query"],
+                    allowedTools: ["memory_query"],
+                    memoryWritePolicy: .none
+                ),
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore,
+                workspaceTarget: workspaceTarget
+            )
+        case .listSpriteMemories:
+            append(.init(kind: .user, text: originalText))
+            startMCPAssistant(
+                goal: String(localized: "sortAssistant.slash.memorySprite.goal", defaultValue: "List saved sprite workspace memories."),
+                intent: .normalChat,
+                route: SortAssistantActionRoute(
+                    mode: .readOnly,
+                    needsConfirmation: false,
+                    allowedTools: ["sprite_memory_query"],
                     memoryWritePolicy: .none
                 ),
                 tabManager: tabManager,
@@ -5160,7 +5977,7 @@ final class SortAssistantCoordinator: ObservableObject {
             )
         case .rememberSpriteMemory(let text):
             guard !text.isEmpty else {
-                appendSlashUsage(originalText: originalText, usage: "/remember <memory>")
+                appendSlashUsage(originalText: originalText, usage: "/remember-sprite <memory>")
                 return
             }
             append(.init(kind: .user, text: originalText))
@@ -5174,7 +5991,7 @@ final class SortAssistantCoordinator: ObservableObject {
             )
         case .forgetSpriteMemory(let text):
             guard !text.isEmpty else {
-                appendSlashUsage(originalText: originalText, usage: "/forget <memory-id-or-text>")
+                appendSlashUsage(originalText: originalText, usage: "/forget-sprite <memory-id-or-text>")
                 return
             }
             append(.init(kind: .user, text: originalText))
@@ -5188,7 +6005,7 @@ final class SortAssistantCoordinator: ObservableObject {
             )
         case .rememberFreeSortMemory(let text):
             guard !text.isEmpty else {
-                appendSlashUsage(originalText: originalText, usage: "/remember-sort <sorting preference>")
+                appendSlashUsage(originalText: originalText, usage: "/remember <sorting preference>")
                 return
             }
             append(.init(kind: .user, text: originalText))
@@ -5202,7 +6019,7 @@ final class SortAssistantCoordinator: ObservableObject {
             )
         case .forgetFreeSortMemory(let text):
             guard !text.isEmpty else {
-                appendSlashUsage(originalText: originalText, usage: "/forget-sort <memory-id-or-text>")
+                appendSlashUsage(originalText: originalText, usage: "/forget <memory-id-or-text>")
                 return
             }
             append(.init(kind: .user, text: originalText))
@@ -5284,6 +6101,59 @@ final class SortAssistantCoordinator: ObservableObject {
                 )
             ))
         }
+    }
+
+    private func resolveSortRouteThenSubmit(
+        _ intent: SortAssistantIntent,
+        trimmed goal: String,
+        tabManager: TabManager,
+        workspaceTabStore: WorkspaceTabStore,
+        forceApply: Bool,
+        workspaceTarget: SortAssistantWorkspaceTarget?,
+        explicitSlashCommand: Bool = false
+    ) {
+        let requestId = UUID()
+        pendingIntentRequestId = requestId
+        let conversationContext = semanticConversationContext(workspaceTarget: workspaceTarget)
+        let routingText = Self.semanticSortRoutingText(goal: goal, intent: intent)
+        let fallbackRoute: SortAssistantSortRoute? = Self.isColorGroupGoal(routingText) ? .colorGroup : nil
+        append(.init(
+            kind: .progress,
+            text: String(localized: "sortAssistant.intent.running", defaultValue: "Understanding the request...")
+        ))
+
+        Task { [weak self, weak tabManager, weak workspaceTabStore] in
+            let decision = await SortAssistantIntentRouter().semanticIntent(
+                for: routingText,
+                externalGoal: false,
+                conversationContext: conversationContext
+            )
+            guard let self else { return }
+            guard self.pendingIntentRequestId == requestId else { return }
+            self.pendingIntentRequestId = nil
+            guard let tabManager, let workspaceTabStore else { return }
+            self.handleSubmitIntent(
+                intent,
+                trimmed: goal,
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore,
+                forceApply: forceApply,
+                workspaceTarget: workspaceTarget,
+                sortRoute: decision.sortRoute ?? (decision.isFallback ? fallbackRoute : nil),
+                allowKeywordSortRouteFallback: decision.isFallback,
+                explicitSlashCommand: explicitSlashCommand
+            )
+        }
+    }
+
+    private static func semanticSortRoutingText(
+        goal: String,
+        intent: SortAssistantIntent
+    ) -> String {
+        let action = intent == .applySort ? "Apply a workspace sort" : "Preview a workspace sort"
+        let trimmed = goal.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return action }
+        return "\(action): \(trimmed)"
     }
 
     private func appendSlashUsage(originalText: String, usage: String) {
@@ -5503,13 +6373,487 @@ final class SortAssistantCoordinator: ObservableObject {
         )
     }
 
+    private enum ColorGroupUncoloredPlacement {
+        case first
+        case last
+    }
+
+    private struct ColorGroupSortRequest {
+        let colorOrder: [String]
+        let uncoloredPlacement: ColorGroupUncoloredPlacement
+        let hasResolvedUncoloredPlacement: Bool
+    }
+
+    private func handleColorGroupSortIfNeeded(
+        goal: String,
+        mode: SortAssistantRunMode,
+        tabManager: TabManager,
+        workspaceTabStore: WorkspaceTabStore,
+        sortRoute: SortAssistantSortRoute? = nil,
+        explicitSlashCommand: Bool = false
+    ) -> Bool {
+        let isSemanticColorGroup = sortRoute == .colorGroup
+        guard isSemanticColorGroup || Self.isColorGroupGoal(goal) else { return false }
+        reloadFreeSortMemories(reason: "colorGroup")
+        guard let request = Self.colorGroupSortRequest(
+            from: goal,
+            tabs: tabManager.tabs,
+            memories: memories,
+            allowSemanticColorGroup: isSemanticColorGroup
+        ) else {
+            return false
+        }
+#if DEBUG
+        let debugColorOrder = request.colorOrder.joined(separator: ",")
+        cmuxDebugLog(
+            "sprite.memory colorGroup resolved colorOrder=\(debugColorOrder) uncolored=\(String(describing: request.uncoloredPlacement)) hasColorOrder=\(!request.colorOrder.isEmpty) hasUncolored=\(request.hasResolvedUncoloredPlacement) memoryCount=\(memories.count)"
+        )
+#endif
+        guard !Self.observedWorkspaceColors(tabManager.tabs).isEmpty else {
+            append(.init(
+                kind: .error,
+                text: String(localized: "sortAssistant.colorGroup.noColors", defaultValue: "No workspace colors are available to group.")
+            ))
+            return true
+        }
+
+        let prompt = Self.colorGroupChoicePrompt(
+            request: request,
+            goal: goal,
+            mode: mode,
+            tabs: tabManager.tabs,
+            explicitSlashCommand: explicitSlashCommand
+        )
+        if let prompt {
+            latestResult = nil
+            pendingPreviewPatch = nil
+            pendingPreviewSort = nil
+            append(.init(
+                kind: .assistant,
+                text: String(
+                    localized: "sortAssistant.choice.colorOrder.prompt",
+                    defaultValue: "Group by color - choose the missing details."
+                )
+            ))
+            choicePrompt = prompt
+            return true
+        }
+
+        runColorGroupSortCommand(
+            request,
+            goal: goal,
+            mode: mode,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+        return true
+    }
+
+    private func runColorGroupSortCommand(
+        _ request: ColorGroupSortRequest,
+        goal: String,
+        mode: SortAssistantRunMode,
+        tabManager: TabManager,
+        workspaceTabStore: WorkspaceTabStore
+    ) {
+        guard !isSorting else {
+            append(.init(
+                kind: .assistant,
+                text: String(localized: "sortAssistant.sort.busy", defaultValue: "A workspace sort is already running.")
+            ))
+            return
+        }
+
+        rememberStores(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+        let orderedIds = Self.colorGroupedWorkspaceOrder(request: request, tabs: tabManager.tabs)
+        guard !orderedIds.isEmpty else {
+            append(.init(
+                kind: .error,
+                text: String(localized: "sortAssistant.colorGroup.noColors", defaultValue: "No workspace colors are available to group.")
+            ))
+            return
+        }
+
+        let label = String(localized: "sortAssistant.dimension.color", defaultValue: "Color")
+        let patch = sortOperator.makeBatchPatch(
+            orderedIds: orderedIds,
+            tabs: tabManager.tabs,
+            rationale: Self.colorGroupRationale(request),
+            confidence: nil,
+            requiresConfirmation: mode == .preview
+        )
+        let itemSignals = contextProvider.itemSignals(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+
+        do {
+            switch mode {
+            case .preview:
+                let preview = try sortOperator.preview(
+                    patch: patch,
+                    tabs: tabManager.tabs,
+                    itemSignals: itemSignals
+                )
+                pendingPreviewPatch = patch
+                pendingPreviewSort = .native
+                let result = SortAssistantSortResult(
+                    title: String(localized: "sortAssistant.preview.title", defaultValue: "Preview sorted by \(label)"),
+                    goal: goal,
+                    dimensionLabel: label,
+                    changes: preview.changes,
+                    rationale: preview.rationale,
+                    patchId: patch.id,
+                    mode: .preview,
+                    canUndo: false,
+                    canApply: true,
+                    canApplyPartially: true,
+                    canIgnore: true,
+                    actions: Self.allowedResultActions(for: .preview)
+                )
+                let anchorMessageId = append(.init(
+                    kind: .assistant,
+                    text: String(localized: "sortAssistant.preview.ready", defaultValue: "I prepared a sort preview.")
+                ))
+                setLatestResult(result, anchorMessageId: anchorMessageId)
+            case .apply:
+                let applied = try sortOperator.apply(
+                    patch: patch,
+                    tabManager: tabManager,
+                    itemSignals: itemSignals,
+                    actor: "sort_assistant_color_group"
+                )
+                pendingPreviewPatch = nil
+                pendingPreviewSort = nil
+                workspaceTabStore.setSort(.native)
+                let result = SortAssistantSortResult(
+                    title: String(localized: "sortAssistant.result.title", defaultValue: "Sorted by \(label)"),
+                    goal: goal,
+                    dimensionLabel: label,
+                    changes: applied.preview.changes,
+                    rationale: applied.preview.rationale,
+                    patchId: patch.id,
+                    mode: .applied,
+                    canUndo: true,
+                    canApply: false,
+                    canApplyPartially: false,
+                    canIgnore: false,
+                    actions: Self.allowedResultActions(for: .apply)
+                )
+                let anchorMessageId = append(.init(
+                    kind: .assistant,
+                    text: String(localized: "sortAssistant.sort.done", defaultValue: "Applied the workspace sort.")
+                ))
+                setLatestResult(result, anchorMessageId: anchorMessageId)
+            }
+        } catch {
+            pendingPreviewPatch = nil
+            pendingPreviewSort = nil
+            append(.init(
+                kind: .error,
+                text: String(localized: "sortAssistant.sort.failed", defaultValue: "Sort failed: ") + Self.displayMessage(for: error)
+            ))
+        }
+    }
+
+    private static func colorGroupSortRequest(
+        from goal: String,
+        tabs: [Workspace],
+        memories: [SortAssistantMemory] = [],
+        allowSemanticColorGroup: Bool = false
+    ) -> ColorGroupSortRequest? {
+        guard !tabs.isEmpty else { return nil }
+        guard allowSemanticColorGroup || isColorGroupGoal(goal) else { return nil }
+        let explicitColorOrder = mentionedColorOrder(in: goal)
+        let explicitUncoloredPlacement = mentionedUncoloredPlacement(in: goal)
+        let memoryDefaults = colorGroupMemoryDefaults(memories: memories, tabs: tabs)
+        let colorOrder = explicitColorOrder.isEmpty ? memoryDefaults.colorOrder : explicitColorOrder
+        let uncoloredPlacement = explicitUncoloredPlacement ?? memoryDefaults.uncoloredPlacement
+        return ColorGroupSortRequest(
+            colorOrder: colorOrder,
+            uncoloredPlacement: uncoloredPlacement ?? .last,
+            hasResolvedUncoloredPlacement: uncoloredPlacement != nil
+        )
+    }
+
+    private static func colorGroupMemoryDefaults(
+        memories: [SortAssistantMemory],
+        tabs: [Workspace]
+    ) -> (colorOrder: [String], uncoloredPlacement: ColorGroupUncoloredPlacement?) {
+        let observedColors = Set(observedWorkspaceColors(tabs))
+        var colorOrder: [String] = []
+        var uncoloredPlacement: ColorGroupUncoloredPlacement?
+
+        for memory in memories where isColorGroupGoal(memory.text) {
+            if colorOrder.isEmpty {
+                colorOrder = mentionedColorOrder(in: memory.text)
+                    .filter { observedColors.contains($0) }
+            }
+            if uncoloredPlacement == nil {
+                uncoloredPlacement = mentionedUncoloredPlacement(in: memory.text)
+            }
+            if !colorOrder.isEmpty, uncoloredPlacement != nil {
+                break
+            }
+        }
+
+        return (colorOrder, uncoloredPlacement)
+    }
+
+    private static func isColorGroupGoal(_ goal: String) -> Bool {
+        let normalized = normalizedColorCommandText(goal)
+        let mentionsColor = normalized.contains(" color ")
+            || normalized.contains(" colour ")
+            || normalized.contains(" 颜色 ")
+            || normalized.contains(" 顏色 ")
+        guard mentionsColor else { return false }
+        return colorCommandTextContainsAny(normalized, [
+            " group ", " grouped ", " cluster ", " sort ", " order ", " arrange ", " reorder ",
+            " 分组 ", " 分組 ", " 归类 ", " 歸類 ", " 排序 ", " 重排 ", " 按 "
+        ])
+    }
+
+    private static func mentionedColorOrder(in goal: String) -> [String] {
+        var matches: [(offset: Int, hex: String)] = []
+        let nsGoal = goal as NSString
+        if let regex = try? NSRegularExpression(pattern: "#?[0-9A-Fa-f]{6}") {
+            let range = NSRange(location: 0, length: nsGoal.length)
+            for match in regex.matches(in: goal, options: [], range: range) {
+                let raw = nsGoal.substring(with: match.range)
+                if let hex = WorkspaceTabColorSettings.normalizedHex(raw) {
+                    matches.append((match.range.location, hex))
+                }
+            }
+        }
+
+        let normalizedGoal = normalizedColorCommandText(goal)
+        let normalizedNSString = normalizedGoal as NSString
+        for entry in WorkspaceTabColorSettings.palette() {
+            let token = normalizedColorCommandText(entry.name)
+            let search = token
+            let range = normalizedNSString.range(of: search)
+            guard range.location != NSNotFound,
+                  let hex = WorkspaceTabColorSettings.normalizedHex(entry.hex) else {
+                continue
+            }
+            matches.append((range.location, hex))
+        }
+
+        var seen: Set<String> = []
+        return matches
+            .sorted { lhs, rhs in lhs.offset < rhs.offset }
+            .map(\.hex)
+            .filter { seen.insert($0).inserted }
+    }
+
+    private static func mentionedUncoloredPlacement(in goal: String) -> ColorGroupUncoloredPlacement? {
+        let normalized = normalizedColorCommandText(goal)
+        let uncoloredTokens = [
+            " uncolored ", " uncoloured ", " no color ", " no colour ", " without color ", " without colour ",
+            " unset color ", " no custom color ", " 无颜色 ", " 無顏色 ", " 没有颜色 ", " 沒有顏色 ", " 未设置颜色 ", " 未設定顏色 "
+        ]
+        guard colorCommandTextContainsAny(normalized, uncoloredTokens) else {
+            return nil
+        }
+        if colorCommandTextContainsAny(normalized, [" first ", " top ", " before ", " above ", " 第一 ", " 顶部 ", " 頂部 ", " 前面 "]) {
+            return .first
+        }
+        if colorCommandTextContainsAny(normalized, [" last ", " bottom ", " after ", " below ", " end ", " 最后 ", " 最後 ", " 底部 ", " 后面 ", " 後面 "]) {
+            return .last
+        }
+        return nil
+    }
+
+    private static func colorGroupChoicePrompt(
+        request: ColorGroupSortRequest,
+        goal: String,
+        mode: SortAssistantRunMode,
+        tabs: [Workspace],
+        explicitSlashCommand: Bool = false
+    ) -> SortAssistantChoicePrompt? {
+        let observedColors = observedWorkspaceColors(tabs)
+        let hasUncolored = tabs.contains { normalizedWorkspaceColor($0.customColor) == nil }
+        let baseGoal = colorGroupFollowUpGoal(request: request)
+        var questions: [SortAssistantChoicePrompt.Question] = []
+
+        if observedColors.count > 1, request.colorOrder.isEmpty {
+            questions.append(SortAssistantChoicePrompt.Question(
+                id: "color_order",
+                title: String(localized: "sortAssistant.choice.colorOrder.title", defaultValue: "Which color should come first?"),
+                message: String(localized: "sortAssistant.choice.colorOrder.message", defaultValue: "Remaining colors keep their current relative order."),
+                options: observedColors.enumerated().map { index, hex in
+                    let label = colorDisplayName(hex)
+                    return SortAssistantChoicePrompt.Option(
+                        id: "color-\(index + 1)-first",
+                        title: String(
+                            format: String(localized: "sortAssistant.choice.colorFirst.title", defaultValue: "%@ first"),
+                            label
+                        ),
+                        subtitle: String(
+                            format: String(localized: "sortAssistant.choice.colorFirst.subtitle", defaultValue: "%@ workspaces at the top."),
+                            label
+                        ),
+                        goal: "Group by color with \(label) (\(hex)) first. Keep remaining color groups after it in their current relative order. \(uncoloredPlacementGoal(request.uncoloredPlacement))"
+                    )
+                }
+            ))
+        }
+
+        if hasUncolored, !request.hasResolvedUncoloredPlacement {
+            questions.append(SortAssistantChoicePrompt.Question(
+                id: "uncolored_placement",
+                title: String(localized: "sortAssistant.choice.uncolored.title", defaultValue: "Where should uncolored workspaces go?"),
+                message: nil,
+                options: [
+                    SortAssistantChoicePrompt.Option(
+                        id: "uncolored_last",
+                        title: String(localized: "sortAssistant.choice.uncolored.last.title", defaultValue: "Uncolored last"),
+                        subtitle: String(localized: "sortAssistant.choice.uncolored.last.subtitle", defaultValue: "Colored groups stay above uncolored workspaces."),
+                        goal: "\(baseGoal) Place uncolored workspaces last."
+                    ),
+                    SortAssistantChoicePrompt.Option(
+                        id: "uncolored_first",
+                        title: String(localized: "sortAssistant.choice.uncolored.first.title", defaultValue: "Uncolored first"),
+                        subtitle: String(localized: "sortAssistant.choice.uncolored.first.subtitle", defaultValue: "Uncolored workspaces stay above colored groups."),
+                        goal: "\(baseGoal) Place uncolored workspaces first."
+                    ),
+                ]
+            ))
+        }
+
+        guard !questions.isEmpty else { return nil }
+        return SortAssistantChoicePrompt(
+            title: String(localized: "sortAssistant.choice.colorDetails.title", defaultValue: "Sort by color"),
+            message: colorGroupPromptMessage(colors: observedColors, hasUncolored: hasUncolored),
+            options: questions.first?.options ?? [],
+            questions: questions,
+            followUpIntent: mode == .apply ? .applySort : .proposeSort,
+            forceApply: mode == .apply,
+            explicitSlashCommand: explicitSlashCommand
+        )
+    }
+
+    private static func colorGroupFollowUpGoal(request: ColorGroupSortRequest) -> String {
+        if let firstColor = request.colorOrder.first {
+            let label = colorDisplayName(firstColor)
+            return "Group by color with \(label) (\(firstColor)) first. Keep remaining color groups after it in their current relative order."
+        }
+        return "Group by color using the current relative color order."
+    }
+
+    private static func uncoloredPlacementGoal(_ placement: ColorGroupUncoloredPlacement) -> String {
+        switch placement {
+        case .first:
+            return "Place uncolored workspaces first."
+        case .last:
+            return "Place uncolored workspaces last."
+        }
+    }
+
+    private static func colorGroupPromptMessage(colors: [String], hasUncolored: Bool) -> String {
+        var labels = colors.map(colorDisplayName)
+        if hasUncolored {
+            labels.append(String(localized: "sortAssistant.colorGroup.uncolored", defaultValue: "Uncolored"))
+        }
+        let summary = labels.isEmpty
+            ? String(localized: "sortAssistant.colorGroup.noColorSummary", defaultValue: "No color groups found.")
+            : labels.joined(separator: ", ")
+        return String(
+            format: String(localized: "sortAssistant.choice.colorDetails.message", defaultValue: "Current groups: %@."),
+            summary
+        )
+    }
+
+    private static func colorGroupedWorkspaceOrder(
+        request: ColorGroupSortRequest,
+        tabs: [Workspace]
+    ) -> [UUID] {
+        guard !tabs.isEmpty else { return [] }
+        let observedColors = observedWorkspaceColors(tabs)
+        let hasUncolored = tabs.contains { normalizedWorkspaceColor($0.customColor) == nil }
+
+        var groupOrder: [String?] = []
+        if request.uncoloredPlacement == .first, hasUncolored {
+            groupOrder.append(nil)
+        }
+
+        var seenColors: Set<String> = []
+        for color in request.colorOrder where observedColors.contains(color) && seenColors.insert(color).inserted {
+            groupOrder.append(color)
+        }
+        for color in observedColors where seenColors.insert(color).inserted {
+            groupOrder.append(color)
+        }
+
+        if request.uncoloredPlacement == .last, hasUncolored {
+            groupOrder.append(nil)
+        }
+
+        let rankByKey = Dictionary(uniqueKeysWithValues: groupOrder.enumerated().map { index, color in
+            (colorGroupKey(color), index)
+        })
+        let fallbackRank = groupOrder.count
+        return tabs.enumerated()
+            .sorted { lhs, rhs in
+                let lhsRank = rankByKey[colorGroupKey(normalizedWorkspaceColor(lhs.element.customColor))] ?? fallbackRank
+                let rhsRank = rankByKey[colorGroupKey(normalizedWorkspaceColor(rhs.element.customColor))] ?? fallbackRank
+                if lhsRank != rhsRank { return lhsRank < rhsRank }
+                return lhs.offset < rhs.offset
+            }
+            .map { $0.element.id }
+    }
+
+    private static func observedWorkspaceColors(_ tabs: [Workspace]) -> [String] {
+        var seen: Set<String> = []
+        return tabs.compactMap { normalizedWorkspaceColor($0.customColor) }
+            .filter { seen.insert($0).inserted }
+    }
+
+    private static func normalizedWorkspaceColor(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        return WorkspaceTabColorSettings.normalizedHex(raw)
+    }
+
+    private static func colorGroupKey(_ color: String?) -> String {
+        color ?? "__cmux_uncolored__"
+    }
+
+    private static func colorDisplayName(_ hex: String) -> String {
+        let normalizedHex = WorkspaceTabColorSettings.normalizedHex(hex) ?? hex
+        if let entry = WorkspaceTabColorSettings.palette().first(where: {
+            WorkspaceTabColorSettings.normalizedHex($0.hex) == normalizedHex
+        }) {
+            return entry.name
+        }
+        return normalizedHex
+    }
+
+    private static func colorGroupRationale(_ request: ColorGroupSortRequest) -> String {
+        let colorLabels = request.colorOrder.map(colorDisplayName)
+        let colorText = colorLabels.isEmpty
+            ? String(localized: "sortAssistant.colorGroup.currentOrder", defaultValue: "current color order")
+            : colorLabels.joined(separator: ", ")
+        let uncoloredText: String
+        switch request.uncoloredPlacement {
+        case .first:
+            uncoloredText = String(localized: "sortAssistant.colorGroup.uncoloredFirst", defaultValue: "uncolored first")
+        case .last:
+            uncoloredText = String(localized: "sortAssistant.colorGroup.uncoloredLast", defaultValue: "uncolored last")
+        }
+        return String(
+            format: String(localized: "sortAssistant.colorGroup.rationale", defaultValue: "Group workspaces by color using %@, with %@."),
+            colorText,
+            uncoloredText
+        )
+    }
+
     private func handleSubmitIntent(
         _ intent: SortAssistantIntent,
         trimmed: String,
         tabManager: TabManager,
         workspaceTabStore: WorkspaceTabStore,
         forceApply: Bool,
-        workspaceTarget: SortAssistantWorkspaceTarget? = nil
+        workspaceTarget: SortAssistantWorkspaceTarget? = nil,
+        sortRoute: SortAssistantSortRoute? = nil,
+        allowKeywordSortRouteFallback: Bool = true,
+        explicitSlashCommand: Bool = false
     ) {
         if intent == .clearSession {
             clearCurrentSession()
@@ -5517,7 +6861,35 @@ final class SortAssistantCoordinator: ObservableObject {
             return
         }
 
-        var route = actionRouter.route(for: intent)
+        if intent == .workspaceColor {
+            handleWorkspaceColorIntent(
+                goal: trimmed,
+                tabManager: tabManager,
+                workspaceTarget: workspaceTarget
+            )
+            return
+        }
+
+        if intent == .applySort || intent == .proposeSort {
+            let mode: SortAssistantRunMode = (forceApply || intent == .applySort) ? .apply : .preview
+            let shouldTryColorGroup = sortRoute == .colorGroup
+                || (allowKeywordSortRouteFallback && Self.isColorGroupGoal(trimmed))
+            if shouldTryColorGroup, handleColorGroupSortIfNeeded(
+                goal: trimmed,
+                mode: mode,
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore,
+                sortRoute: sortRoute,
+                explicitSlashCommand: explicitSlashCommand
+            ) {
+                return
+            }
+        }
+
+        var route = actionRouter.route(
+            for: intent,
+            explicitSlashCommand: explicitSlashCommand
+        )
         if forceApply, intent == .applySort {
             route = SortAssistantActionRoute(
                 mode: .applyAllowed,
@@ -5533,7 +6905,157 @@ final class SortAssistantCoordinator: ObservableObject {
             route: route,
             tabManager: tabManager,
             workspaceTabStore: workspaceTabStore,
-            workspaceTarget: workspaceTarget
+            workspaceTarget: workspaceTarget,
+            explicitSlashCommand: explicitSlashCommand
+        )
+    }
+
+    private enum WorkspaceColorOperation {
+        case get
+        case set(String)
+        case clear
+        case missingColor
+    }
+
+    private func handleWorkspaceColorIntent(
+        goal: String,
+        tabManager: TabManager,
+        workspaceTarget: SortAssistantWorkspaceTarget?
+    ) {
+        choicePrompt = nil
+        pendingPreviewPatch = nil
+        pendingPreviewSort = nil
+        latestResult = nil
+
+        guard let workspaceId = workspaceTarget?.id ?? tabManager.selectedTabId,
+              let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) else {
+            append(.init(
+                kind: .error,
+                text: String(localized: "sortAssistant.workspaceColor.workspaceMissing", defaultValue: "No workspace is selected.")
+            ))
+            return
+        }
+
+        switch Self.workspaceColorOperation(from: goal) {
+        case .get:
+            if let color = workspace.customColor {
+                append(.init(
+                    kind: .assistant,
+                    text: String(
+                        format: String(
+                            localized: "sortAssistant.workspaceColor.current",
+                            defaultValue: "Current workspace color is %@."
+                        ),
+                        color
+                    )
+                ))
+            } else {
+                append(.init(
+                    kind: .assistant,
+                    text: String(
+                        localized: "sortAssistant.workspaceColor.none",
+                        defaultValue: "No custom workspace color is set."
+                    )
+                ))
+            }
+
+        case .set(let rawColor):
+            guard let hex = WorkspaceTabColorSettings.resolvedColorHex(rawColor) else {
+                append(.init(
+                    kind: .error,
+                    text: Self.workspaceColorInvalidMessage()
+                ))
+                return
+            }
+            tabManager.setTabColor(tabId: workspace.id, color: hex)
+            append(.init(
+                kind: .assistant,
+                text: String(
+                    format: String(
+                        localized: "sortAssistant.workspaceColor.set",
+                        defaultValue: "Set workspace color to %@."
+                    ),
+                    hex
+                )
+            ))
+
+        case .clear:
+            tabManager.setTabColor(tabId: workspace.id, color: nil)
+            append(.init(
+                kind: .assistant,
+                text: String(
+                    localized: "sortAssistant.workspaceColor.cleared",
+                    defaultValue: "Cleared the workspace color."
+                )
+            ))
+
+        case .missingColor:
+            append(.init(
+                kind: .error,
+                text: String(
+                    localized: "sortAssistant.workspaceColor.missingColor",
+                    defaultValue: "Tell me a workspace color name or a #RRGGBB value."
+                )
+            ))
+        }
+    }
+
+    private static func workspaceColorOperation(from goal: String) -> WorkspaceColorOperation {
+        let normalized = normalizedColorCommandText(goal)
+        if colorCommandTextContainsAny(normalized, [" clear ", " remove ", " reset ", " no color ", " no colour ", " 清除 ", " 移除 ", " 重置 "]) {
+            return .clear
+        }
+        if let candidate = workspaceColorCandidate(from: goal) {
+            return .set(candidate)
+        }
+        if colorCommandTextContainsAny(normalized, [" set ", " change ", " make ", " paint ", " assign ", " apply ", " 设 ", " 设置 ", " 改 ", " 更改 ", " 换成 "]) {
+            return .missingColor
+        }
+        return .get
+    }
+
+    private static func colorCommandTextContainsAny(_ text: String, _ needles: [String]) -> Bool {
+        needles.contains { text.contains($0) }
+    }
+
+    private static func workspaceColorCandidate(from goal: String) -> String? {
+        if let hexRange = goal.range(
+            of: "#?[0-9A-Fa-f]{6}",
+            options: .regularExpression
+        ) {
+            return String(goal[hexRange])
+        }
+
+        let normalizedGoal = normalizedColorCommandText(goal)
+        let palette = WorkspaceTabColorSettings.palette()
+            .sorted { lhs, rhs in lhs.name.count > rhs.name.count }
+        for entry in palette {
+            let normalizedName = normalizedColorCommandText(entry.name)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedName.isEmpty else { continue }
+            if normalizedGoal.contains(" \(normalizedName) ") {
+                return entry.name
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedColorCommandText(_ text: String) -> String {
+        var lower = text.lowercased()
+        for separator in [".", ",", "?", "!", ":", ";", "/", "\\", "-", "_", "(", ")", "[", "]", "{", "}", "\n", "\t", "\"", "'"] {
+            lower = lower.replacingOccurrences(of: separator, with: " ")
+        }
+        return " " + lower.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ") + " "
+    }
+
+    private static func workspaceColorInvalidMessage() -> String {
+        let names = WorkspaceTabColorSettings.palette().map(\.name).joined(separator: ", ")
+        return String(
+            format: String(
+                localized: "sortAssistant.workspaceColor.invalid",
+                defaultValue: "Invalid workspace color. Use #RRGGBB or one of: %@."
+            ),
+            names
         )
     }
 
@@ -5543,7 +7065,8 @@ final class SortAssistantCoordinator: ObservableObject {
         route: SortAssistantActionRoute,
         tabManager: TabManager,
         workspaceTabStore: WorkspaceTabStore,
-        workspaceTarget: SortAssistantWorkspaceTarget? = nil
+        workspaceTarget: SortAssistantWorkspaceTarget? = nil,
+        explicitSlashCommand: Bool = false
     ) {
         guard !isSorting else {
             append(.init(
@@ -5557,6 +7080,12 @@ final class SortAssistantCoordinator: ObservableObject {
         choicePrompt = nil
         isSorting = true
         let conversationContext = semanticConversationContext(workspaceTarget: workspaceTarget)
+#if DEBUG
+        let debugRequestId = UUID()
+        debugLogSpriteGeometrySnapshot(
+            "conversation.mcp.before requestId=\(debugRequestId.uuidString) intent=\(intent)"
+        )
+#endif
         append(.init(
             kind: .progress,
             text: String(localized: "sortAssistant.mcp.running", defaultValue: "Calling sprite MCP tools...")
@@ -5567,6 +7096,7 @@ final class SortAssistantCoordinator: ObservableObject {
             intent: intent,
             route: route,
             conversationContext: conversationContext,
+            explicitSlashCommand: explicitSlashCommand,
             workspaceId: workspaceTarget?.id.uuidString ?? tabManager.selectedTabId?.uuidString,
             workspaceDirectory: workspaceTarget?.directory ?? Self.workspaceDirectoryForMCP(tabManager: tabManager),
             socketPath: SocketControlSettings.socketPath(),
@@ -5579,6 +7109,11 @@ final class SortAssistantCoordinator: ObservableObject {
                 let result = try await self.mcpClient.run(request)
                 guard self.sessionGeneration == generation else { return }
                 self.isSorting = false
+#if DEBUG
+                self.debugLogSpriteGeometrySnapshot(
+                    "conversation.mcp.afterRun requestId=\(debugRequestId.uuidString) result=success intent=\(intent)"
+                )
+#endif
                 guard let tabManager, let workspaceTabStore else { return }
                 self.handleMCPRunResult(
                     result,
@@ -5587,11 +7122,17 @@ final class SortAssistantCoordinator: ObservableObject {
                     route: route,
                     tabManager: tabManager,
                     workspaceTabStore: workspaceTabStore,
-                    workspaceTarget: workspaceTarget
+                    workspaceTarget: workspaceTarget,
+                    explicitSlashCommand: explicitSlashCommand
                 )
             } catch {
                 guard self.sessionGeneration == generation else { return }
                 self.isSorting = false
+#if DEBUG
+                self.debugLogSpriteGeometrySnapshot(
+                    "conversation.mcp.afterRun requestId=\(debugRequestId.uuidString) result=failure intent=\(intent)"
+                )
+#endif
                 self.append(.init(
                     kind: .error,
                     text: String(localized: "sortAssistant.mcp.failed", defaultValue: "Sprite MCP request failed: ") + Self.displayMessage(for: error)
@@ -5607,7 +7148,8 @@ final class SortAssistantCoordinator: ObservableObject {
         route: SortAssistantActionRoute,
         tabManager: TabManager,
         workspaceTabStore: WorkspaceTabStore,
-        workspaceTarget: SortAssistantWorkspaceTarget?
+        workspaceTarget: SortAssistantWorkspaceTarget?,
+        explicitSlashCommand: Bool
     ) {
         let result = localFallbackResult(
             replacingUnavailableToolMessageIfNeeded: result,
@@ -5641,7 +7183,8 @@ final class SortAssistantCoordinator: ObservableObject {
             choicePrompt = inferredChoicePrompt.preparedForFollowUp(
                 intent: intent,
                 forceApply: route.mode == .applyAllowed && !route.needsConfirmation,
-                workspaceTarget: workspaceTarget
+                workspaceTarget: workspaceTarget,
+                explicitSlashCommand: explicitSlashCommand
             )
             return
         }
@@ -6007,11 +7550,10 @@ final class SortAssistantCoordinator: ObservableObject {
         tabManager: TabManager,
         workspaceTabStore: WorkspaceTabStore
     ) {
-        let mode = dimensionQuestion?.mode ?? .apply
         dimensionQuestion = nil
         rememberStores(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
         workspaceTabStore.setSort(.dimension(id: dimensionId))
-        let intent: SortAssistantIntent = mode == .apply ? .applySort : .proposeSort
+        let intent: SortAssistantIntent = .applySort
         startMCPAssistant(
             goal: goal,
             intent: intent,
@@ -6029,19 +7571,93 @@ final class SortAssistantCoordinator: ObservableObject {
         guard let prompt = choicePrompt else { return }
         choicePrompt = nil
         append(.init(kind: .user, text: option.title))
-        let intent = prompt.followUpIntent ?? .proposeSort
+        let forceApply = Self.choicePromptShouldApply(prompt)
+        let intent: SortAssistantIntent = forceApply ? .applySort : (prompt.followUpIntent ?? .proposeSort)
         handleSubmitIntent(
             intent,
             trimmed: option.goal,
             tabManager: tabManager,
             workspaceTabStore: workspaceTabStore,
-            forceApply: prompt.forceApply,
-            workspaceTarget: prompt.workspaceTarget
+            forceApply: forceApply,
+            workspaceTarget: prompt.workspaceTarget,
+            explicitSlashCommand: prompt.explicitSlashCommand
         )
+    }
+
+    func selectChoicePromptOption(
+        _ option: SortAssistantChoicePrompt.Option,
+        questionId: String
+    ) {
+        guard let prompt = choicePrompt,
+              prompt.questions.contains(where: { question in
+                  question.id == questionId && question.options.contains(where: { $0.id == option.id })
+              }) else {
+            return
+        }
+        choicePromptSelections[questionId] = option
+    }
+
+    func isChoicePromptReady(_ prompt: SortAssistantChoicePrompt) -> Bool {
+        prompt.questions.allSatisfy { question in
+            choicePromptSelections[question.id] != nil
+        }
+    }
+
+    func submitChoicePromptSelections(
+        tabManager: TabManager,
+        workspaceTabStore: WorkspaceTabStore
+    ) {
+        guard let prompt = choicePrompt,
+              isChoicePromptReady(prompt) else {
+            return
+        }
+
+        let selections = prompt.questions.compactMap { question -> (SortAssistantChoicePrompt.Question, SortAssistantChoicePrompt.Option)? in
+            guard let option = choicePromptSelections[question.id] else { return nil }
+            return (question, option)
+        }
+        choicePrompt = nil
+        choicePromptSelections = [:]
+        append(.init(
+            kind: .user,
+            text: selections
+                .map { "\($0.0.title): \($0.1.title)" }
+                .joined(separator: "\n")
+        ))
+
+        let combinedGoal = Self.combinedChoicePromptGoal(selections)
+        let forceApply = Self.choicePromptShouldApply(prompt)
+        let intent: SortAssistantIntent = forceApply ? .applySort : (prompt.followUpIntent ?? .proposeSort)
+        handleSubmitIntent(
+            intent,
+            trimmed: combinedGoal,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore,
+            forceApply: forceApply,
+            workspaceTarget: prompt.workspaceTarget,
+            explicitSlashCommand: prompt.explicitSlashCommand
+        )
+    }
+
+    private static func choicePromptShouldApply(_ prompt: SortAssistantChoicePrompt) -> Bool {
+        prompt.forceApply || prompt.followUpIntent == .applySort
+    }
+
+    private static func combinedChoicePromptGoal(
+        _ selections: [(SortAssistantChoicePrompt.Question, SortAssistantChoicePrompt.Option)]
+    ) -> String {
+        var lines = [
+            "Use these clarification choices together:",
+        ]
+        for (question, option) in selections {
+            lines.append("- \(question.title): \(option.title). \(option.goal)")
+        }
+        return lines.joined(separator: "\n")
     }
 
     func dismissChoicePrompt() {
         choicePrompt = nil
+        choicePromptSelections = [:]
     }
 
     func undo(tabManager: TabManager) {
@@ -6122,6 +7738,7 @@ final class SortAssistantCoordinator: ObservableObject {
             }
         }
 
+        pendingCreatedMemories[memory.id] = memory
         memories.insert(memory, at: 0)
         persistCreatedMemory(memory)
         memoryCandidate = nil
@@ -6140,12 +7757,23 @@ final class SortAssistantCoordinator: ObservableObject {
     }
 
     func deleteMemory(_ memory: SortAssistantMemory) {
+        pendingCreatedMemories.removeValue(forKey: memory.id)
+        pendingDeletedMemoryIds.insert(memory.id)
         memories.removeAll { $0.id == memory.id }
-        Task {
-            try? await SortAssistantWorkstreamPersistence.shared.rewriteDroppingToolResults(
-                toolName: Self.memoryToolName,
-                containing: memory.id.uuidString
-            )
+        Task { @MainActor [weak self] in
+            do {
+                try await SortAssistantWorkstreamPersistence.shared.rewriteDroppingToolResults(
+                    toolName: Self.memoryToolName,
+                    containing: memory.id.uuidString
+                )
+                self?.pendingDeletedMemoryIds.remove(memory.id)
+                self?.reloadFreeSortMemories(reason: "deleteMemory")
+            } catch {
+                self?.pendingDeletedMemoryIds.remove(memory.id)
+#if DEBUG
+                cmuxDebugLog("sprite.memory freeSort.deleteFailed id=\(memory.id.uuidString) error=\(Self.displayMessage(for: error))")
+#endif
+            }
         }
     }
 
@@ -6476,8 +8104,17 @@ final class SortAssistantCoordinator: ObservableObject {
                 isError: false
             )
         )
-        Task {
-            try? await SortAssistantWorkstreamPersistence.shared.append(item)
+        Task { @MainActor [weak self] in
+            do {
+                try await SortAssistantWorkstreamPersistence.shared.append(item)
+                self?.pendingCreatedMemories.removeValue(forKey: memory.id)
+                self?.reloadFreeSortMemories(reason: "persistCreatedMemory")
+            } catch {
+                self?.pendingCreatedMemories.removeValue(forKey: memory.id)
+#if DEBUG
+                cmuxDebugLog("sprite.memory freeSort.persistFailed id=\(memory.id.uuidString) error=\(Self.displayMessage(for: error))")
+#endif
+            }
         }
     }
 
@@ -6599,6 +8236,13 @@ final class SortAssistantCoordinator: ObservableObject {
 
     @discardableResult
     private func append(_ message: SortAssistantMessage) -> UUID {
+        let debugKind = String(describing: message.kind)
+#if DEBUG
+        let previousCount = messages.count
+        debugLogSpriteGeometrySnapshot(
+            "conversation.message.beforeAppend kind=\(debugKind) count=\(previousCount)"
+        )
+#endif
         messages.append(message)
         if messages.count > 40 {
             messages.removeFirst(messages.count - 40)
@@ -6607,11 +8251,43 @@ final class SortAssistantCoordinator: ObservableObject {
                 latestResultAnchorMessageId = messages.first?.id
             }
         }
+        invalidateFloatingLayout(reason: "message.\(debugKind)")
+#if DEBUG
+        let currentCount = messages.count
+        debugLogSpriteGeometrySnapshot(
+            "conversation.message.afterAppend kind=\(debugKind) count=\(currentCount)"
+        )
+        DispatchQueue.main.async { [weak self] in
+            self?.debugLogSpriteGeometrySnapshot(
+                "conversation.message.afterAppendLayout kind=\(debugKind) count=\(currentCount)"
+            )
+        }
+#endif
         return message.id
     }
 
-    private func reloadFreeSortMemories() {
-        memories = Self.loadLegacyMemories(from: memoryFileURL)
+    private func invalidateFloatingLayout(reason: String) {
+        floatingLayoutRevision += 1
+#if DEBUG
+        cmuxDebugLog("sprite.coordinator floatingLayoutRevision=\(floatingLayoutRevision) reason=\(reason)")
+#endif
+    }
+
+    private func reloadFreeSortMemories(reason: String = "unspecified") {
+        let loaded = Self.loadLegacyMemories(from: memoryFileURL)
+            .filter { !pendingDeletedMemoryIds.contains($0.id) }
+        let loadedIds = Set(loaded.map(\.id))
+        let pending = pendingCreatedMemories.values
+            .filter { !loadedIds.contains($0.id) && !pendingDeletedMemoryIds.contains($0.id) }
+        let next = (loaded + pending).sorted { $0.createdAt > $1.createdAt }
+        if next != memories {
+            memories = next
+        }
+#if DEBUG
+        cmuxDebugLog(
+            "sprite.memory freeSort.reload reason=\(reason) count=\(memories.count) pendingCreated=\(pendingCreatedMemories.count) pendingDeleted=\(pendingDeletedMemoryIds.count)"
+        )
+#endif
     }
 
     private func reloadSpriteMemories(directory: String?) {
@@ -6752,14 +8428,88 @@ final class SortAssistantCoordinator: ObservableObject {
     ) {
         lastTabManager = tabManager
         lastWorkspaceTabStore = workspaceTabStore
+        rebuildSpriteColorSubscription(for: tabManager)
         let directory = Self.workspaceDirectoryForMCP(tabManager: tabManager)
         if directory != currentSpriteMemoryDirectory {
             reloadSpriteMemories(directory: directory)
         }
     }
 
+    private func rebuildSpriteColorSubscription(for tabManager: TabManager) {
+        spriteColorCancellables.removeAll()
+        tabManager.$selectedTabId
+            .sink { [weak self] _ in self?.refreshSpriteColor() }
+            .store(in: &spriteColorCancellables)
+        // TabManager forwards each workspace's `$customColor` through its own
+        // `objectWillChange`, so subscribing to objectWillChange covers color
+        // edits on the active workspace too.
+        tabManager.objectWillChange
+            .sink { [weak self] _ in self?.refreshSpriteColor() }
+            .store(in: &spriteColorCancellables)
+        refreshSpriteColor()
+    }
+
+    func setPanelEdgeRecovery(_ active: Bool) {
+        guard isPanelEdgeRecovery != active else { return }
+#if DEBUG
+        cmuxDebugLog("sprite.coordinator isPanelEdgeRecovery: \(isPanelEdgeRecovery) → \(active)")
+#endif
+        isPanelEdgeRecovery = active
+    }
+
+#if DEBUG
+    func recordSpriteGeometryDebugSnapshot(
+        source: String,
+        frame: NSRect,
+        avatarSprite: NSRect,
+        avatarHotspot: NSRect,
+        recoveryHotspot: NSRect,
+        visibleFrames: [NSRect],
+        isAvatarSpriteVisibleOnScreen: Bool,
+        edgeRecovery: Bool
+    ) {
+        latestSpriteGeometryDebugSnapshot = SpriteGeometryDebugSnapshot(
+            source: source,
+            frame: frame,
+            avatarSprite: avatarSprite,
+            avatarHotspot: avatarHotspot,
+            recoveryHotspot: recoveryHotspot,
+            visibleFrames: visibleFrames,
+            isAvatarSpriteVisibleOnScreen: isAvatarSpriteVisibleOnScreen,
+            edgeRecovery: edgeRecovery
+        )
+    }
+
+    private func debugLogSpriteGeometrySnapshot(_ event: String) {
+        guard let snapshot = latestSpriteGeometryDebugSnapshot else {
+            cmuxDebugLog(
+                "sprite.conversation \(event) frame=nil edgeRecovery=\(isPanelEdgeRecovery)"
+            )
+            return
+        }
+        cmuxDebugLog(
+            "sprite.conversation \(event) source=\(snapshot.source) frame=\(snapshot.frame) avatarSprite=\(snapshot.avatarSprite) avatarHotspot=\(snapshot.avatarHotspot) recoveryHotspot=\(snapshot.recoveryHotspot) visibleFrames=\(SortAssistantVisibleScreenRange.debugDescription(for: snapshot.visibleFrames)) spriteVisibleOnScreen=\(snapshot.isAvatarSpriteVisibleOnScreen) edgeRecovery=\(snapshot.edgeRecovery) coordinatorEdgeRecovery=\(isPanelEdgeRecovery)"
+        )
+    }
+#endif
+
+    private func refreshSpriteColor() {
+        let hex = lastTabManager?.selectedTab?.customColor
+        guard hex != lastResolvedColorHex else { return }
+        lastResolvedColorHex = hex
+        guard let hex else {
+            spriteColor = nil
+            return
+        }
+        spriteColor = WorkspaceTabColorSettings.displayNSColor(
+            hex: hex,
+            colorScheme: .dark,
+            forceBright: true
+        )
+    }
+
     func socketMemoryQuery() -> [String: Any] {
-        reloadFreeSortMemories()
+        reloadFreeSortMemories(reason: "socket.memoryQuery")
         return [
             "domain": "free_sort",
             "memories": SortAssistantPayload.array(memories),
@@ -6778,7 +8528,7 @@ final class SortAssistantCoordinator: ObservableObject {
     }
 
     func socketForgetMemory(id: String?, text: String?) -> [String: Any] {
-        reloadFreeSortMemories()
+        reloadFreeSortMemories(reason: "socket.memoryForget")
         let before = memories.count
         if let id, let uuid = UUID(uuidString: id), let memory = memories.first(where: { $0.id == uuid }) {
             deleteMemory(memory)
@@ -6896,6 +8646,8 @@ final class SortAssistantCoordinator: ObservableObject {
                     "title": tab.title,
                     "pinned": tab.isPinned,
                     "locked": sortEngine.lockedItemIds().contains(tab.id),
+                    "customColor": tab.customColor ?? NSNull(),
+                    "custom_color": tab.customColor ?? NSNull(),
                 ] as [String: Any]
             },
         ]
@@ -6935,7 +8687,7 @@ final class SortAssistantCoordinator: ObservableObject {
               let workspaceTabStore = lastWorkspaceTabStore else {
             return nil
         }
-        reloadFreeSortMemories()
+        reloadFreeSortMemories(reason: "socket.sortContext")
         let context = contextProvider.context(
             userIntent: goal,
             tabManager: tabManager,

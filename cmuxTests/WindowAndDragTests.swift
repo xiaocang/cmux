@@ -16,6 +16,229 @@ import UserNotifications
 @testable import cmux
 #endif
 
+final class SortAssistantIntentRouterTests: XCTestCase {
+    func testSortApplyPermissionGrantRoutesToApplySortImmediately() {
+        let router = SortAssistantIntentRouter()
+
+        XCTAssertEqual(
+            router.immediateIntent(
+                for: "I need sort_apply permission to complete the sort. Please grant write access to workspace sorting."
+            ),
+            .applySort
+        )
+    }
+
+    func testSortApplyPermissionDenialDoesNotRouteToApplySortImmediately() {
+        let router = SortAssistantIntentRouter()
+
+        XCTAssertNil(
+            router.immediateIntent(
+                for: "Do not grant sort_apply permission for workspace sorting."
+            )
+        )
+    }
+
+    func testSortApplyPermissionQuestionDoesNotRouteToApplySortImmediately() {
+        let router = SortAssistantIntentRouter()
+
+        XCTAssertNil(
+            router.immediateIntent(
+                for: "Do I need sort_apply permission before changing workspace sorting?"
+            )
+        )
+    }
+
+    func testExplicitSlashSortBypassesPreOperationConfirmation() {
+        let router = SortAssistantActionRouter()
+
+        let route = router.route(
+            for: .proposeSort,
+            explicitSlashCommand: true
+        )
+
+        XCTAssertEqual(route.mode, .previewOnly)
+        XCTAssertFalse(route.needsConfirmation)
+        XCTAssertTrue(route.allowedTools.contains("sort_preview"))
+        XCTAssertFalse(route.allowedTools.contains("sort_apply"))
+    }
+
+    func testNaturalLanguageSortPreviewStillRequiresConfirmation() {
+        let router = SortAssistantActionRouter()
+
+        let route = router.route(for: .proposeSort)
+
+        XCTAssertEqual(route.mode, .previewOnly)
+        XCTAssertTrue(route.needsConfirmation)
+    }
+
+    func testRememberSlashDefaultsToSortMemoryCandidate() {
+        let command = SortAssistantSlashCommand.parse("/remember keep active PRs near the top")
+
+        XCTAssertEqual(
+            command?.operation,
+            .rememberFreeSortMemory("keep active PRs near the top")
+        )
+    }
+
+    func testSpriteMemoryUsesExplicitSpriteSlashCommand() {
+        let command = SortAssistantSlashCommand.parse("/remember-sprite this repo uses bun")
+
+        XCTAssertEqual(
+            command?.operation,
+            .rememberSpriteMemory("this repo uses bun")
+        )
+    }
+
+    func testMemorySlashDefaultsToSortMemoryList() {
+        XCTAssertEqual(
+            SortAssistantSlashCommand.parse("/memory")?.operation,
+            .listSortMemories
+        )
+        XCTAssertEqual(
+            SortAssistantSlashCommand.parse("/memory-sprite")?.operation,
+            .listSpriteMemories
+        )
+    }
+
+    func testRememberPreferenceRouteRequiresCandidateReview() {
+        let router = SortAssistantActionRouter()
+        let route = router.route(for: .rememberPreference)
+
+        XCTAssertTrue(route.needsConfirmation)
+        XCTAssertEqual(route.memoryWritePolicy, .candidate)
+        XCTAssertTrue(route.allowedTools.contains("memory_query"))
+        XCTAssertTrue(route.allowedTools.contains("memory_write_candidate"))
+        XCTAssertFalse(route.allowedTools.contains("sprite_memory_write"))
+    }
+}
+
+final class SortAssistantFloatingPanelScreenClampTests: XCTestCase {
+    func testAutomaticPlacementShrinksAndClampsToVisibleScreenInsets() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let requested = NSRect(x: -80, y: -120, width: 900, height: 700)
+
+        let resolved = SortAssistantFloatingPanelScreenClamp.resolvedRect(
+            requested,
+            visibleFrame: visibleFrame,
+            edgePadding: 12,
+            mode: .constrained
+        )
+
+        XCTAssertEqual(resolved.origin.x, 12, accuracy: 0.001)
+        XCTAssertEqual(resolved.origin.y, 12, accuracy: 0.001)
+        XCTAssertEqual(resolved.size.width, 776, accuracy: 0.001)
+        XCTAssertEqual(resolved.size.height, 576, accuracy: 0.001)
+        XCTAssertTrue(visibleFrame.insetBy(dx: 12, dy: 12).contains(resolved))
+    }
+
+    func testManualDragPlacementKeepsHotspotRecoverableWithoutResizing() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 800, height: 600)
+        let requested = NSRect(x: 760, y: -120, width: 420, height: 280)
+        let hotspot = SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot
+        let minVisible = SortAssistantFloatingPanelMetrics.minimumVisibleDragHotspotSize
+
+        let resolved = SortAssistantFloatingPanelScreenClamp.resolvedRect(
+            requested,
+            visibleFrame: visibleFrame,
+            edgePadding: 12,
+            mode: .manualDrag(
+                hotspot: hotspot,
+                minimumVisibleSize: minVisible
+            )
+        )
+
+        // Computed from the actual metrics so this test tracks the configured
+        // mini-sprite and drag-hotspot diameter instead of hardcoding it.
+        let expectedMaxOriginX = visibleFrame.maxX - minVisible.width - hotspot.minX
+        let expectedMinOriginY = visibleFrame.minY + minVisible.height - hotspot.maxY
+        XCTAssertEqual(resolved.origin.x, expectedMaxOriginX, accuracy: 0.001)
+        XCTAssertEqual(resolved.origin.y, expectedMinOriginY, accuracy: 0.001)
+        XCTAssertEqual(resolved.size.width, requested.size.width, accuracy: 0.001)
+        XCTAssertEqual(resolved.size.height, requested.size.height, accuracy: 0.001)
+
+        let visibleHotspot = SortAssistantFloatingPanelScreenClamp.hotspotRect(
+            in: resolved,
+            hotspot: hotspot
+        ).intersection(visibleFrame)
+        XCTAssertEqual(visibleHotspot.width, minVisible.width, accuracy: 0.001)
+        XCTAssertEqual(visibleHotspot.height, minVisible.height, accuracy: 0.001)
+    }
+
+    func testManualDragPlacementDoesNotMoveWhenHotspotRecoveryAreaIsVisible() {
+        // A rect comfortably inside the visible frame — recovery hotspot is
+        // fully on-screen, so the manualDrag clamp must be a no-op regardless
+        // of the configured `minimumVisibleDragHotspotSize`.
+        let requested = NSRect(x: 300, y: 200, width: 420, height: 280)
+
+        let resolved = SortAssistantFloatingPanelScreenClamp.resolvedRect(
+            requested,
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            edgePadding: 12,
+            mode: .manualDrag(
+                hotspot: SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot,
+                minimumVisibleSize: SortAssistantFloatingPanelMetrics.minimumVisibleDragHotspotSize
+            )
+        )
+
+        XCTAssertEqual(resolved.origin.x, requested.origin.x, accuracy: 0.001)
+        XCTAssertEqual(resolved.origin.y, requested.origin.y, accuracy: 0.001)
+        XCTAssertEqual(resolved.size.width, requested.size.width, accuracy: 0.001)
+        XCTAssertEqual(resolved.size.height, requested.size.height, accuracy: 0.001)
+    }
+
+    func testUnrestrictedModeLeavesRectUnchanged() {
+        let requested = NSRect(x: 920, y: -180, width: 420, height: 280)
+
+        let resolved = SortAssistantFloatingPanelScreenClamp.resolvedRect(
+            requested,
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            edgePadding: 12,
+            mode: .unrestricted
+        )
+
+        XCTAssertEqual(resolved.origin.x, requested.origin.x, accuracy: 0.001)
+        XCTAssertEqual(resolved.origin.y, requested.origin.y, accuracy: 0.001)
+        XCTAssertEqual(resolved.size.width, requested.size.width, accuracy: 0.001)
+        XCTAssertEqual(resolved.size.height, requested.size.height, accuracy: 0.001)
+    }
+}
+
+final class SortAssistantVisibleScreenRangeTests: XCTestCase {
+    func testPointVisibleWhenInsideAnyVisibleScreenFrame() {
+        let frames = [
+            NSRect(x: 0, y: 0, width: 800, height: 600),
+            NSRect(x: 800, y: 0, width: 800, height: 600),
+        ]
+
+        XCTAssertTrue(SortAssistantVisibleScreenRange.isVisible(CGPoint(x: 40, y: 40), visibleFrames: frames))
+        XCTAssertTrue(SortAssistantVisibleScreenRange.isVisible(CGPoint(x: 900, y: 40), visibleFrames: frames))
+        XCTAssertFalse(SortAssistantVisibleScreenRange.isVisible(CGPoint(x: -1, y: 40), visibleFrames: frames))
+    }
+
+    func testRectCanBeFullyVisibleAcrossAdjacentScreens() {
+        let frames = [
+            NSRect(x: 0, y: 0, width: 800, height: 600),
+            NSRect(x: 800, y: 0, width: 800, height: 600),
+        ]
+
+        XCTAssertTrue(SortAssistantVisibleScreenRange.isFullyVisible(
+            NSRect(x: 760, y: 40, width: 80, height: 80),
+            visibleFrames: frames
+        ))
+    }
+
+    func testRectNotFullyVisibleWhenAnyPartLeavesAllScreens() {
+        let frames = [
+            NSRect(x: 0, y: 0, width: 800, height: 600),
+        ]
+
+        XCTAssertFalse(SortAssistantVisibleScreenRange.isFullyVisible(
+            NSRect(x: 760, y: 40, width: 80, height: 80),
+            visibleFrames: frames
+        ))
+    }
+}
+
 @MainActor
 final class WindowGlassEffectTests: XCTestCase {
     func testRemoveRestoresOriginalContentHierarchy() {
@@ -1493,6 +1716,8 @@ final class WindowDragHandleHitTests: XCTestCase {
             fileExplorerStore: FileExplorerStore(),
             fileExplorerState: FileExplorerState(),
             sessionIndexStore: SessionIndexStore(),
+            tabManager: TabManager(),
+            workspaceTabStore: WorkspaceTabStore(),
             titlebarHeight: 36,
             workspaceId: nil,
             onResumeSession: nil,
@@ -2984,5 +3209,520 @@ final class ApplicationAccessibilityHierarchyCacheTests: XCTestCase {
 
         XCTAssertEqual(buildCount, 2, "Expected NSWindow.willCloseNotification to invalidate the cache")
     }
+}
+
+// Regression for the sprite assistant floating panel drag.
+//
+// The panel is a child NSPanel of the active terminal window. Two paths converge
+// at the panel's screen frame: `updateDrag` (driven by every mouse-drag event)
+// and `syncChildFrame` (driven by every SwiftUI re-render, which fires
+// continuously while the mascot's TimelineView animates).
+//
+// If `syncChildFrame` applies a screen clamp while a drag is in progress, the
+// panel gets repeatedly pulled back inside the visible screen between drag
+// events and the cursor detaches from the avatar. The fix is to gate that
+// clamp by `dragSession == nil`. These tests pin both halves of the contract:
+//
+//   - `testPanelOriginTracksCursorDeltaExactly`: the panel's screen origin
+//     follows the cursor delta point-for-point (no offsets, no rounding drift).
+//   - `testSyncChildFrameDuringDragDoesNotPullPanelBackFromOffscreenEdge`:
+//     re-running `update(...)` (which is exactly the SwiftUI updateNSView path)
+//     mid-drag with the panel pushed off the visible screen leaves the panel
+//     at the dragged position. Without the fix this test fails by hundreds of
+//     pixels because clampedScreenRect pulls the panel back to maxX-padding.
+@MainActor
+final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
+    private var parentWindow: NSWindow!
+    private var hostView: SortAssistantFloatingPanelHostView!
+    private var tabManager: TabManager!
+    private var workspaceTabStore: WorkspaceTabStore!
+
+    override func setUp() {
+        super.setUp()
+        _ = NSApplication.shared
+        guard let mainVisible = NSScreen.main?.visibleFrame else {
+            return
+        }
+        // Integer-align the parent frame so NSWindow.setFrame doesn't snap to a
+        // backing-pixel boundary and silently absorb a pixel of cursor motion.
+        let parentSize = NSSize(width: 900, height: 700)
+        let parentFrame = NSRect(
+            x: floor(mainVisible.midX - parentSize.width * 0.5),
+            y: floor(mainVisible.midY - parentSize.height * 0.5),
+            width: parentSize.width,
+            height: parentSize.height
+        )
+        parentWindow = NSWindow(
+            contentRect: parentFrame,
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        parentWindow.isReleasedWhenClosed = false
+        parentWindow.setFrame(parentFrame, display: false)
+        tabManager = TabManager()
+        workspaceTabStore = WorkspaceTabStore()
+        hostView = SortAssistantFloatingPanelHostView()
+        parentWindow.contentView?.addSubview(hostView)
+        parentWindow.orderFront(nil)
+        present()
+    }
+
+    override func tearDown() {
+        if hostView != nil {
+            hostView.endDrag()
+            hostView.update(
+                isPresented: false,
+                coordinator: SortAssistantCoordinator.shared,
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore
+            )
+            hostView.tearDown()
+            hostView.removeFromSuperview()
+        }
+        parentWindow?.orderOut(nil)
+        parentWindow = nil
+        hostView = nil
+        tabManager = nil
+        workspaceTabStore = nil
+        super.tearDown()
+    }
+
+    private func present() {
+        hostView.update(
+            isPresented: true,
+            coordinator: SortAssistantCoordinator.shared,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+    }
+
+    func testPanelOriginTracksCursorDeltaExactly() throws {
+        try XCTSkipIf(NSScreen.main == nil, "Requires a screen for child panel layout")
+        guard let initial = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after presenting the sprite assistant")
+            return
+        }
+
+        // Anchor the drag to an integer-aligned screen point so the cursor
+        // delta itself does not introduce sub-pixel arithmetic into the panel
+        // position math. We're asserting "the panel moves by the cursor delta",
+        // not "the panel snaps to specific absolute screen coordinates".
+        let start = NSPoint(x: floor(initial.midX), y: floor(initial.midY))
+        hostView.beginDrag(screenPoint: start)
+        hostView.updateDrag(screenPoint: start)
+
+        guard let atStart = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after beginDrag")
+            return
+        }
+        XCTAssertEqual(atStart.origin.x, initial.origin.x, accuracy: 0.5,
+                       "Panel must not jump on the first drag frame")
+        XCTAssertEqual(atStart.origin.y, initial.origin.y, accuracy: 0.5,
+                       "Panel must not jump on the first drag frame")
+
+        // Drive a sequence of cursor deltas measured from `start` and assert
+        // that, for each one, the panel's screen origin has moved exactly that
+        // delta from `atStart`. This is the user-visible "follow the cursor"
+        // contract — any pixel drift here means the cursor and the avatar are
+        // pulling apart.
+        let deltas: [NSPoint] = [
+            NSPoint(x: 17, y: -23),
+            NSPoint(x: 134, y: 88),
+            NSPoint(x: -55, y: 41),
+            NSPoint(x: 240, y: -160),
+        ]
+        for delta in deltas {
+            let target = NSPoint(x: start.x + delta.x, y: start.y + delta.y)
+            hostView.updateDrag(screenPoint: target)
+            guard let current = hostView.debugChildPanelScreenFrame else {
+                XCTFail("Expected child panel after updateDrag")
+                return
+            }
+            let actualXDelta = current.origin.x - atStart.origin.x
+            let actualYDelta = current.origin.y - atStart.origin.y
+            XCTAssertEqual(actualXDelta, delta.x, accuracy: 0.5,
+                           "Panel X must move by the exact cursor delta (\(delta))")
+            XCTAssertEqual(actualYDelta, delta.y, accuracy: 0.5,
+                           "Panel Y must move by the exact cursor delta (\(delta))")
+            XCTAssertEqual(current.size.width, atStart.size.width, accuracy: 0.5,
+                           "Drag must not resize the panel width")
+            XCTAssertEqual(current.size.height, atStart.size.height, accuracy: 0.5,
+                           "Drag must not resize the panel height")
+        }
+        hostView.endDrag()
+    }
+
+    func testSyncChildFrameDuringDragDoesNotPullPanelBackFromOffscreenEdge() throws {
+        guard let mainVisible = NSScreen.main?.visibleFrame else {
+            throw XCTSkip("Requires a screen for off-screen clamp validation")
+        }
+        guard let initial = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after presenting the sprite assistant")
+            return
+        }
+
+        let start = NSPoint(x: initial.midX, y: initial.midY)
+        hostView.beginDrag(screenPoint: start)
+        XCTAssertTrue(hostView.debugHasActiveDragSession, "Drag session should be active")
+
+        // Drag the cursor far past the visible screen's right edge so the panel
+        // rect ends up fully off-screen. Without the fix, `syncChildFrame` would
+        // pull the panel back to the visibleFrame boundary.
+        let offscreenDelta = NSPoint(x: mainVisible.maxX - initial.midX + 800, y: 0)
+        let offscreenPoint = NSPoint(x: start.x + offscreenDelta.x, y: start.y + offscreenDelta.y)
+        hostView.updateDrag(screenPoint: offscreenPoint)
+
+        guard let draggedOffscreen = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after off-screen drag")
+            return
+        }
+        let expectedOriginX = initial.origin.x + offscreenDelta.x
+        let expectedOriginY = initial.origin.y + offscreenDelta.y
+        XCTAssertEqual(draggedOffscreen.origin.x, expectedOriginX, accuracy: 0.5,
+                       "Drag must follow the cursor even past the screen edge")
+        XCTAssertEqual(draggedOffscreen.origin.y, expectedOriginY, accuracy: 0.5,
+                       "Drag must follow the cursor Y exactly")
+        XCTAssertGreaterThan(draggedOffscreen.origin.x, mainVisible.maxX,
+                             "Test precondition: panel must actually be off-screen-right")
+
+        // Simulate the SwiftUI re-render path. This is the exact code path the
+        // mascot TimelineView triggers many times per second while dragging.
+        present()
+        present()
+        present()
+
+        guard let afterReLayout = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after re-layout")
+            return
+        }
+        XCTAssertEqual(afterReLayout.origin.x, draggedOffscreen.origin.x, accuracy: 0.5,
+                       "Re-layout during an active drag must not clamp the panel back from off-screen")
+        XCTAssertEqual(afterReLayout.origin.y, draggedOffscreen.origin.y, accuracy: 0.5,
+                       "Re-layout during an active drag must not shift the panel Y")
+        XCTAssertEqual(afterReLayout.size.width, draggedOffscreen.size.width, accuracy: 0.5,
+                       "Re-layout during an active drag must not resize the panel width")
+        XCTAssertEqual(afterReLayout.size.height, draggedOffscreen.size.height, accuracy: 0.5,
+                       "Re-layout during an active drag must not resize the panel height")
+
+        hostView.endDrag()
+        XCTAssertFalse(hostView.debugHasActiveDragSession, "Drag session should clear on endDrag")
+    }
+
+    // The production cmux main window uses `NSHostingView` as its `contentView`,
+    // whose `isFlipped == true`. `screenRect(...)` (forward) anchors a positioning-
+    // sized rect (height = panelH - topReserve) but returns a rect with the full
+    // panelSize; reversing that full-panelSize rect via `contentView.convert(_:from:)`
+    // loses `topReserve` (~162 px) of Y because the flip is anchored to the rect's
+    // height. Without the inverse fix, the very first updateDrag after beginDrag
+    // shoots the panel up by ~162 px on any tiny cursor motion. This test only
+    // catches the bug in the flipped configuration — the default NSWindow contentView
+    // is non-flipped and `convert` is identity there.
+    func testDragOnFlippedContentViewDoesNotJumpByTopReserve() throws {
+        try XCTSkipIf(NSScreen.main == nil, "Requires a screen")
+
+        // Replace the parent window's contentView with a flipped wrapper that
+        // mirrors the real cmux main window's NSHostingView setup.
+        hostView.endDrag()
+        hostView.update(
+            isPresented: false,
+            coordinator: SortAssistantCoordinator.shared,
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+        hostView.tearDown()
+        hostView.removeFromSuperview()
+
+        guard let originalBounds = parentWindow.contentView?.bounds else {
+            XCTFail("Parent window must have a contentView")
+            return
+        }
+        let flipped = FlippedHostContentView(frame: originalBounds)
+        flipped.autoresizingMask = [.width, .height]
+        parentWindow.contentView = flipped
+        flipped.addSubview(hostView)
+        parentWindow.layoutIfNeeded()
+        present()
+
+        guard let initial = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after presenting on flipped contentView")
+            return
+        }
+
+        let start = NSPoint(x: floor(initial.midX), y: floor(initial.midY))
+        hostView.beginDrag(screenPoint: start)
+        hostView.updateDrag(screenPoint: start)
+
+        guard let atStart = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after beginDrag")
+            return
+        }
+        XCTAssertEqual(atStart.origin.y, initial.origin.y, accuracy: 0.5,
+                       "First drag frame must not shift screen Y on a flipped contentView")
+        XCTAssertEqual(atStart.origin.x, initial.origin.x, accuracy: 0.5,
+                       "First drag frame must not shift screen X on a flipped contentView")
+
+        // Force the syncChildFrame content-change branch (the SwiftUI re-render path
+        // that fires continuously while the mascot's TimelineView animates).
+        present()
+        present()
+
+        // The minimal cursor motion the user described: 1 pixel to the left.
+        hostView.updateDrag(screenPoint: NSPoint(x: start.x - 1, y: start.y))
+
+        guard let after = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after 1-pixel updateDrag")
+            return
+        }
+        XCTAssertEqual(after.origin.y, atStart.origin.y, accuracy: 0.5,
+                       "1-pixel horizontal cursor motion must not shift screen Y by topReserve")
+        XCTAssertEqual(after.origin.x, atStart.origin.x - 1, accuracy: 0.5,
+                       "Panel X must follow the cursor delta exactly")
+        hostView.endDrag()
+    }
+
+    // 窗边小精灵: when the user has positioned the panel and a subsequent
+    // content-driven re-layout would push it entirely off the right edge of the
+    // visible screen, the panel must instead be clamped so the configured avatar
+    // recovery hotspot stays on-screen as a draggable handle. Without the
+    // re-wired `manualDragScreenRect` path, the panel would either be hard-fit
+    // (shrunken) by `clampedScreenRect` or float entirely off-screen.
+    func testRecoveryHotspotStaysVisibleAfterUserPositionedPanelGoesOffscreen() throws {
+        guard let mainVisible = NSScreen.main?.visibleFrame else {
+            throw XCTSkip("Requires a screen")
+        }
+        guard let initial = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after presenting")
+            return
+        }
+
+        hostView.debugSetUserPositioned(true)
+
+        // Drive a drag-and-release that lands the panel completely past the
+        // right edge of the visible screen, then trigger a syncChildFrame via
+        // present(). This is the path autocomplete / mascot animation re-renders
+        // take after the user has dragged the sprite to the edge.
+        let start = NSPoint(x: floor(initial.midX), y: floor(initial.midY))
+        hostView.beginDrag(screenPoint: start)
+        let offscreenTarget = NSPoint(x: mainVisible.maxX + 600, y: start.y)
+        hostView.updateDrag(screenPoint: offscreenTarget)
+        hostView.endDrag()
+
+        present()
+
+        guard let after = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after re-layout")
+            return
+        }
+
+        // The recovery hotspot in panel-local coordinates is centered on the
+        // avatar drag hotspot. Its on-screen position is panel.origin +
+        // recoveryHotspot.origin.
+        let recovery = SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot
+        let recoveryOnScreen = NSRect(
+            x: after.origin.x + recovery.origin.x,
+            y: after.origin.y + recovery.origin.y,
+            width: recovery.width,
+            height: recovery.height
+        )
+        let visiblePiece = recoveryOnScreen.intersection(mainVisible)
+        XCTAssertEqual(visiblePiece.width,
+                       SortAssistantFloatingPanelMetrics.minimumVisibleDragHotspotSize.width,
+                       accuracy: 0.5,
+                       "Recovery hotspot must keep its full minimumVisibleDragHotspotSize.width on-screen")
+        XCTAssertEqual(visiblePiece.height,
+                       SortAssistantFloatingPanelMetrics.minimumVisibleDragHotspotSize.height,
+                       accuracy: 0.5,
+                       "Recovery hotspot must keep its full minimumVisibleDragHotspotSize.height on-screen")
+    }
+
+    // When the panel naturally fits inside the screen's visible frame, no
+    // edge-recovery should be active. (The default setUp places a 900×700
+    // parent at screen center; the 404×280 panel sits comfortably inside.)
+    func testAutoPositionedPanelDoesNotActivateEdgeRecoveryWhenItFits() throws {
+        try XCTSkipIf(NSScreen.main == nil, "Requires a screen")
+
+        hostView.debugSetUserPositioned(false)
+        present()
+
+        XCTAssertFalse(
+            SortAssistantCoordinator.shared.isPanelEdgeRecovery,
+            "An auto-positioned panel that fits naturally must not activate the window-edge mini-sprite"
+        )
+    }
+
+    // Leaving the parent content area is not enough to activate edge recovery.
+    // The mini-sprite is a screen-edge recovery affordance; users can drag the
+    // assistant outside the cmux window while it remains fully visible on the
+    // display.
+    func testConversationBubbleOutsideParentDoesNotActivateEdgeRecoveryWhileScreenVisible() throws {
+        guard let mainVisible = NSScreen.main?.visibleFrame else {
+            throw XCTSkip("Requires a screen")
+        }
+
+        // Re-anchor parent so the panel's right-side conversation card extends
+        // past the parent content frame while the full panel remains
+        // screen-visible.
+        let smallFrame = NSRect(
+            x: floor(mainVisible.midX - 110),
+            y: floor(mainVisible.midY - 100),
+            width: 220,
+            height: 220
+        )
+        parentWindow.setFrame(smallFrame, display: false)
+
+        hostView.debugSetUserPositioned(false)
+        present()
+
+        XCTAssertFalse(
+            SortAssistantCoordinator.shared.isPanelEdgeRecovery,
+            "Parent-window clipping alone must not activate the screen-edge mini-sprite"
+        )
+    }
+
+    // The cmux parent content viewport is not a sprite boundary. The user can
+    // drag the floating assistant outside the app window while it remains
+    // visible on the physical display; that must not activate mini mode.
+    func testAvatarSpriteOutsideParentContentDoesNotActivateEdgeRecovery() throws {
+        guard let mainVisible = NSScreen.main?.visibleFrame else {
+            throw XCTSkip("Requires a screen")
+        }
+        guard let initial = hostView.debugChildPanelScreenFrame,
+              let parentContentFrame = parentContentFrameOnScreen() else {
+            XCTFail("Expected child panel and parent content frame after presenting")
+            return
+        }
+
+        let avatarFrame = SortAssistantFloatingPanelMetrics.avatarVisualFrame
+        let desiredY = parentContentFrame.minY - avatarFrame.minY - 10
+        let start = NSPoint(x: floor(initial.midX), y: floor(initial.midY))
+        hostView.beginDrag(screenPoint: start)
+        hostView.updateDrag(
+            screenPoint: NSPoint(
+                x: start.x,
+                y: start.y + desiredY - initial.minY
+            )
+        )
+
+        guard let after = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after drag")
+            hostView.endDrag()
+            return
+        }
+        let avatarSprite = SortAssistantFloatingPanelScreenClamp.hotspotRect(
+            in: after,
+            hotspot: avatarFrame
+        )
+        XCTAssertTrue(mainVisible.contains(avatarSprite),
+                      "Test setup keeps the avatar sprite inside the physical display")
+        XCTAssertGreaterThan(parentContentFrame.minY - avatarSprite.minY, 0.5,
+                             "Test setup must put the avatar sprite below the parent content viewport")
+        XCTAssertFalse(
+            SortAssistantCoordinator.shared.isPanelEdgeRecovery,
+            "Avatar sprite overflow outside the parent content viewport must not activate mini mode"
+        )
+        hostView.endDrag()
+    }
+
+    // The panel includes the conversation bubble to the right of the avatar.
+    // The bubble can cross the screen edge while the avatar is still fully
+    // visible; that must not switch to mini mode because the sprite itself is
+    // not at the recovery edge yet.
+    func testPanelOverflowDoesNotActivateEdgeRecoveryWhenAvatarHotspotVisible() throws {
+        guard let mainVisible = NSScreen.main?.visibleFrame else {
+            throw XCTSkip("Requires a screen")
+        }
+        guard let initial = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after presenting")
+            return
+        }
+
+        // Overflow the conversation side substantially while keeping the
+        // avatar-side sprite inside the physical screen. This specifically
+        // guards against using whole-panel overflow as the mini-sprite trigger.
+        let desiredX = mainVisible.maxX - initial.width + 120
+        let start = NSPoint(x: floor(initial.midX), y: floor(initial.midY))
+        hostView.beginDrag(screenPoint: start)
+        hostView.updateDrag(
+            screenPoint: NSPoint(
+                x: start.x + desiredX - initial.minX,
+                y: start.y
+            )
+        )
+
+        guard let after = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after drag")
+            hostView.endDrag()
+            return
+        }
+
+        XCTAssertGreaterThan(after.maxX, mainVisible.maxX,
+                             "Test setup must place the conversation side of the panel past the screen edge")
+        let avatarSprite = SortAssistantFloatingPanelScreenClamp.hotspotRect(
+            in: after,
+            hotspot: SortAssistantFloatingPanelMetrics.avatarVisualFrame
+        )
+        XCTAssertTrue(mainVisible.contains(avatarSprite),
+                      "Test setup must keep the avatar sprite fully visible")
+        XCTAssertFalse(
+            SortAssistantCoordinator.shared.isPanelEdgeRecovery,
+            "Panel overflow alone must not activate mini mode while the avatar sprite is fully visible"
+        )
+        hostView.endDrag()
+    }
+
+    func testAvatarHotspotOffscreenActivatesEdgeRecovery() throws {
+        guard let mainVisible = NSScreen.main?.visibleFrame else {
+            throw XCTSkip("Requires a screen")
+        }
+
+        // Push the auto-positioned panel far enough right that the avatar
+        // sprite itself is no longer fully visible. The recovery clamp
+        // keeps the mini-sprite-sized hotspot visible as the drag handle.
+        let smallFrame = NSRect(
+            x: floor(mainVisible.maxX - 20),
+            y: floor(mainVisible.midY - 100),
+            width: 220,
+            height: 220
+        )
+        parentWindow.setFrame(smallFrame, display: false)
+
+        hostView.debugSetUserPositioned(false)
+        present()
+
+        XCTAssertTrue(
+            SortAssistantCoordinator.shared.isPanelEdgeRecovery,
+            "When the avatar sprite extends past the screen edge, the window-edge mini-sprite must activate"
+        )
+
+        guard let after = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after re-layout")
+            return
+        }
+        // And the recovery hotspot must still be fully inside the visible
+        // frame; the smaller mini-sprite is centered inside it.
+        let recovery = SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot
+        let recoveryOnScreen = NSRect(
+            x: after.origin.x + recovery.origin.x,
+            y: after.origin.y + recovery.origin.y,
+            width: recovery.width,
+            height: recovery.height
+        )
+        let visiblePiece = recoveryOnScreen.intersection(mainVisible)
+        XCTAssertEqual(visiblePiece.width, recovery.width, accuracy: 0.5,
+                       "Recovery hotspot must remain fully horizontally visible")
+        XCTAssertEqual(visiblePiece.height, recovery.height, accuracy: 0.5,
+                       "Recovery hotspot must remain fully vertically visible")
+    }
+
+    private func parentContentFrameOnScreen() -> NSRect? {
+        guard let contentView = parentWindow.contentView else { return nil }
+        let contentRectInWindow = contentView.convert(contentView.bounds, to: nil)
+        return parentWindow.convertToScreen(contentRectInWindow)
+    }
+}
+
+private final class FlippedHostContentView: NSView {
+    override var isFlipped: Bool { true }
 }
 #endif

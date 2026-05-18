@@ -4714,7 +4714,7 @@ struct CMUXCLI {
               cmux mcp sprite-assistant
 
             Starts the cmux sprite assistant MCP server over stdio. The server exposes
-            memory, sort, list, plugin context, ghpr, GitHub, and workspace digest tools.
+            memory, sort, list, workspace color, plugin context, ghpr, GitHub, and workspace digest tools.
             """)
         default:
             throw CLIError(message: "Unknown mcp subcommand: \(subcommand)")
@@ -4864,6 +4864,9 @@ struct CMUXCLI {
             "ghpr_refresh",
             "github_context",
             "github_pr_context",
+            "workspace_color_get",
+            "workspace_color_set",
+            "workspace_color_clear",
             "workspace_digest_get",
             "workspace_digest_refresh",
             "workspace_digest_progress",
@@ -4912,6 +4915,12 @@ struct CMUXCLI {
             return "plugin.ghpr.refresh"
         case "github_context":
             return "github.context"
+        case "workspace_color_get":
+            return "workspace.color.get"
+        case "workspace_color_set":
+            return "workspace.color.set"
+        case "workspace_color_clear":
+            return "workspace.color.clear"
         case "workspace_digest_get":
             return "plugin.digest.get"
         case "workspace_digest_refresh":
@@ -4936,13 +4945,33 @@ struct CMUXCLI {
              "github_pr_context",
              "ghpr_refresh",
              "github_context",
+             "workspace_color_get",
+             "workspace_color_set",
+             "workspace_color_clear",
              "workspace_digest_get",
              "workspace_digest_refresh":
             addDefaultWorkspaceId(to: &params)
         default:
             break
         }
+        switch toolName {
+        case "workspace_color_get",
+             "workspace_color_set",
+             "workspace_color_clear":
+            normalizeCoreWorkspaceMCPParams(&params)
+        default:
+            break
+        }
         return params
+    }
+
+    private func normalizeCoreWorkspaceMCPParams(_ params: inout [String: Any]) {
+        if params["workspace_id"] == nil, let workspaceId = params.removeValue(forKey: "workspaceId") {
+            params["workspace_id"] = workspaceId
+        }
+        if params["include_palette"] == nil, let includePalette = params.removeValue(forKey: "includePalette") {
+            params["include_palette"] = includePalette
+        }
     }
 
     private func addDefaultWorkspaceId(to params: inout [String: Any]) {
@@ -5054,7 +5083,7 @@ struct CMUXCLI {
             ),
             spriteMCPTool(
                 name: "list_state",
-                description: "Return current workspace sidebar list state, revision, pinned flags, and locked flags.",
+                description: "Return current workspace sidebar list state, revision, pinned flags, locked flags, and customColor/custom_color values.",
                 properties: [:]
             ),
             spriteMCPTool(
@@ -5129,6 +5158,30 @@ struct CMUXCLI {
                 properties: [
                     "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
                     "includeAllWorkspaces": boolSchema(description: "When true, return GitHub context for every visible sidebar workspace."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "workspace_color_get",
+                description: "Return the current custom workspace color for the current or specified workspace. The color is null when no custom color is set.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                    "includePalette": boolSchema(description: "When true, include the configured named workspace color palette."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "workspace_color_set",
+                description: "Set the custom workspace color for the current or specified workspace. Accepts #RRGGBB or a configured workspace color name.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                    "color": stringSchema(description: "Color name or #RRGGBB value."),
+                ],
+                required: ["color"]
+            ),
+            spriteMCPTool(
+                name: "workspace_color_clear",
+                description: "Clear the custom workspace color for the current or specified workspace.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
                 ]
             ),
             spriteMCPTool(

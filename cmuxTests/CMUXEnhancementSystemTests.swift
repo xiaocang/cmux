@@ -8,6 +8,25 @@ import CMUXEnhancementAPI
 @testable import cmux
 #endif
 
+fileprivate func withSavedPullRequestDebounceSettings(_ body: () throws -> Void) throws {
+    let defaults = UserDefaults.standard
+    let keys = [
+        SidebarPullRequestShellDebounceSettings.enabledKey,
+        SidebarPullRequestShellDebounceSettings.delaySecondsKey,
+    ]
+    let savedValues = keys.map { ($0, defaults.object(forKey: $0)) }
+    defer {
+        for (key, value) in savedValues {
+            if let value {
+                defaults.set(value, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+    }
+    try body()
+}
+
 final class CMUXEnhancementHostTests: XCTestCase {
     func testActivatesInOrderAndDeactivatesInReverseOrder() throws {
         let context = TestEnhancementContext()
@@ -725,25 +744,6 @@ final class CMUXTmuxLeaderEnhancementTests: XCTestCase {
             }
         }
         LeaderKeySettings.resetAll()
-        try body()
-    }
-
-    private func withSavedPullRequestDebounceSettings(_ body: () throws -> Void) throws {
-        let defaults = UserDefaults.standard
-        let keys = [
-            SidebarPullRequestShellDebounceSettings.enabledKey,
-            SidebarPullRequestShellDebounceSettings.delaySecondsKey,
-        ]
-        let savedValues = keys.map { ($0, defaults.object(forKey: $0)) }
-        defer {
-            for (key, value) in savedValues {
-                if let value {
-                    defaults.set(value, forKey: key)
-                } else {
-                    defaults.removeObject(forKey: key)
-                }
-            }
-        }
         try body()
     }
 

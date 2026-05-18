@@ -509,7 +509,7 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
         store.scoreWorkspaceInterceptorForTesting = { workspaceId, sort, completion in
             scoreRequests.append((workspaceId, sort))
             let workspace = manager.tabs.first { $0.id.uuidString == workspaceId } ?? first
-            completion(summaryPriorityItem(
+            completion(self.summaryPriorityItem(
                 workspace: workspace,
                 nativeOrder: workspace.id == first.id ? 0 : 1,
                 scores: ["importance": workspace.id == first.id ? 25 : 90]
@@ -567,7 +567,7 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
         }
         store.refreshWorkspaceInterceptorForTesting = { workspaceId, force, refinement, completion in
             workspaceRefreshRequests.append((workspaceId, force, refinement))
-            completion(summaryPriorityItem(
+            completion(self.summaryPriorityItem(
                 workspace: first,
                 nativeOrder: 0,
                 scores: ["importance": 70]
@@ -609,7 +609,7 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
             if sort == .dimension(id: "importance") {
                 importanceCompletion = completion
             } else {
-                completion(summaryPriorityItem(
+                completion(self.summaryPriorityItem(
                     workspace: first,
                     nativeOrder: 0,
                     scores: ["progress": 30]
@@ -660,7 +660,7 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
         var workspaceRefreshRequests: [String?] = []
         store.scoreWorkspaceInterceptorForTesting = { _, sort, completion in
             let dimension = sort.dimensionId ?? "urgency"
-            completion(summaryPriorityItem(
+            completion(self.summaryPriorityItem(
                 workspace: first,
                 nativeOrder: 0,
                 scores: [dimension: 65],
@@ -716,7 +716,7 @@ final class TabManagerWorkspaceSummaryPriorityOrderTests: XCTestCase {
         var workspaceRefreshRequests: [(workspaceId: String, force: Bool, refinement: String?)] = []
         store.refreshWorkspaceInterceptorForTesting = { workspaceId, force, refinement, completion in
             workspaceRefreshRequests.append((workspaceId, force, refinement))
-            completion(summaryPriorityItem(
+            completion(self.summaryPriorityItem(
                 workspace: first,
                 nativeOrder: 0,
                 scores: ["urgency": 70],

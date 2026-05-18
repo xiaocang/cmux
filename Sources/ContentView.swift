@@ -6484,6 +6484,8 @@ struct ContentView: View {
 
     private func commandPaletteConfigActionID(for commandId: String) -> String? {
         switch commandId {
+        case "palette.openSpriteAssistant":
+            return CmuxSurfaceTabBarBuiltInAction.sortAssistant.configID
         case "palette.newTerminalTab":
             return CmuxSurfaceTabBarBuiltInAction.newTerminal.configID
         case "palette.newBrowserTab":
@@ -6836,6 +6838,14 @@ struct ContentView: View {
                 title: constant(String(localized: "command.toggleLeftSidebar.title", defaultValue: "Toggle Left Sidebar")),
                 subtitle: constant(String(localized: "command.toggleSidebar.subtitle", defaultValue: "Layout")),
                 keywords: ["toggle", "sidebar", "left", "layout"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.openSpriteAssistant",
+                title: constant(String(localized: "command.openSpriteAssistant.title", defaultValue: "Open Sprite Assistant")),
+                subtitle: constant(String(localized: "command.openSpriteAssistant.subtitle", defaultValue: "Sprite")),
+                keywords: ["sprite", "assistant", "sort", "workspace", "priority"]
             )
         )
         contributions.append(contentsOf: Self.commandPaletteRightSidebarModeCommandContributions())
@@ -7805,6 +7815,11 @@ struct ContentView: View {
         }
         registry.register(commandId: "palette.toggleSidebar") {
             sidebarState.toggle()
+        }
+        registry.register(commandId: "palette.openSpriteAssistant") {
+            DispatchQueue.main.async {
+                SortAssistantCoordinator.shared.openEntry()
+            }
         }
         for mode in RightSidebarMode.allCases {
             registry.register(commandId: Self.commandPaletteRightSidebarModeCommandID(mode)) {

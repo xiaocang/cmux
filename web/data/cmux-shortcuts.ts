@@ -38,6 +38,7 @@ export const shortcutCategories: ShortcutCategory[] = [
         note: { en: "system-wide hotkey", ja: "システム全体のホットキー" },
       },
       { id: "commandPalette", combos: [["⌘", "⇧", "P"]], description: { en: "Command palette", ja: "コマンドパレット" } },
+      { id: "toggleSpriteAssistant", combos: [["⌘", "⇧", "S"]], description: { en: "Toggle Sprite Assistant", ja: "Sprite Assistantを切り替え" } },
       {
         id: "commandPaletteNext",
         combos: [["⌃", "N"]],
