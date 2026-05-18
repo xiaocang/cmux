@@ -31,6 +31,7 @@ struct cmuxApp: App {
 
     init() {
         UITestLaunchManifest.applyIfPresent()
+        BrowserTextInputCorrectionDefaults.register()
 
         if SocketControlSettings.shouldBlockUntaggedDebugLaunch() {
             Self.terminateForMissingLaunchTag()

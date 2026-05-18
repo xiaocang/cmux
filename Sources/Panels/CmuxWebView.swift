@@ -4,6 +4,16 @@ import ObjectiveC
 import UniformTypeIdentifiers
 import WebKit
 
+enum BrowserTextInputCorrectionDefaults {
+    static let automaticSpellingCorrectionKey = "NSAutomaticSpellingCorrectionEnabled"
+
+    static func register(in defaults: UserDefaults = .standard) {
+        defaults.register(defaults: [
+            automaticSpellingCorrectionKey: false
+        ])
+    }
+}
+
 extension WKWebView {
     var cmuxIsElementFullscreenActiveOrTransitioning: Bool {
         switch fullscreenState {
@@ -368,13 +378,20 @@ final class CmuxWebView: WKWebView {
     var debugPointerFocusAllowanceDepth: Int { pointerFocusAllowanceDepth }
 
     override init(frame: NSRect, configuration: WKWebViewConfiguration) {
+        BrowserTextInputCorrectionDefaults.register()
         super.init(frame: frame, configuration: configuration)
         installPasteAsPlainTextFocusTracking()
     }
 
     required init?(coder: NSCoder) {
+        BrowserTextInputCorrectionDefaults.register()
         super.init(coder: coder)
         installPasteAsPlainTextFocusTracking()
+    }
+
+    @objc var autocorrectionType: NSTextInputTraitType {
+        get { .no }
+        set {}
     }
 
     private func installPasteAsPlainTextFocusTracking() {
