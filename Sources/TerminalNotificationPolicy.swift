@@ -191,6 +191,7 @@ struct TerminalNotificationPolicyRequest: Sendable {
     let title: String
     let subtitle: String
     let body: String
+    let source: TerminalNotificationSource
     let cwd: String?
     let isAppFocused: Bool
     let isFocusedPanel: Bool

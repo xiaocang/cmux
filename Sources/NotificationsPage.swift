@@ -178,16 +178,20 @@ private struct NotificationRow: View {
     let onClear: () -> Void
     let focusedNotificationId: FocusState<UUID?>.Binding
 
+    private var badgeColor: Color {
+        notification.source == .monitor ? .cyan : cmuxAccentColor()
+    }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Button(action: onOpen) {
                 HStack(alignment: .top, spacing: 12) {
                     Circle()
-                        .fill(notification.isRead ? Color.clear : cmuxAccentColor())
+                        .fill(notification.isRead ? Color.clear : badgeColor)
                         .frame(width: 8, height: 8)
                         .overlay(
                             Circle()
-                                .stroke(cmuxAccentColor().opacity(notification.isRead ? 0.2 : 1), lineWidth: 1)
+                                .stroke(badgeColor.opacity(notification.isRead ? 0.2 : 1), lineWidth: 1)
                         )
                         .padding(.top, 6)
 

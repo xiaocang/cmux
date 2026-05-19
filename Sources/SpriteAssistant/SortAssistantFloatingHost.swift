@@ -370,6 +370,8 @@ final class SortAssistantFloatingPanelHostView: NSView {
     private var hasUserPositioned = false
     private var lastLayoutRevision = -1
     private var lastFocusRevision = 0
+    private var pendingFrameSync = false
+    private var pendingFrameSyncPreserveExistingOrigin = true
 
     private let edgePadding: CGFloat = 12
     private let topPadding: CGFloat = WindowChromeMetrics.appTitlebarHeight + 14
@@ -391,7 +393,7 @@ final class SortAssistantFloatingPanelHostView: NSView {
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
-        syncVisibility()
+        syncVisibility(syncFrame: true)
     }
 
     func update(
@@ -402,6 +404,7 @@ final class SortAssistantFloatingPanelHostView: NSView {
         tabManager: TabManager,
         workspaceTabStore: WorkspaceTabStore
     ) {
+        let wasPresented = self.isPresented
         self.isPresented = isPresented
         attachedCoordinator = coordinator
         let layoutChanged = layoutRevision != lastLayoutRevision
@@ -420,11 +423,9 @@ final class SortAssistantFloatingPanelHostView: NSView {
             tabManager: tabManager,
             workspaceTabStore: workspaceTabStore
         )
-        syncVisibility()
+        syncVisibility(syncFrame: isPresented && !wasPresented)
         if layoutChanged {
-            DispatchQueue.main.async { [weak self] in
-                self?.syncChildFrame()
-            }
+            scheduleSyncChildFrame()
         }
         if shouldFocusInput {
             requestInputFocus(source: "focusRevision")
@@ -443,6 +444,8 @@ final class SortAssistantFloatingPanelHostView: NSView {
         dragSession = nil
         lastLayoutRevision = -1
         lastFocusRevision = 0
+        pendingFrameSync = false
+        pendingFrameSyncPreserveExistingOrigin = true
         attachedCoordinator?.setPanelEdgeRecovery(false)
     }
 
@@ -468,7 +471,7 @@ final class SortAssistantFloatingPanelHostView: NSView {
         childWindow?.contentView = hostingView
     }
 
-    private func syncVisibility() {
+    private func syncVisibility(syncFrame: Bool) {
         guard isPresented else {
             childWindow?.orderOut(nil)
             dragSession = nil
@@ -478,14 +481,18 @@ final class SortAssistantFloatingPanelHostView: NSView {
             tearDown()
             return
         }
+        let didCreateChild = childWindow == nil
         let child = childWindow ?? makeChildWindow(parentWindow: parentWindow)
-        if child.parent !== parentWindow {
+        let didAttachToParent = child.parent !== parentWindow
+        if didAttachToParent {
             child.parent?.removeChildWindow(child)
             parentWindow.addChildWindow(child, ordered: .above)
             installParentWindowObservers(parentWindow)
         }
         child.orderFront(nil)
-        syncChildFrame()
+        if syncFrame || didCreateChild || didAttachToParent {
+            scheduleSyncChildFrame()
+        }
     }
 
     private func requestInputFocus(source: String) {
@@ -560,6 +567,26 @@ final class SortAssistantFloatingPanelHostView: NSView {
         childWindow = panel
         installParentWindowObservers(parentWindow)
         return panel
+    }
+
+    private func scheduleSyncChildFrame(preserveExistingOrigin: Bool = true) {
+        if pendingFrameSync {
+            pendingFrameSyncPreserveExistingOrigin =
+                pendingFrameSyncPreserveExistingOrigin && preserveExistingOrigin
+            return
+        }
+
+        pendingFrameSync = true
+        pendingFrameSyncPreserveExistingOrigin = preserveExistingOrigin
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let preserveExistingOrigin = self.pendingFrameSyncPreserveExistingOrigin
+                self.pendingFrameSync = false
+                self.pendingFrameSyncPreserveExistingOrigin = true
+                self.syncChildFrame(preserveExistingOrigin: preserveExistingOrigin)
+            }
+        }
     }
 
     private func syncChildFrame(preserveExistingOrigin: Bool = true) {
@@ -718,7 +745,6 @@ final class SortAssistantFloatingPanelHostView: NSView {
         let contentFrame = NSRect(origin: .zero, size: rectOnScreen.size)
         if hostingView.frame != contentFrame {
             hostingView.frame = contentFrame
-            hostingView.layoutSubtreeIfNeeded()
         }
         if childWindow.frame != rectOnScreen {
             childWindow.setFrame(rectOnScreen, display: true)
@@ -1097,7 +1123,7 @@ final class SortAssistantFloatingPanelHostView: NSView {
         observers.append(
             center.addObserver(forName: NSWindow.didResizeNotification, object: parentWindow, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
-                    self?.syncChildFrame(preserveExistingOrigin: false)
+                    self?.scheduleSyncChildFrame(preserveExistingOrigin: false)
                 }
             }
         )

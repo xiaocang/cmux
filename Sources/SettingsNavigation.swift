@@ -102,7 +102,7 @@ enum SettingsNavigationTarget: String, CaseIterable, Identifiable {
         case .enhancements:
             return "\(title) github pull request pr refresh delay debounce coalesce"
         case .automation:
-            return "\(title) socket integrations hooks ports claude cursor gemini"
+            return "\(title) socket integrations hooks ports claude cursor gemini sprite local llm ollama semantic router"
         case .browser:
             return "\(title) search engine links history theme"
         case .browserImport:
@@ -348,6 +348,7 @@ enum SettingsSearchIndex {
         setting(.automation, "socket-password", String(localized: "settings.automation.socketPassword", defaultValue: "Socket Password"), "socket auth credential"),
         setting(.automation, "claude-code", String(localized: "settings.automation.claudeCode", defaultValue: "Claude Code Integration"), "agent hooks notifications"),
         setting(.automation, "claude-path", String(localized: "settings.automation.claudeCode.customPath", defaultValue: "Claude Binary Path"), "custom claude executable"),
+        setting(.automation, "sprite-local-llm", String(localized: "settings.sprite.localLLM.title", defaultValue: "Sprite Local LLM Router"), "sprite semantic router local llm ollama model"),
         setting(.automation, "cursor", String(localized: "settings.automation.cursor", defaultValue: "Cursor Integration"), "agent hooks notifications"),
         setting(.automation, "gemini", String(localized: "settings.automation.gemini", defaultValue: "Gemini CLI Integration"), "agent hooks notifications"),
         setting(.automation, "port-base", String(localized: "settings.automation.portBase", defaultValue: "Port Base"), "CMUX_PORT start"),

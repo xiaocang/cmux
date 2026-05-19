@@ -25,6 +25,73 @@ struct CLIError: Error, CustomStringConvertible {
     var description: String { message }
 }
 
+#if DEBUG
+private enum CLIDebugLog {
+    private static let timestampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    private static let sinkLock = NSLock()
+    nonisolated(unsafe) private static var cachedSink: Sink?
+
+    private struct Sink {
+        let path: String
+        let handle: FileHandle
+    }
+
+    static func now() -> UInt64 {
+        DispatchTime.now().uptimeNanoseconds
+    }
+
+    static func elapsedMilliseconds(since start: UInt64) -> String {
+        let now = now()
+        let elapsed = Double(now >= start ? now - start : 0) / 1_000_000
+        return String(format: "%.1f", elapsed)
+    }
+
+    static func log(_ message: String) {
+        let env = ProcessInfo.processInfo.environment
+        guard env["CMUX_SPRITE_MCP_DEBUG"] == "1",
+              let path = env["CMUX_DEBUG_LOG"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty else {
+            return
+        }
+
+        let line = "\(timestamp()) \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        sinkLock.lock()
+        defer { sinkLock.unlock() }
+        if cachedSink?.path != path {
+            try? cachedSink?.handle.close()
+            cachedSink = nil
+            if FileHandle(forWritingAtPath: path) == nil {
+                FileManager.default.createFile(atPath: path, contents: nil)
+            }
+            if let handle = FileHandle(forWritingAtPath: path) {
+                _ = try? handle.seekToEnd()
+                cachedSink = Sink(path: path, handle: handle)
+            }
+        }
+        guard let sink = cachedSink else {
+            FileManager.default.createFile(atPath: path, contents: data)
+            return
+        }
+        try? sink.handle.write(contentsOf: data)
+    }
+
+    static func keys(_ object: [String: Any]) -> String {
+        let value = object.keys.sorted().joined(separator: ",")
+        return value.isEmpty ? "none" : value
+    }
+
+    private static func timestamp() -> String {
+        timestampFormatter.string(from: Date())
+    }
+}
+#endif
+
 private enum CLISocketEnvironment {
     static func socketPath(in environment: [String: String]) throws -> String? {
         let socketPath = normalized(environment["CMUX_SOCKET_PATH"])
@@ -4725,13 +4792,26 @@ struct CMUXCLI {
         socketPath: String,
         explicitPassword: String?
     ) throws {
+#if DEBUG
+        CLIDebugLog.log(
+            "sprite.mcp.server.start socketName=\(URL(fileURLWithPath: socketPath).lastPathComponent)"
+        )
+#endif
         let client = SocketClient(path: socketPath)
+#if DEBUG
+        let connectStart = CLIDebugLog.now()
+#endif
         try client.connect()
         try authenticateClientIfNeeded(
             client,
             explicitPassword: explicitPassword,
             socketPath: socketPath
         )
+#if DEBUG
+        CLIDebugLog.log(
+            "sprite.mcp.server.connected elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: connectStart))"
+        )
+#endif
         defer { client.close() }
 
         while let line = readLine(strippingNewline: true) {
@@ -4746,18 +4826,31 @@ struct CMUXCLI {
             }
             let method = request["method"] as? String ?? ""
             let params = request["params"] as? [String: Any] ?? [:]
+#if DEBUG
+            let requestStart = CLIDebugLog.now()
+#endif
             do {
                 let result = try spriteMCPResult(
                     method: method,
                     params: params,
                     client: client
                 )
+#if DEBUG
+                CLIDebugLog.log(
+                    "sprite.mcp.request.end method=\(method) result=success elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: requestStart)) resultKeys=\(CLIDebugLog.keys(result))"
+                )
+#endif
                 writeMCPResponse([
                     "jsonrpc": "2.0",
                     "id": id,
                     "result": result,
                 ])
             } catch let error as CLIError {
+#if DEBUG
+                CLIDebugLog.log(
+                    "sprite.mcp.request.end method=\(method) result=cliError elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: requestStart)) errorChars=\(error.message.count)"
+                )
+#endif
                 writeMCPResponse([
                     "jsonrpc": "2.0",
                     "id": id,
@@ -4767,6 +4860,11 @@ struct CMUXCLI {
                     ],
                 ])
             } catch {
+#if DEBUG
+                CLIDebugLog.log(
+                    "sprite.mcp.request.end method=\(method) result=error elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: requestStart)) errorChars=\(String(describing: error).count)"
+                )
+#endif
                 writeMCPResponse([
                     "jsonrpc": "2.0",
                     "id": id,
@@ -4814,27 +4912,63 @@ struct CMUXCLI {
                 throw CLIError(message: "Unknown sprite assistant MCP tool: \(toolName)")
             }
             let arguments = params["arguments"] as? [String: Any] ?? [:]
-            let payload: Any
-            if toolName == "repository_context" {
-                payload = repositoryContextMCPPayload(arguments: arguments)
-            } else {
-                let socketMethod = spriteMCPSocketMethod(for: toolName)
-                let socketParams = spriteMCPSocketParams(for: toolName, arguments: arguments)
-                payload = try client.sendV2(
-                    method: socketMethod,
-                    params: socketParams,
-                    responseTimeout: 60
+#if DEBUG
+            let toolStart = CLIDebugLog.now()
+            CLIDebugLog.log(
+                "sprite.mcp.tool.begin tool=\(toolName) argumentKeys=\(CLIDebugLog.keys(arguments))"
+            )
+#endif
+            do {
+                let payload: Any
+                if toolName == "repository_context" {
+                    payload = repositoryContextMCPPayload(arguments: arguments)
+                } else {
+#if DEBUG
+                    let paramsStart = CLIDebugLog.now()
+#endif
+                    let socketMethod = spriteMCPSocketMethod(for: toolName)
+                    let socketParams = spriteMCPSocketParams(for: toolName, arguments: arguments)
+#if DEBUG
+                    CLIDebugLog.log(
+                        "sprite.mcp.tool.params.end tool=\(toolName) socketMethod=\(socketMethod) elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: paramsStart)) paramKeys=\(CLIDebugLog.keys(socketParams))"
+                    )
+                    let socketStart = CLIDebugLog.now()
+#endif
+                    payload = try client.sendV2(
+                        method: socketMethod,
+                        params: socketParams,
+                        responseTimeout: 60
+                    )
+#if DEBUG
+                    let payloadKeys = (payload as? [String: Any]).map(CLIDebugLog.keys) ?? "nonObject"
+                    CLIDebugLog.log(
+                        "sprite.mcp.tool.socket.end tool=\(toolName) socketMethod=\(socketMethod) elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: socketStart)) payloadKeys=\(payloadKeys)"
+                    )
+#endif
+                }
+                let payloadText = compactJSONString(payload)
+#if DEBUG
+                CLIDebugLog.log(
+                    "sprite.mcp.tool.end tool=\(toolName) result=success elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: toolStart)) payloadBytes=\(payloadText.utf8.count)"
                 )
-            }
-            return [
-                "content": [
-                    [
-                        "type": "text",
-                        "text": compactJSONString(payload),
+#endif
+                return [
+                    "content": [
+                        [
+                            "type": "text",
+                            "text": payloadText,
+                        ],
                     ],
-                ],
-                "isError": false,
-            ]
+                    "isError": false,
+                ]
+            } catch {
+#if DEBUG
+                CLIDebugLog.log(
+                    "sprite.mcp.tool.end tool=\(toolName) result=error elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: toolStart)) errorChars=\(String(describing: error).count)"
+                )
+#endif
+                throw error
+            }
         default:
             throw CLIError(message: "Unsupported MCP method: \(method)")
         }
@@ -5310,6 +5444,10 @@ struct CMUXCLI {
     }
 
     private func gitMCPCommand(directory: String, arguments: [String]) -> (status: Int32, stdout: String, stderr: String) {
+#if DEBUG
+        let start = CLIDebugLog.now()
+        let label = arguments.first ?? "git"
+#endif
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         process.arguments = ["git", "-C", directory] + arguments
@@ -5320,6 +5458,11 @@ struct CMUXCLI {
         do {
             try process.run()
         } catch {
+#if DEBUG
+            CLIDebugLog.log(
+                "sprite.mcp.git.end command=\(label) result=spawnError elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: start)) errorChars=\(String(describing: error).count)"
+            )
+#endif
             return (-1, "", String(describing: error))
         }
         let timeout = DispatchWorkItem {
@@ -5330,10 +5473,17 @@ struct CMUXCLI {
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2, execute: timeout)
         process.waitUntilExit()
         timeout.cancel()
+        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+#if DEBUG
+        CLIDebugLog.log(
+            "sprite.mcp.git.end command=\(label) status=\(process.terminationStatus) elapsedMs=\(CLIDebugLog.elapsedMilliseconds(since: start)) stdoutBytes=\(stdoutData.count) stderrBytes=\(stderrData.count)"
+        )
+#endif
         return (
             process.terminationStatus,
-            String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
-            String(data: stderr.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            String(data: stdoutData, encoding: .utf8) ?? "",
+            String(data: stderrData, encoding: .utf8) ?? ""
         )
     }
 

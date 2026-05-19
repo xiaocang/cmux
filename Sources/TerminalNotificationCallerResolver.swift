@@ -20,6 +20,12 @@ extension TerminalController {
         let title = stringParam(params, "title") ?? "Notification"
         let subtitle = stringParam(params, "subtitle") ?? ""
         let body = stringParam(params, "body") ?? ""
+        let sourceRaw = (stringParam(params, "source") ?? stringParam(params, "notification_source"))?
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        let source: TerminalNotificationSource = (sourceRaw == "monitor" || sourceRaw == "workspace_monitor")
+            ? .monitor
+            : .agent
 
         var result: V2CallResult = .err(code: "internal_error", message: "Failed to notify", data: nil)
         runOnMain {
@@ -39,7 +45,8 @@ extension TerminalController {
                 surfaceId: target.surfaceId,
                 title: title,
                 subtitle: subtitle,
-                body: body
+                body: body,
+                source: source
             )
             let surfaceId: Any = target.surfaceId?.uuidString ?? NSNull()
             result = .ok([

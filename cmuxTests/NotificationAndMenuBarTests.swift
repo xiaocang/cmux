@@ -31,6 +31,7 @@ final class TerminalNotificationPolicyEngineTests: XCTestCase {
             title: "Title",
             subtitle: "Subtitle",
             body: "Body",
+            source: .agent,
             cwd: FileManager.default.temporaryDirectory.path,
             isAppFocused: false,
             isFocusedPanel: false
@@ -96,6 +97,7 @@ final class TerminalNotificationPolicyEngineTests: XCTestCase {
             title: "Title",
             subtitle: "Subtitle",
             body: "Body",
+            source: .agent,
             cwd: FileManager.default.temporaryDirectory.path,
             isAppFocused: false,
             isFocusedPanel: false
@@ -200,6 +202,7 @@ final class TerminalNotificationPolicyEngineTests: XCTestCase {
             title: "Title",
             subtitle: "",
             body: "Body",
+            source: .agent,
             cwd: FileManager.default.temporaryDirectory.path,
             isAppFocused: false,
             isFocusedPanel: false
@@ -229,6 +232,7 @@ final class TerminalNotificationPolicyEngineTests: XCTestCase {
             title: "Title",
             subtitle: "",
             body: "Body",
+            source: .agent,
             cwd: FileManager.default.temporaryDirectory.path,
             isAppFocused: false,
             isFocusedPanel: false
@@ -258,6 +262,7 @@ final class TerminalNotificationPolicyEngineTests: XCTestCase {
             title: "Title",
             subtitle: "",
             body: "Body",
+            source: .agent,
             cwd: FileManager.default.temporaryDirectory.path,
             isAppFocused: false,
             isFocusedPanel: false

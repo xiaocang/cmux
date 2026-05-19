@@ -8392,6 +8392,18 @@ class TerminalController {
 
     // MARK: - V2 Notification Methods
 
+    private func v2NotificationSource(_ params: [String: Any]) -> TerminalNotificationSource {
+        let raw = (v2String(params, "source") ?? v2String(params, "notification_source"))?
+            .replacingOccurrences(of: "-", with: "_")
+            .lowercased()
+        switch raw {
+        case "monitor", "workspace_monitor":
+            return .monitor
+        default:
+            return .agent
+        }
+    }
+
     private func v2NotificationCreate(params: [String: Any]) -> V2CallResult {
         guard let tabManager = v2ResolveTabManager(params: params) else {
             return .err(code: "unavailable", message: "TabManager not available", data: nil)
@@ -8401,6 +8413,7 @@ class TerminalController {
         let title = (params["title"] as? String) ?? "Notification"
         let subtitle = (params["subtitle"] as? String) ?? ""
         let body = (params["body"] as? String) ?? ""
+        let source = v2NotificationSource(params)
 
         var result: V2CallResult = .err(code: "internal_error", message: "Failed to notify", data: nil)
         v2MainSync {
@@ -8422,7 +8435,8 @@ class TerminalController {
                 surfaceId: surfaceId,
                 title: title,
                 subtitle: subtitle,
-                body: body
+                body: body,
+                source: source
             )
             result = .ok(["workspace_id": ws.id.uuidString, "surface_id": v2OrNull(surfaceId?.uuidString)])
         }
@@ -8440,6 +8454,7 @@ class TerminalController {
         let title = (params["title"] as? String) ?? "Notification"
         let subtitle = (params["subtitle"] as? String) ?? ""
         let body = (params["body"] as? String) ?? ""
+        let source = v2NotificationSource(params)
 
         var result: V2CallResult = .err(code: "internal_error", message: "Failed to notify", data: nil)
         v2MainSync {
@@ -8456,7 +8471,8 @@ class TerminalController {
                 surfaceId: surfaceId,
                 title: title,
                 subtitle: subtitle,
-                body: body
+                body: body,
+                source: source
             )
             result = .ok(["workspace_id": ws.id.uuidString, "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id), "surface_id": surfaceId.uuidString, "surface_ref": v2Ref(kind: .surface, uuid: surfaceId), "window_id": v2OrNull(v2ResolveWindowId(tabManager: tabManager)?.uuidString), "window_ref": v2Ref(kind: .window, uuid: v2ResolveWindowId(tabManager: tabManager))])
         }
@@ -8477,6 +8493,7 @@ class TerminalController {
         let title = (params["title"] as? String) ?? "Notification"
         let subtitle = (params["subtitle"] as? String) ?? ""
         let body = (params["body"] as? String) ?? ""
+        let source = v2NotificationSource(params)
 
         var result: V2CallResult = .err(code: "internal_error", message: "Failed to notify", data: nil)
         v2MainSync {
@@ -8493,7 +8510,8 @@ class TerminalController {
                 surfaceId: surfaceId,
                 title: title,
                 subtitle: subtitle,
-                body: body
+                body: body,
+                source: source
             )
             result = .ok(["workspace_id": ws.id.uuidString, "workspace_ref": v2Ref(kind: .workspace, uuid: ws.id), "surface_id": surfaceId.uuidString, "surface_ref": v2Ref(kind: .surface, uuid: surfaceId), "window_id": v2OrNull(v2ResolveWindowId(tabManager: tabManager)?.uuidString), "window_ref": v2Ref(kind: .window, uuid: v2ResolveWindowId(tabManager: tabManager))])
         }
@@ -8716,6 +8734,7 @@ class TerminalController {
             "title": notification.title,
             "subtitle": notification.subtitle,
             "body": notification.body,
+            "source": notification.source.rawValue,
             "created_at": Self.notificationCreatedAtString(notification.createdAt),
             "tab_title": v2OrNull(AppDelegate.shared?.tabTitle(for: notification.tabId)),
         ]

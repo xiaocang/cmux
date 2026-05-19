@@ -661,6 +661,11 @@ enum NotificationAuthorizationState: Equatable {
     }
 }
 
+enum TerminalNotificationSource: String, Hashable, Sendable {
+    case agent
+    case monitor
+}
+
 struct TerminalNotification: Identifiable, Hashable {
     let id: UUID
     let tabId: UUID
@@ -668,9 +673,34 @@ struct TerminalNotification: Identifiable, Hashable {
     let title: String
     let subtitle: String
     let body: String
+    let source: TerminalNotificationSource
     let createdAt: Date
     var isRead: Bool
     var paneFlash: Bool = true
+
+    init(
+        id: UUID,
+        tabId: UUID,
+        surfaceId: UUID?,
+        title: String,
+        subtitle: String,
+        body: String,
+        source: TerminalNotificationSource = .agent,
+        createdAt: Date,
+        isRead: Bool,
+        paneFlash: Bool = true
+    ) {
+        self.id = id
+        self.tabId = tabId
+        self.surfaceId = surfaceId
+        self.title = title
+        self.subtitle = subtitle
+        self.body = body
+        self.source = source
+        self.createdAt = createdAt
+        self.isRead = isRead
+        self.paneFlash = paneFlash
+    }
 }
 
 @MainActor
@@ -960,6 +990,14 @@ final class TerminalNotificationStore: ObservableObject {
             focusedReadIndicatorByTabId[tabId] == surfaceId
     }
 
+    func hasUnreadMonitorNotification(forTabId tabId: UUID) -> Bool {
+        notifications.contains { notification in
+            notification.tabId == tabId &&
+                !notification.isRead &&
+                notification.source == .monitor
+        }
+    }
+
     func latestNotification(forTabId tabId: UUID) -> TerminalNotification? {
         indexes.latestByTabId[tabId]
     }
@@ -979,6 +1017,7 @@ final class TerminalNotificationStore: ObservableObject {
         title: String,
         subtitle: String,
         body: String,
+        source: TerminalNotificationSource = .agent,
         cooldownKey: String? = nil,
         cooldownInterval: TimeInterval? = nil
     ) {
@@ -1008,7 +1047,8 @@ final class TerminalNotificationStore: ObservableObject {
             surfaceId: surfaceId,
             title: title,
             subtitle: subtitle,
-            body: body
+            body: body,
+            source: source
         )
         guard !policyContext.hooks.isEmpty else {
             applyNotification(
@@ -1104,7 +1144,8 @@ final class TerminalNotificationStore: ObservableObject {
         surfaceId: UUID?,
         title: String,
         subtitle: String,
-        body: String
+        body: String,
+        source: TerminalNotificationSource
     ) -> NotificationPolicyContext {
         let appDelegate = AppDelegate.shared
         let context = appDelegate?.contextContainingTabId(tabId)
@@ -1127,6 +1168,7 @@ final class TerminalNotificationStore: ObservableObject {
                 title: title,
                 subtitle: subtitle,
                 body: body,
+                source: source,
                 cwd: cwd,
                 isAppFocused: isAppFocused,
                 isFocusedPanel: isFocusedPanel
@@ -1150,6 +1192,7 @@ final class TerminalNotificationStore: ObservableObject {
                 title: payload.title,
                 subtitle: payload.subtitle,
                 body: payload.body,
+                source: request.source,
                 cwd: request.cwd,
                 isAppFocused: request.isAppFocused,
                 isFocusedPanel: request.isFocusedPanel
@@ -1177,6 +1220,7 @@ final class TerminalNotificationStore: ObservableObject {
             title: request.title,
             subtitle: request.subtitle,
             body: request.body,
+            source: request.source,
             createdAt: now,
             isRead: !effects.markUnread,
             paneFlash: effects.paneFlash
@@ -1510,6 +1554,7 @@ final class TerminalNotificationStore: ObservableObject {
                 title: notification.title,
                 subtitle: notification.subtitle,
                 body: notification.body,
+                source: notification.source,
                 createdAt: notification.createdAt,
                 isRead: notification.isRead,
                 paneFlash: notification.paneFlash

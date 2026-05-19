@@ -360,8 +360,9 @@ private struct PluginWindowOverlayHost: View {
     let placement: CMUXWindowOverlayPlacement
 
     var body: some View {
+        let contributions = pluginSystem.windowOverlays(placement: placement)
         ZStack(alignment: .topLeading) {
-            ForEach(pluginSystem.windowOverlays(placement: placement), id: \.id) { contribution in
+            ForEach(contributions, id: \.id) { contribution in
                 PluginWindowOverlayContributionView(
                     contribution: contribution,
                     tabManager: tabManager,
@@ -369,10 +370,24 @@ private struct PluginWindowOverlayHost: View {
                 )
                 .zIndex(Double(contribution.priority))
             }
+            if shouldRenderBuiltinSpriteAssistantFallback(contributions: contributions) {
+                SortAssistantFloatingHost(
+                    tabManager: tabManager,
+                    workspaceTabStore: workspaceTabStore
+                )
+                .zIndex(100)
+            }
         }
         .frame(width: 1, height: 1)
         .allowsHitTesting(false)
         .accessibilityHidden(true)
+    }
+
+    private func shouldRenderBuiltinSpriteAssistantFallback(contributions: [CMUXWindowOverlayContribution]) -> Bool {
+        guard placement == .windowRootFloating else { return false }
+        return !contributions.contains { contribution in
+            contribution.metadata["renderer"] == CMUXBuiltinWindowOverlayRenderer.spriteAssistant
+        }
     }
 }
 
@@ -9714,6 +9729,7 @@ private final class SidebarTabItemSettingsStore: ObservableObject {
 struct SidebarTabItemPresentationSnapshot: Equatable {
     let tabId: UUID
     let unreadCount: Int
+    let hasUnreadMonitorNotification: Bool
     let latestNotificationText: String?
     let showsModifierShortcutHints: Bool
 }
@@ -9727,6 +9743,7 @@ struct SidebarTabItemPresentationResolutionPolicy {
         return SidebarTabItemPresentationSnapshot(
             tabId: live.tabId,
             unreadCount: live.unreadCount,
+            hasUnreadMonitorNotification: live.hasUnreadMonitorNotification,
             latestNotificationText: live.latestNotificationText,
             showsModifierShortcutHints: frozen.showsModifierShortcutHints
         )
@@ -10624,6 +10641,7 @@ struct VerticalTabsSidebar: View {
             target: contextMenuPinTarget
         )
         let liveUnreadCount = notificationStore.unreadCount(forTabId: tab.id)
+        let liveHasUnreadMonitorNotification = notificationStore.hasUnreadMonitorNotification(forTabId: tab.id)
         let liveLatestNotificationText: String? = {
             guard showsSidebarNotificationMessage,
                   let notification = notificationStore.latestNotification(forTabId: tab.id) else {
@@ -10637,6 +10655,7 @@ struct VerticalTabsSidebar: View {
         let livePresentation = SidebarTabItemPresentationSnapshot(
             tabId: tab.id,
             unreadCount: liveUnreadCount,
+            hasUnreadMonitorNotification: liveHasUnreadMonitorNotification,
             latestNotificationText: liveLatestNotificationText,
             showsModifierShortcutHints: liveShowsModifierShortcutHints
         )
@@ -10662,6 +10681,7 @@ struct VerticalTabsSidebar: View {
             canCloseWorkspace: renderContext.canCloseWorkspace,
             accessibilityWorkspaceCount: renderContext.workspaceCount,
             unreadCount: resolvedPresentation.unreadCount,
+            hasUnreadMonitorNotification: resolvedPresentation.hasUnreadMonitorNotification,
             latestNotificationText: resolvedPresentation.latestNotificationText,
             summaryScoreBadge: renderContext.summaryScoreBadgeById[tab.id],
             rowSpacing: tabRowSpacing,
@@ -15938,6 +15958,7 @@ private struct TabItemView: View, Equatable {
         lhs.canCloseWorkspace == rhs.canCloseWorkspace &&
         lhs.accessibilityWorkspaceCount == rhs.accessibilityWorkspaceCount &&
         lhs.unreadCount == rhs.unreadCount &&
+        lhs.hasUnreadMonitorNotification == rhs.hasUnreadMonitorNotification &&
         lhs.latestNotificationText == rhs.latestNotificationText &&
         lhs.summaryScoreBadge == rhs.summaryScoreBadge &&
         lhs.rowSpacing == rhs.rowSpacing &&
@@ -15966,6 +15987,7 @@ private struct TabItemView: View, Equatable {
     let canCloseWorkspace: Bool
     let accessibilityWorkspaceCount: Int
     let unreadCount: Int
+    let hasUnreadMonitorNotification: Bool
     let latestNotificationText: String?
     let summaryScoreBadge: WorkspaceSidebarScoreBadge?
     let rowSpacing: CGFloat
@@ -16124,6 +16146,9 @@ private struct TabItemView: View, Equatable {
     }
 
     private var activeUnreadBadgeFillColor: Color {
+        if hasUnreadMonitorNotification {
+            return usesInvertedActiveForeground ? Color.cyan.opacity(0.32) : Color.cyan
+        }
         if let hex = sidebarNotificationBadgeColorHex, let nsColor = NSColor(hex: hex) {
             return Color(nsColor: nsColor)
         }

@@ -5467,6 +5467,18 @@ struct SettingsView: View {
     private var claudeCodeHooksEnabled = ClaudeCodeIntegrationSettings.defaultHooksEnabled
     @AppStorage(ClaudeCodeIntegrationSettings.customClaudePathKey)
     private var customClaudePath = ""
+    @AppStorage(SpriteAssistantSemanticRouterSettings.enabledKey)
+    private var spriteSemanticRouterEnabled = SpriteAssistantSemanticRouterSettings.defaultEnabled
+    @AppStorage(SpriteAssistantSemanticRouterSettings.providerKey)
+    private var spriteSemanticRouterProvider = SpriteAssistantSemanticRouterSettings.defaultProvider
+    @AppStorage(SpriteAssistantSemanticRouterSettings.modelKey)
+    private var spriteSemanticRouterModel = SpriteAssistantSemanticRouterSettings.defaultModel
+    @AppStorage(SpriteAssistantSemanticRouterSettings.baseURLKey)
+    private var spriteSemanticRouterBaseURL = SpriteAssistantSemanticRouterSettings.defaultBaseURL(
+        for: SpriteAssistantSemanticRouterSettings.defaultProvider
+    )
+    @AppStorage(SpriteAssistantSemanticRouterSettings.timeoutSecondsKey)
+    private var spriteSemanticRouterTimeoutSeconds = SpriteAssistantSemanticRouterSettings.defaultTimeoutSeconds
     @AppStorage(CursorIntegrationSettings.hooksEnabledKey)
     private var cursorHooksEnabled = CursorIntegrationSettings.defaultHooksEnabled
     @AppStorage(GeminiIntegrationSettings.hooksEnabledKey)
@@ -5598,6 +5610,13 @@ struct SettingsView: View {
     @State private var socketPasswordDraft = ""
     @State private var socketPasswordStatusMessage: String?
     @State private var socketPasswordStatusIsError = false
+    @State private var spriteOllamaModelNames: [String] = []
+    @State private var spriteOllamaModelStatusMessage: String?
+    @State private var spriteOllamaModelStatusIsError = false
+    @State private var isLoadingSpriteOllamaModels = false
+    @State private var spriteSemanticRouterTestStatusMessage: String?
+    @State private var spriteSemanticRouterTestStatusIsError = false
+    @State private var isTestingSpriteSemanticRouter = false
     @State private var notificationCustomSoundStatusMessage: String?
     @State private var notificationCustomSoundStatusIsError = false
     @State private var showNotificationCustomSoundErrorAlert = false
@@ -5788,6 +5807,79 @@ struct SettingsView: View {
             get: { DigestProviderOption.normalizedRawValue(digestProvider) },
             set: { digestProvider = DigestProviderOption.normalizedRawValue($0) }
         )
+    }
+
+    private var selectedSpriteSemanticRouterProvider: SpriteAssistantSemanticRouterProviderOption {
+        SpriteAssistantSemanticRouterSettings.providerOption(for: spriteSemanticRouterProvider)
+    }
+
+    private var spriteSemanticRouterProviderSelection: Binding<String> {
+        Binding(
+            get: { selectedSpriteSemanticRouterProvider.rawValue },
+            set: { newValue in
+                let previousDefaultBaseURL = SpriteAssistantSemanticRouterSettings.defaultBaseURL(
+                    for: spriteSemanticRouterProvider
+                )
+                let nextProvider = SpriteAssistantSemanticRouterSettings.providerOption(for: newValue)
+                spriteSemanticRouterProvider = nextProvider.rawValue
+                if spriteSemanticRouterBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || spriteSemanticRouterBaseURL == previousDefaultBaseURL {
+                    spriteSemanticRouterBaseURL = SpriteAssistantSemanticRouterSettings.defaultBaseURL(
+                        for: nextProvider.rawValue
+                    )
+                }
+                spriteOllamaModelNames = []
+                spriteOllamaModelStatusMessage = nil
+                spriteOllamaModelStatusIsError = false
+            }
+        )
+    }
+
+    private var spriteSemanticRouterBaseURLBinding: Binding<String> {
+        Binding(
+            get: {
+                SpriteAssistantSemanticRouterSettings.resolvedBaseURL(
+                    provider: selectedSpriteSemanticRouterProvider.rawValue,
+                    storedBaseURL: spriteSemanticRouterBaseURL
+                )
+            },
+            set: { newValue in
+                spriteSemanticRouterBaseURL = newValue
+                spriteOllamaModelNames = []
+                spriteOllamaModelStatusMessage = nil
+                spriteOllamaModelStatusIsError = false
+            }
+        )
+    }
+
+    private var spriteLocalLLMSubtitle: String {
+        if !spriteSemanticRouterEnabled {
+            return String(
+                localized: "settings.sprite.localLLM.subtitleOff",
+                defaultValue: "Sprite falls back to Claude Code semantic routing."
+            )
+        }
+        if spriteSemanticRouterModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return String(
+                localized: "settings.sprite.localLLM.subtitleNoModel",
+                defaultValue: "Set a model name to use the local router. Tool calls still use Claude Code."
+            )
+        }
+        return String(
+            format: String(
+                localized: "settings.sprite.localLLM.subtitleOn",
+                defaultValue: "Using %@ for simple semantic routing."
+            ),
+            selectedSpriteSemanticRouterProvider.label
+        )
+    }
+
+    private var spriteOllamaModelPickerOptions: [String] {
+        let current = spriteSemanticRouterModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !current.isEmpty, !spriteOllamaModelNames.contains(current) else {
+            return spriteOllamaModelNames
+        }
+        return [current] + spriteOllamaModelNames
     }
 
     private var browserEnabledBinding: Binding<Bool> {
@@ -6213,6 +6305,124 @@ struct SettingsView: View {
         } catch {
             socketPasswordStatusMessage = String(localized: "settings.automation.socketPassword.clearFailed", defaultValue: "Failed to clear password (\(error.localizedDescription)).")
             socketPasswordStatusIsError = true
+        }
+    }
+
+    private func refreshSpriteOllamaModels() {
+        guard selectedSpriteSemanticRouterProvider == .ollama else { return }
+        isLoadingSpriteOllamaModels = true
+        spriteOllamaModelStatusMessage = nil
+        spriteOllamaModelStatusIsError = false
+        let baseURL = SpriteAssistantSemanticRouterSettings.resolvedBaseURL(
+            provider: selectedSpriteSemanticRouterProvider.rawValue,
+            storedBaseURL: spriteSemanticRouterBaseURL
+        )
+        let timeout = SpriteAssistantSemanticRouterSettings.resolvedTimeoutSeconds()
+
+        Task {
+            do {
+                let models = try await SpriteAssistantSemanticRouterSettings.fetchOllamaModelNames(
+                    baseURL: baseURL,
+                    timeoutSeconds: timeout
+                )
+                await MainActor.run {
+                    spriteOllamaModelNames = models
+                    isLoadingSpriteOllamaModels = false
+                    spriteOllamaModelStatusIsError = false
+                    spriteOllamaModelStatusMessage = models.isEmpty
+                        ? String(localized: "settings.sprite.localLLM.models.empty", defaultValue: "No Ollama models found.")
+                        : String(
+                            format: String(
+                                localized: "settings.sprite.localLLM.models.loaded",
+                                defaultValue: "Loaded %d model(s)."
+                            ),
+                            models.count
+                        )
+                    if spriteSemanticRouterModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       let first = models.first {
+                        spriteSemanticRouterModel = first
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    spriteOllamaModelNames = []
+                    isLoadingSpriteOllamaModels = false
+                    spriteOllamaModelStatusIsError = true
+                    spriteOllamaModelStatusMessage = String(
+                        localized: "settings.sprite.localLLM.models.failed",
+                        defaultValue: "Could not load Ollama models."
+                    )
+                }
+            }
+        }
+    }
+
+    private func testSpriteSemanticRouter() {
+        let model = spriteSemanticRouterModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            spriteSemanticRouterTestStatusMessage = String(
+                localized: "settings.sprite.localLLM.test.missingModel",
+                defaultValue: "Set a model before testing."
+            )
+            spriteSemanticRouterTestStatusIsError = true
+            return
+        }
+
+        isTestingSpriteSemanticRouter = true
+        spriteSemanticRouterTestStatusIsError = false
+        spriteSemanticRouterTestStatusMessage = String(
+            localized: "settings.sprite.localLLM.test.running",
+            defaultValue: "Sending test request..."
+        )
+        let provider = selectedSpriteSemanticRouterProvider.rawValue
+        let baseURL = SpriteAssistantSemanticRouterSettings.resolvedBaseURL(
+            provider: provider,
+            storedBaseURL: spriteSemanticRouterBaseURL
+        )
+        let timeout = SpriteAssistantSemanticRouterSettings.resolvedTimeoutSeconds()
+
+        Task {
+            do {
+                let result = try await SortAssistantIntentRouter.testLocalSemanticRouter(
+                    provider: provider,
+                    model: model,
+                    baseURL: baseURL,
+                    timeoutSeconds: timeout
+                )
+                await MainActor.run {
+                    isTestingSpriteSemanticRouter = false
+                    spriteSemanticRouterTestStatusIsError = !result.passed
+                    if result.passed {
+                        spriteSemanticRouterTestStatusMessage = String(
+                            format: String(
+                                localized: "settings.sprite.localLLM.test.passed",
+                                defaultValue: "Test passed: %@, confidence %.2f."
+                            ),
+                            result.decision.intent.rawValue,
+                            result.decision.confidence
+                        )
+                    } else {
+                        spriteSemanticRouterTestStatusMessage = String(
+                            format: String(
+                                localized: "settings.sprite.localLLM.test.wrongIntent",
+                                defaultValue: "Format parsed, but returned %@ with confidence %.2f; expected %@."
+                            ),
+                            result.decision.intent.rawValue,
+                            result.decision.confidence,
+                            result.expectedIntent.rawValue
+                        )
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    isTestingSpriteSemanticRouter = false
+                    spriteSemanticRouterTestStatusIsError = true
+                    spriteSemanticRouterTestStatusMessage = String(
+                        localized: "settings.sprite.localLLM.test.failed",
+                        defaultValue: "Test failed: endpoint failed or response did not match the required JSON format."
+                    )
+                }
+            }
         }
     }
 
@@ -7287,6 +7497,164 @@ struct SettingsView: View {
 
                     SettingsCard {
                         SettingsCardRow(
+                            configurationReview: .settingsOnly,
+                            String(localized: "settings.sprite.localLLM.title", defaultValue: "Sprite Local LLM Router"),
+                            subtitle: spriteLocalLLMSubtitle,
+                            searchAnchorID: SettingsSearchIndex.settingID(for: .automation, idSuffix: "sprite-local-llm")
+                        ) {
+                            Toggle("", isOn: $spriteSemanticRouterEnabled)
+                                .labelsHidden()
+                                .controlSize(.small)
+                                .accessibilityIdentifier("SettingsSpriteLocalLLMEnabledToggle")
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsPickerRow(
+                            configurationReview: .settingsOnly,
+                            String(localized: "settings.sprite.localLLM.provider", defaultValue: "Provider"),
+                            subtitle: String(localized: "settings.sprite.localLLM.provider.subtitle", defaultValue: "Defaults to Ollama for local semantic routing."),
+                            controlWidth: pickerColumnWidth,
+                            selection: spriteSemanticRouterProviderSelection,
+                            accessibilityId: "SettingsSpriteLocalLLMProviderPicker"
+                        ) {
+                            ForEach(SpriteAssistantSemanticRouterProviderOption.allCases) { provider in
+                                Text(provider.label).tag(provider.rawValue)
+                            }
+                        }
+                        .disabled(!spriteSemanticRouterEnabled)
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .settingsOnly,
+                            String(localized: "settings.sprite.localLLM.baseURL", defaultValue: "Base URL"),
+                            subtitle: String(localized: "settings.sprite.localLLM.baseURL.subtitle", defaultValue: "Ollama default is http://localhost:11434."),
+                            controlWidth: 280
+                        ) {
+                            TextField(
+                                SpriteAssistantSemanticRouterSettings.defaultBaseURL(
+                                    for: selectedSpriteSemanticRouterProvider.rawValue
+                                ),
+                                text: spriteSemanticRouterBaseURLBinding
+                            )
+                            .textFieldStyle(.roundedBorder)
+                            .font(.system(size: 12, design: .monospaced))
+                            .disabled(!spriteSemanticRouterEnabled)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .settingsOnly,
+                            String(localized: "settings.sprite.localLLM.model", defaultValue: "Model"),
+                            subtitle: String(localized: "settings.sprite.localLLM.model.subtitle", defaultValue: "Model name used only for simple semantic routing."),
+                            controlWidth: 330
+                        ) {
+                            VStack(alignment: .trailing, spacing: 6) {
+                                HStack(spacing: 6) {
+                                    TextField(
+                                        String(localized: "settings.sprite.localLLM.model.placeholder", defaultValue: "e.g. qwen2.5-coder:7b"),
+                                        text: $spriteSemanticRouterModel
+                                    )
+                                    .textFieldStyle(.roundedBorder)
+                                    .font(.system(size: 12, design: .monospaced))
+
+                                    if selectedSpriteSemanticRouterProvider == .ollama {
+                                        Button(
+                                            isLoadingSpriteOllamaModels
+                                                ? String(localized: "settings.sprite.localLLM.models.loading", defaultValue: "Loading")
+                                                : String(localized: "settings.sprite.localLLM.models.refresh", defaultValue: "Refresh")
+                                        ) {
+                                            refreshSpriteOllamaModels()
+                                        }
+                                        .buttonStyle(.bordered)
+                                        .controlSize(.small)
+                                        .disabled(!spriteSemanticRouterEnabled || isLoadingSpriteOllamaModels)
+                                    }
+                                }
+
+                                if selectedSpriteSemanticRouterProvider == .ollama,
+                                   !spriteOllamaModelPickerOptions.isEmpty {
+                                    Picker("", selection: $spriteSemanticRouterModel) {
+                                        ForEach(spriteOllamaModelPickerOptions, id: \.self) { model in
+                                            Text(model).tag(model)
+                                        }
+                                    }
+                                    .labelsHidden()
+                                    .pickerStyle(.menu)
+                                    .controlSize(.small)
+                                    .frame(maxWidth: .infinity, alignment: .trailing)
+                                }
+
+                                if let message = spriteOllamaModelStatusMessage {
+                                    Text(message)
+                                        .font(.caption)
+                                        .foregroundStyle(spriteOllamaModelStatusIsError ? Color.red : Color.secondary)
+                                        .lineLimit(2)
+                                        .frame(maxWidth: .infinity, alignment: .trailing)
+                                }
+                            }
+                            .disabled(!spriteSemanticRouterEnabled)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .settingsOnly,
+                            String(localized: "settings.sprite.localLLM.timeout", defaultValue: "Timeout"),
+                            subtitle: String(localized: "settings.sprite.localLLM.timeout.subtitle", defaultValue: "Seconds to wait before falling back to Claude Code routing."),
+                            controlWidth: pickerColumnWidth
+                        ) {
+                            TextField("", value: $spriteSemanticRouterTimeoutSeconds, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .multilineTextAlignment(.trailing)
+                                .disabled(!spriteSemanticRouterEnabled)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .settingsOnly,
+                            String(localized: "settings.sprite.localLLM.test", defaultValue: "Test Router"),
+                            subtitle: String(localized: "settings.sprite.localLLM.test.subtitle", defaultValue: "Sends a repo-context request and verifies the JSON route format."),
+                            controlWidth: 330
+                        ) {
+                            VStack(alignment: .trailing, spacing: 6) {
+                                Button(
+                                    isTestingSpriteSemanticRouter
+                                        ? String(localized: "settings.sprite.localLLM.test.testing", defaultValue: "Testing")
+                                        : String(localized: "settings.sprite.localLLM.test.button", defaultValue: "Test")
+                                ) {
+                                    testSpriteSemanticRouter()
+                                }
+                                .buttonStyle(.bordered)
+                                .controlSize(.small)
+                                .disabled(
+                                    !spriteSemanticRouterEnabled
+                                        || isTestingSpriteSemanticRouter
+                                        || spriteSemanticRouterModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                                )
+                                .accessibilityIdentifier("SettingsSpriteLocalLLMTestButton")
+
+                                if let message = spriteSemanticRouterTestStatusMessage {
+                                    Text(message)
+                                        .font(.caption)
+                                        .foregroundStyle(spriteSemanticRouterTestStatusIsError ? Color.red : Color.secondary)
+                                        .lineLimit(3)
+                                        .multilineTextAlignment(.trailing)
+                                        .frame(maxWidth: .infinity, alignment: .trailing)
+                                }
+                            }
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardNote(String(localized: "settings.sprite.localLLM.note", defaultValue: "Only Sprite's simple semantic router uses this local model. Context gathering and tool calls still run through Claude Code. Workspace .cmux/sprite.json can override these defaults."))
+                    }
+
+                    SettingsCard {
+                        SettingsCardRow(
                             configurationReview: .json("automation.claudeCodeIntegration"),
                             String(localized: "settings.automation.claudeCode", defaultValue: "Claude Code Integration"),
                             subtitle: claudeCodeHooksEnabled
@@ -7993,6 +8361,10 @@ struct SettingsView: View {
             guard newValue <= 0 else { return }
             sidebarPullRequestShellDebounceDelaySeconds = SidebarPullRequestShellDebounceSettings.defaultDelaySeconds
         }
+        .onChange(of: spriteSemanticRouterTimeoutSeconds) { _, newValue in
+            guard !newValue.isFinite || newValue <= 0 || newValue > 30 else { return }
+            spriteSemanticRouterTimeoutSeconds = SpriteAssistantSemanticRouterSettings.defaultTimeoutSeconds
+        }
         .onChange(of: digestGHPRIntegrationEnabled) { _, _ in
             DigestSettingsBehavior.reloadGHPRIntegration(settings: pluginSettings)
         }
@@ -8098,6 +8470,20 @@ struct SettingsView: View {
         socketControlMode = SocketControlSettings.defaultMode.rawValue
         claudeCodeHooksEnabled = ClaudeCodeIntegrationSettings.defaultHooksEnabled
         customClaudePath = ""
+        spriteSemanticRouterEnabled = SpriteAssistantSemanticRouterSettings.defaultEnabled
+        spriteSemanticRouterProvider = SpriteAssistantSemanticRouterSettings.defaultProvider
+        spriteSemanticRouterModel = SpriteAssistantSemanticRouterSettings.defaultModel
+        spriteSemanticRouterBaseURL = SpriteAssistantSemanticRouterSettings.defaultBaseURL(
+            for: SpriteAssistantSemanticRouterSettings.defaultProvider
+        )
+        spriteSemanticRouterTimeoutSeconds = SpriteAssistantSemanticRouterSettings.defaultTimeoutSeconds
+        spriteOllamaModelNames = []
+        spriteOllamaModelStatusMessage = nil
+        spriteOllamaModelStatusIsError = false
+        isLoadingSpriteOllamaModels = false
+        spriteSemanticRouterTestStatusMessage = nil
+        spriteSemanticRouterTestStatusIsError = false
+        isTestingSpriteSemanticRouter = false
         cursorHooksEnabled = CursorIntegrationSettings.defaultHooksEnabled
         geminiHooksEnabled = GeminiIntegrationSettings.defaultHooksEnabled
         sidebarPullRequestShellDebounceEnabled = SidebarPullRequestShellDebounceSettings.defaultEnabled

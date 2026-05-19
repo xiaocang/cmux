@@ -79,6 +79,135 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         XCTAssertTrue(route.allowedTools.contains("list_state"))
     }
 
+    func testSemanticRouterDefaultTimeoutIsTwelveSeconds() {
+        let defaults = UserDefaults(suiteName: "SortAssistantIntentRouterTests.defaultTimeout")!
+        defaults.removePersistentDomain(forName: "SortAssistantIntentRouterTests.defaultTimeout")
+
+        XCTAssertEqual(
+            SpriteAssistantSemanticRouterSettings.resolvedTimeoutSeconds(defaults: defaults),
+            12
+        )
+    }
+
+    func testRouteAdjustmentCanReplaceWorkspaceColorWriteToolsWithReadOnlyTools() {
+        let route = SortAssistantActionRouter().route(for: .workspaceColor)
+        let adjustment = SortAssistantRouteAdjustment(
+            promptFragmentMode: .replace,
+            promptFragments: ["context"],
+            allowedToolsMode: .replace,
+            allowedTools: ["workspace_color_get"]
+        )
+        let adjusted = route.applying(adjustment)
+        let adjustedWithFallback = route.applying(
+            adjustment,
+            emptyAllowedToolsFallback: route.allowedTools
+        )
+
+        XCTAssertEqual(adjusted.mode, .readOnly)
+        XCTAssertFalse(adjusted.needsConfirmation)
+        XCTAssertEqual(adjusted.allowedTools, ["workspace_color_get"])
+        XCTAssertEqual(adjustedWithFallback.mode, .readOnly)
+        XCTAssertEqual(adjustedWithFallback.allowedTools, ["workspace_color_get"])
+        XCTAssertEqual(
+            adjustment.applyingPromptFragments(to: ["workspace_color"]),
+            ["context"]
+        )
+    }
+
+    func testWorkspaceColorRouteAdjustmentCannotCollapseToNoTools() {
+        let route = SortAssistantActionRouter().route(for: .workspaceColor)
+        let adjustment = SortAssistantRouteAdjustment(
+            promptFragmentMode: .replace,
+            promptFragments: ["workspace_color"],
+            removedPromptFragments: ["normal_chat"],
+            allowedToolsMode: .replace,
+            allowedTools: [],
+            removedAllowedTools: ["workspace_color_set"]
+        )
+        let adjusted = route.applying(
+            adjustment,
+            emptyAllowedToolsFallback: route.allowedTools
+        )
+
+        XCTAssertEqual(adjusted.mode, .applyAllowed)
+        XCTAssertEqual(adjusted.allowedTools, route.allowedTools)
+        XCTAssertTrue(adjusted.allowedTools.contains("workspace_color_set"))
+    }
+
+    func testRouteAdjustmentCanRemoveStaleSortWriteTools() {
+        let route = SortAssistantActionRouter().route(for: .applySort)
+        let adjusted = route.applying(
+            SortAssistantRouteAdjustment(
+                removedAllowedTools: ["sort_apply", "sort_undo"]
+            )
+        )
+
+        XCTAssertEqual(adjusted.mode, .previewOnly)
+        XCTAssertTrue(adjusted.allowedTools.contains("sort_preview"))
+        XCTAssertFalse(adjusted.allowedTools.contains("sort_apply"))
+        XCTAssertFalse(adjusted.allowedTools.contains("sort_undo"))
+    }
+
+    func testSemanticDecisionParsesDynamicRouteAdjustmentModes() throws {
+        let decision = try SortAssistantIntentRouter.parseDecisionForTesting(
+            """
+            {
+              "intent": "workspace_color",
+              "steps": [{"intent": "workspace_color"}],
+              "routeAdjustment": {
+                "promptFragmentMode": "replace",
+                "promptFragments": ["normal_chat", "context"],
+                "removePromptFragments": ["normal_chat"],
+                "allowedToolsMode": "replace",
+                "allowedTools": [
+                  "mcp__cmux_sprite__workspace_color_get",
+                  "workspace_color_set"
+                ],
+                "removeAllowedTools": ["workspace_color_set"]
+              },
+              "confidence": 0.93,
+              "reason": "read-only follow-up"
+            }
+            """
+        )
+        let adjustment = decision.routeAdjustment
+        let route = SortAssistantActionRouter()
+            .route(for: decision.steps)
+            .applying(adjustment)
+
+        XCTAssertEqual(adjustment.promptFragmentMode, .replace)
+        XCTAssertEqual(adjustment.allowedToolsMode, .replace)
+        XCTAssertEqual(route.allowedTools, ["workspace_color_get"])
+        XCTAssertEqual(route.mode, .readOnly)
+        XCTAssertEqual(
+            SortAssistantMCPClient.promptFragmentNamesForTesting(
+                steps: decision.steps,
+                adjustment: adjustment
+            ),
+            ["context"]
+        )
+    }
+
+    func testApplyAllowedWorkspaceColorChoicePromptKeepsWorkspaceColorIntent() {
+        let prompt = SortAssistantChoicePrompt(
+            title: "Choose color",
+            message: nil,
+            options: [
+                SortAssistantChoicePrompt.Option(
+                    id: "red",
+                    title: "Red",
+                    subtitle: nil,
+                    goal: "Set the active workspace color to red."
+                ),
+            ],
+            followUpIntent: .workspaceColor,
+            forceApply: true
+        )
+
+        XCTAssertTrue(prompt.forceApplyOnSubmit)
+        XCTAssertEqual(prompt.intentOnSubmit, .workspaceColor)
+    }
+
     func testExplicitSlashSortBypassesPreOperationConfirmation() {
         let router = SortAssistantActionRouter()
 

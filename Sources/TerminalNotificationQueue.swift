@@ -302,7 +302,8 @@ extension TerminalController {
         surfaceId: UUID?,
         title: String,
         subtitle: String,
-        body: String
+        body: String,
+        source: TerminalNotificationSource = .agent
     ) {
         TerminalMutationBus.shared.discardPendingNotifications(forTabId: tabId, surfaceId: surfaceId)
         TerminalNotificationStore.shared.addNotification(
@@ -310,7 +311,8 @@ extension TerminalController {
             surfaceId: surfaceId,
             title: title,
             subtitle: subtitle,
-            body: body
+            body: body,
+            source: source
         )
     }
 }
