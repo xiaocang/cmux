@@ -3134,19 +3134,6 @@ struct SortAssistantIntentRouter: Sendable {
         "当前仓库", "仓库", "代码库", "当前目录", "目录", "分支", "远端",
         "拉取请求", "评审", "子模块"
     ]
-    private static let workspaceColorSubjectKeywords = [
-        "workspace color", "workspace colour", "workspace tab color", "workspace tab colour",
-        "tab color", "tab colour", "sidebar color", "sidebar colour", "color picker", "colour picker",
-        "工作区颜色", "标签颜色", "侧边栏颜色", "颜色"
-    ]
-    private static let workspaceColorMutationKeywords = [
-        "set", "change", "make", "paint", "assign", "apply", "clear", "remove", "reset",
-        "设", "设置", "改", "更改", "清除", "移除", "重置", "换成"
-    ]
-    private static let workspaceColorReadKeywords = [
-        "what", "which", "show", "read", "get", "current", "is", "color?",
-        "什么", "哪个", "显示", "读取", "当前", "现在"
-    ]
     private static let sortPermissionGrantKeywords = [
         "grant", "allow", "approve", "yes", "ok", "okay", "go ahead", "do it",
         "write access", "give write access", "授权", "允许", "批准", "可以", "执行"
@@ -3159,9 +3146,6 @@ struct SortAssistantIntentRouter: Sendable {
     func immediateIntent(for text: String, externalGoal: Bool = false) -> SortAssistantIntent? {
         if Self.clearSessionCommands.contains(Self.slashCommandName(text)) {
             return .clearSession
-        }
-        if Self.isWorkspaceColorRequest(text) {
-            return .workspaceColor
         }
         if Self.isWorkspaceSortPermissionGrant(text) {
             return .applySort
@@ -3204,9 +3188,6 @@ struct SortAssistantIntentRouter: Sendable {
     ) -> SortAssistantIntentDecision {
         let lower = normalizedIntentText(text)
         let intent: SortAssistantIntent
-        if isWorkspaceColorRequest(text) {
-            return SortAssistantIntentDecision(intent: .workspaceColor, confidence: 0.85, reason: "workspace_color")
-        }
         let isSortRelated = containsAny(lower, sortKeywords + [
             "workspace", "first", "top", "bottom", "urgent", "urgency",
             "工作区", "放到", "移动", "置顶", "紧急"
@@ -3240,19 +3221,6 @@ struct SortAssistantIntentRouter: Sendable {
             reason: "fallback",
             isFallback: true
         )
-    }
-
-    private static func isWorkspaceColorRequest(_ text: String) -> Bool {
-        let lower = normalizedIntentText(text)
-        let compact = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard containsAny(compact, workspaceColorSubjectKeywords) else { return false }
-        if containsAny(lower, workspaceColorMutationKeywords) {
-            return true
-        }
-        if containsAny(lower, workspaceColorReadKeywords) {
-            return true
-        }
-        return compact.contains("#")
     }
 
     private static func isWorkspaceSortPermissionGrant(_ text: String) -> Bool {
@@ -3338,6 +3306,8 @@ struct SortAssistantIntentRouter: Sendable {
         - Remember/forget requests about workspace sorting/sidebar order are remember_preference/forget_preference.
         - Use remember_sprite_memory/forget_sprite_memory only when the user explicitly asks for sprite/workspace memory.md/project/session memory rather than a sorting preference.
         - Workspace/sidebar/tab color requests are workspace_color, not normal_chat and not a sorting request.
+        - Requests that map color names or hex values to workspace groups/categories are workspace_color, even when the wording does not explicitly say "workspace color".
+        - Follow-ups claiming workspace color writes are unavailable, read-only, or need permission are workspace_color when recentConversation is about reading or setting workspace colors.
         """
     }
 
@@ -4140,6 +4110,8 @@ struct SortAssistantMCPClient: Sendable {
         - Use sprite_memory_query before relying on general project/session memory.
         - Use context_collect for plugin-contributed context, repository_context for the current local Git repository, ghpr_context or github_pr_context for linked pull-request details, github_context for cached sidebar GitHub metadata, and workspace_digest_get for digest context.
         - For workspace_color, call workspace_color_get for read requests, workspace_color_set for set/change requests, and workspace_color_clear for clear/reset/remove requests. Use the active workspace unless the user specified another workspace.
+        - For workspace_color requests involving multiple workspaces, visible/current workspace color reads, or group/category color assignments, call list_state first, match requested workspaces by item id/title, then call workspace_color_set or workspace_color_clear for each confirmed match. If a group/category match is ambiguous, return one choicePrompt instead of guessing.
+        - Never say workspace color changes require extra write permission or that the current session is read-only. The allowedTools list is authoritative. If workspace_color_set or workspace_color_clear is allowed, use it for confirmed mutations.
         - If the user asks about the current repository, current directory, Git, branch, remotes, GitHub, ghpr, PRs, CI, reviews, Jira, or asks to sort by urgency/priority signals that may come from PRs, gather the relevant MCP context before answering or sorting.
         - For ask_context about repositories or GitHub, call repository_context and github_context first. Do not answer with a generic self-description.
         - Context tools may return null or empty data when integrations are disabled or no PR is linked; report that briefly instead of inventing context.
@@ -6862,10 +6834,14 @@ final class SortAssistantCoordinator: ObservableObject {
         }
 
         if intent == .workspaceColor {
-            handleWorkspaceColorIntent(
+            startMCPAssistant(
                 goal: trimmed,
+                intent: .workspaceColor,
+                route: actionRouter.route(for: .workspaceColor),
                 tabManager: tabManager,
-                workspaceTarget: workspaceTarget
+                workspaceTabStore: workspaceTabStore,
+                workspaceTarget: workspaceTarget,
+                explicitSlashCommand: explicitSlashCommand
             )
             return
         }
@@ -6910,134 +6886,8 @@ final class SortAssistantCoordinator: ObservableObject {
         )
     }
 
-    private enum WorkspaceColorOperation {
-        case get
-        case set(String)
-        case clear
-        case missingColor
-    }
-
-    private func handleWorkspaceColorIntent(
-        goal: String,
-        tabManager: TabManager,
-        workspaceTarget: SortAssistantWorkspaceTarget?
-    ) {
-        choicePrompt = nil
-        pendingPreviewPatch = nil
-        pendingPreviewSort = nil
-        latestResult = nil
-
-        guard let workspaceId = workspaceTarget?.id ?? tabManager.selectedTabId,
-              let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) else {
-            append(.init(
-                kind: .error,
-                text: String(localized: "sortAssistant.workspaceColor.workspaceMissing", defaultValue: "No workspace is selected.")
-            ))
-            return
-        }
-
-        switch Self.workspaceColorOperation(from: goal) {
-        case .get:
-            if let color = workspace.customColor {
-                append(.init(
-                    kind: .assistant,
-                    text: String(
-                        format: String(
-                            localized: "sortAssistant.workspaceColor.current",
-                            defaultValue: "Current workspace color is %@."
-                        ),
-                        color
-                    )
-                ))
-            } else {
-                append(.init(
-                    kind: .assistant,
-                    text: String(
-                        localized: "sortAssistant.workspaceColor.none",
-                        defaultValue: "No custom workspace color is set."
-                    )
-                ))
-            }
-
-        case .set(let rawColor):
-            guard let hex = WorkspaceTabColorSettings.resolvedColorHex(rawColor) else {
-                append(.init(
-                    kind: .error,
-                    text: Self.workspaceColorInvalidMessage()
-                ))
-                return
-            }
-            tabManager.setTabColor(tabId: workspace.id, color: hex)
-            append(.init(
-                kind: .assistant,
-                text: String(
-                    format: String(
-                        localized: "sortAssistant.workspaceColor.set",
-                        defaultValue: "Set workspace color to %@."
-                    ),
-                    hex
-                )
-            ))
-
-        case .clear:
-            tabManager.setTabColor(tabId: workspace.id, color: nil)
-            append(.init(
-                kind: .assistant,
-                text: String(
-                    localized: "sortAssistant.workspaceColor.cleared",
-                    defaultValue: "Cleared the workspace color."
-                )
-            ))
-
-        case .missingColor:
-            append(.init(
-                kind: .error,
-                text: String(
-                    localized: "sortAssistant.workspaceColor.missingColor",
-                    defaultValue: "Tell me a workspace color name or a #RRGGBB value."
-                )
-            ))
-        }
-    }
-
-    private static func workspaceColorOperation(from goal: String) -> WorkspaceColorOperation {
-        let normalized = normalizedColorCommandText(goal)
-        if colorCommandTextContainsAny(normalized, [" clear ", " remove ", " reset ", " no color ", " no colour ", " 清除 ", " 移除 ", " 重置 "]) {
-            return .clear
-        }
-        if let candidate = workspaceColorCandidate(from: goal) {
-            return .set(candidate)
-        }
-        if colorCommandTextContainsAny(normalized, [" set ", " change ", " make ", " paint ", " assign ", " apply ", " 设 ", " 设置 ", " 改 ", " 更改 ", " 换成 "]) {
-            return .missingColor
-        }
-        return .get
-    }
-
     private static func colorCommandTextContainsAny(_ text: String, _ needles: [String]) -> Bool {
         needles.contains { text.contains($0) }
-    }
-
-    private static func workspaceColorCandidate(from goal: String) -> String? {
-        if let hexRange = goal.range(
-            of: "#?[0-9A-Fa-f]{6}",
-            options: .regularExpression
-        ) {
-            return String(goal[hexRange])
-        }
-
-        let normalizedGoal = normalizedColorCommandText(goal)
-        let palette = WorkspaceTabColorSettings.palette()
-            .sorted { lhs, rhs in lhs.name.count > rhs.name.count }
-        for entry in palette {
-            let normalizedName = normalizedColorCommandText(entry.name)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !normalizedName.isEmpty else { continue }
-            if normalizedGoal.contains(" \(normalizedName) ") {
-                return entry.name
-            }
-        }
-        return nil
     }
 
     private static func normalizedColorCommandText(_ text: String) -> String {
@@ -7046,17 +6896,6 @@ final class SortAssistantCoordinator: ObservableObject {
             lower = lower.replacingOccurrences(of: separator, with: " ")
         }
         return " " + lower.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ") + " "
-    }
-
-    private static func workspaceColorInvalidMessage() -> String {
-        let names = WorkspaceTabColorSettings.palette().map(\.name).joined(separator: ", ")
-        return String(
-            format: String(
-                localized: "sortAssistant.workspaceColor.invalid",
-                defaultValue: "Invalid workspace color. Use #RRGGBB or one of: %@."
-            ),
-            names
-        )
     }
 
     private func startMCPAssistant(

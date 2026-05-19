@@ -48,6 +48,37 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         )
     }
 
+    func testWorkspaceColorCategoryAssignmentDoesNotUseImmediateKeywordRouting() {
+        let router = SortAssistantIntentRouter()
+
+        XCTAssertNil(
+            router.immediateIntent(
+                for: "blue for reviews, red for bugfixes, green for new features"
+            )
+        )
+    }
+
+    func testWorkspaceColorPluralReadDoesNotUseImmediateKeywordRouting() {
+        let router = SortAssistantIntentRouter()
+
+        XCTAssertNil(
+            router.immediateIntent(
+                for: "What colors are currently assigned to workspaces?"
+            )
+        )
+    }
+
+    func testWorkspaceColorRouteAllowsColorMutationTools() {
+        let router = SortAssistantActionRouter()
+        let route = router.route(for: .workspaceColor)
+
+        XCTAssertEqual(route.mode, .applyAllowed)
+        XCTAssertFalse(route.needsConfirmation)
+        XCTAssertTrue(route.allowedTools.contains("workspace_color_set"))
+        XCTAssertTrue(route.allowedTools.contains("workspace_color_clear"))
+        XCTAssertTrue(route.allowedTools.contains("list_state"))
+    }
+
     func testExplicitSlashSortBypassesPreOperationConfirmation() {
         let router = SortAssistantActionRouter()
 
