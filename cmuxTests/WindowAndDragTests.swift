@@ -17,14 +17,13 @@ import UserNotifications
 #endif
 
 final class SortAssistantIntentRouterTests: XCTestCase {
-    func testSortApplyPermissionGrantRoutesToApplySortImmediately() {
+    func testSortApplyPermissionGrantDoesNotUseImmediateKeywordRouting() {
         let router = SortAssistantIntentRouter()
 
-        XCTAssertEqual(
+        XCTAssertNil(
             router.immediateIntent(
                 for: "I need sort_apply permission to complete the sort. Please grant write access to workspace sorting."
-            ),
-            .applySort
+            )
         )
     }
 
@@ -77,6 +76,31 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         XCTAssertTrue(route.allowedTools.contains("workspace_color_set"))
         XCTAssertTrue(route.allowedTools.contains("workspace_color_clear"))
         XCTAssertTrue(route.allowedTools.contains("list_state"))
+    }
+
+    func testSemanticRouterToolCatalogUsesMCPToolsListProtocol() async throws {
+        let script = """
+        while IFS= read -r line; do
+          id=$(printf '%s\\n' "$line" | sed -E 's/.*"id":[[:space:]]*([^,}]*).*/\\1/')
+          case "$line" in
+            *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"mock","version":"1"}}}\\n' "$id" ;;
+            *'"method":"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"external_probe","description":"External probe tool","inputSchema":{"type":"object"}}]}}\\n' "$id" ;;
+          esac
+        done
+        """
+
+        let tools = await SortAssistantIntentRouter.semanticMCPToolCatalogForTesting(externalServers: [
+            "mock_external": [
+                "command": "/bin/sh",
+                "args": ["-c", script],
+            ],
+        ])
+        let tool = try XCTUnwrap(tools.first { $0["name"] as? String == "external_probe" })
+
+        XCTAssertEqual(tool["server"] as? String, "mock_external")
+        XCTAssertEqual(tool["qualifiedName"] as? String, "mcp__mock_external__external_probe")
+        XCTAssertEqual(tool["description"] as? String, "External probe tool")
+        XCTAssertEqual((tool["inputSchema"] as? [String: Any])?["type"] as? String, "object")
     }
 
     func testSemanticRouterDefaultTimeoutIsTwelveSeconds() {

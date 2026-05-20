@@ -3,6 +3,7 @@ import CMUXWorkstream
 import Combine
 import Darwin
 import Foundation
+import MCP
 import SwiftUI
 
 fileprivate func orderedUniqueSortAssistant<T: Hashable>(_ values: [T]) -> [T] {
@@ -47,7 +48,10 @@ fileprivate let sortAssistantKnownInternalTools: Set<String> = [
     "ghpr_status",
     "github_context",
     "github_pr_context",
+    "ghpr_refresh",
     "list_state",
+    "list_lock",
+    "list_pin",
     "memory_forget",
     "memory_query",
     "memory_write_candidate",
@@ -65,9 +69,12 @@ fileprivate let sortAssistantKnownInternalTools: Set<String> = [
     "workspace_color_set",
     "workspace_digest_get",
     "workspace_digest_progress",
+    "workspace_digest_refresh",
 ]
 
 fileprivate let sortAssistantMutatingInternalTools: Set<String> = [
+    "list_lock",
+    "list_pin",
     "memory_forget",
     "memory_write_candidate",
     "sort_apply",
@@ -1383,7 +1390,7 @@ private struct SortAssistantMemoryCandidateTextEditor: NSViewRepresentable {
             self.parent = parent
         }
 
-        func textDidChange(_ notification: Notification) {
+        func textDidChange(_ notification: Foundation.Notification) {
             guard !isProgrammaticMutation,
                   let textView = notification.object as? SortAssistantPlaceholderTextView else {
                 return
@@ -1478,7 +1485,7 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
             self.parent = parent
         }
 
-        func controlTextDidBeginEditing(_ obj: Notification) {
+        func controlTextDidBeginEditing(_ obj: Foundation.Notification) {
             publishSelection(from: obj.object as? NSTextField)
             if !parent.isFocused {
                 DispatchQueue.main.async {
@@ -1487,7 +1494,7 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
             }
         }
 
-        func controlTextDidChange(_ obj: Notification) {
+        func controlTextDidChange(_ obj: Foundation.Notification) {
             guard !isProgrammaticMutation,
                   let field = obj.object as? NSTextField else {
                 return
@@ -1496,7 +1503,7 @@ private struct SortAssistantInputTextField: NSViewRepresentable {
             publishSelection(from: field)
         }
 
-        func controlTextDidEndEditing(_ obj: Notification) {
+        func controlTextDidEndEditing(_ obj: Foundation.Notification) {
             publishSelection(from: obj.object as? NSTextField)
             if parent.isFocused {
                 DispatchQueue.main.async {
@@ -1882,7 +1889,7 @@ private enum SortAssistantMessageCollapseRules {
     static let lineLimit = 6
 
     static func isCollapsible(_ message: SortAssistantMessage) -> Bool {
-        guard message.kind == .assistant || message.kind == .error else { return false }
+        guard message.kind == .assistant || message.kind == .warning || message.kind == .error else { return false }
         return message.text.count > 260 ||
             message.text.filter { $0 == "\n" }.count + 1 > lineLimit
     }
@@ -2037,7 +2044,7 @@ private struct SortAssistantMessageRow: View {
     }
 
     private var showsCopyButton: Bool {
-        message.kind == .assistant || message.kind == .error
+        message.kind == .assistant || message.kind == .warning || message.kind == .error
     }
 
     private var showsExpandButton: Bool {
@@ -2064,12 +2071,21 @@ private struct SortAssistantMessageRow: View {
     }
 
     private var assistantForeground: Color {
-        message.kind == .error ? Color.red : Color.primary
+        switch message.kind {
+        case .error:
+            return Color.red
+        case .warning:
+            return Color.orange
+        case .user, .assistant, .progress:
+            return Color.primary
+        }
     }
 
     private var avatarState: SortAssistantMascotState {
         switch message.kind {
         case .progress:
+            return .review
+        case .warning:
             return .review
         case .error:
             return .failed
@@ -2086,6 +2102,8 @@ private struct SortAssistantMessageRow: View {
             return .clear
         case .progress:
             return Color.blue.opacity(0.075)
+        case .warning:
+            return Color.orange.opacity(0.075)
         case .error:
             return Color.red.opacity(0.075)
         case .user:
@@ -2099,6 +2117,8 @@ private struct SortAssistantMessageRow: View {
             return .clear
         case .progress:
             return Color.blue.opacity(0.14)
+        case .warning:
+            return Color.orange.opacity(0.16)
         case .error:
             return Color.red.opacity(0.14)
         case .user:
@@ -2202,6 +2222,7 @@ struct SortAssistantMessage: Identifiable, Equatable {
         case user
         case assistant
         case progress
+        case warning
         case error
     }
 
@@ -2220,6 +2241,7 @@ struct SortAssistantMessage: Identifiable, Equatable {
         case .user: return "person"
         case .assistant: return "sparkles"
         case .progress: return "arrow.triangle.2.circlepath"
+        case .warning: return "exclamationmark.triangle"
         case .error: return "exclamationmark.triangle"
         }
     }
@@ -2229,6 +2251,7 @@ struct SortAssistantMessage: Identifiable, Equatable {
         case .user: return .secondary
         case .assistant: return .accentColor
         case .progress: return .blue
+        case .warning: return .orange
         case .error: return .red
         }
     }
@@ -2821,6 +2844,7 @@ struct SortAssistantIntentDecision: Equatable, Sendable {
     let isFallback: Bool
     let steps: [SortAssistantRouteStep]
     let routeAdjustment: SortAssistantRouteAdjustment
+    let semanticRouterUnavailableReport: SortAssistantSemanticRouterUnavailableReport?
 
     init(
         intent: SortAssistantIntent,
@@ -2829,7 +2853,8 @@ struct SortAssistantIntentDecision: Equatable, Sendable {
         sortRoute: SortAssistantSortRoute? = nil,
         isFallback: Bool = false,
         steps: [SortAssistantRouteStep]? = nil,
-        routeAdjustment: SortAssistantRouteAdjustment = .empty
+        routeAdjustment: SortAssistantRouteAdjustment = .empty,
+        semanticRouterUnavailableReport: SortAssistantSemanticRouterUnavailableReport? = nil
     ) {
         let primarySortRoute = intent.isSortRouted ? sortRoute : nil
         let primaryStep = SortAssistantRouteStep(intent: intent, sortRoute: primarySortRoute)
@@ -2842,6 +2867,7 @@ struct SortAssistantIntentDecision: Equatable, Sendable {
         self.isFallback = isFallback
         self.steps = normalizedSteps
         self.routeAdjustment = routeAdjustment
+        self.semanticRouterUnavailableReport = semanticRouterUnavailableReport
     }
 
     var containsClearSession: Bool {
@@ -2852,6 +2878,77 @@ struct SortAssistantIntentDecision: Equatable, Sendable {
         steps.debugDescriptionJoined
     }
 
+}
+
+struct SortAssistantSemanticRouterIssue: Equatable, Sendable {
+    enum Stage: String, Equatable, Sendable {
+        case local
+        case claude
+    }
+
+    let stage: Stage
+    let code: String
+    let detail: String?
+    let status: Int?
+    let timeoutSeconds: Int?
+
+    init(
+        stage: Stage,
+        code: String,
+        detail: String? = nil,
+        status: Int? = nil,
+        timeoutSeconds: Int? = nil
+    ) {
+        self.stage = stage
+        self.code = code
+        let trimmedDetail = detail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.detail = trimmedDetail.isEmpty ? nil : trimmedDetail
+        self.status = status
+        self.timeoutSeconds = timeoutSeconds
+    }
+
+    var debugDescription: String {
+        var fields = [
+            "stage=\(stage.rawValue)",
+            "code=\(code)",
+        ]
+        if let status {
+            fields.append("status=\(status)")
+        }
+        if let timeoutSeconds {
+            fields.append("timeoutSeconds=\(timeoutSeconds)")
+        }
+        if let detail {
+            fields.append("detail=\(detail)")
+        }
+        return fields.joined(separator: " ")
+    }
+}
+
+struct SortAssistantSemanticRouterUnavailableReport: Equatable, Sendable {
+    let reason: String
+    let fallbackIntent: SortAssistantIntent
+    let localIssue: SortAssistantSemanticRouterIssue?
+    let claudeIssue: SortAssistantSemanticRouterIssue?
+
+    var debugDescription: String {
+        [
+            "reason=\(reason)",
+            "fallbackIntent=\(fallbackIntent.rawValue)",
+            localIssue.map { "local={\($0.debugDescription)}" },
+            claudeIssue.map { "claude={\($0.debugDescription)}" },
+        ]
+        .compactMap { $0 }
+        .joined(separator: " ")
+    }
+}
+
+private struct SortAssistantSemanticRouterRuntimeError: Error, CustomStringConvertible {
+    let issue: SortAssistantSemanticRouterIssue
+
+    var description: String {
+        "semanticRouter.\(issue.debugDescription)"
+    }
 }
 
 struct SortAssistantLocalSemanticRouterTestResult: Equatable, Sendable {
@@ -2950,19 +3047,11 @@ private enum SortAssistantClaudeCodeRuntime {
     private static let effort = "low"
 
     static var outputFormat: String {
-#if DEBUG
         "stream-json"
-#else
-        "json"
-#endif
     }
 
     static var outputFormatArguments: [String] {
-#if DEBUG
         ["--verbose"]
-#else
-        []
-#endif
     }
 
     static func isolatedArguments(
@@ -3223,31 +3312,8 @@ private enum SpriteAssistantConfig {
     }
 
     static func semanticRouterConfig(workspaceDirectory: String?) -> SpriteAssistantSemanticRouterConfig? {
-        var raw = SpriteAssistantSemanticRouterSettings.userDefaultsObject()
-        for object in configObjects(workspaceDirectory: workspaceDirectory) {
-            guard let next = object["semanticRouter"] as? [String: Any] else { continue }
-            raw.merge(next) { _, new in new }
-        }
-
         let env = ProcessInfo.processInfo.environment
-        if let provider = trimmed(env["CMUX_SPRITE_SEMANTIC_ROUTER_PROVIDER"]) {
-            raw["provider"] = provider
-        }
-        if let model = trimmed(env["CMUX_SPRITE_SEMANTIC_ROUTER_MODEL"]) {
-            raw["model"] = model
-        }
-        if let baseURL = trimmed(env["CMUX_SPRITE_SEMANTIC_ROUTER_BASE_URL"]) {
-            raw["baseURL"] = baseURL
-        }
-        if let timeout = trimmed(env["CMUX_SPRITE_SEMANTIC_ROUTER_TIMEOUT_SECONDS"]),
-           let value = TimeInterval(timeout),
-           value.isFinite,
-           value > 0 {
-            raw["timeoutSeconds"] = value
-        }
-        if let apiKey = trimmed(env["CMUX_SPRITE_SEMANTIC_ROUTER_API_KEY"]) {
-            raw["apiKey"] = apiKey
-        }
+        let raw = semanticRouterRawConfig(workspaceDirectory: workspaceDirectory, environment: env)
 
         if let enabled = bool(raw["enabled"]), !enabled {
             return nil
@@ -3276,6 +3342,54 @@ private enum SpriteAssistantConfig {
             apiKey: apiKey,
             timeoutSeconds: min(max(timeout, 1), 30)
         )
+    }
+
+    static func semanticRouterConfigIssue(workspaceDirectory: String?) -> String {
+        let raw = semanticRouterRawConfig(workspaceDirectory: workspaceDirectory)
+        if let enabled = bool(raw["enabled"]), !enabled {
+            return "disabled"
+        }
+        let provider = string(raw["provider"]) ?? SpriteAssistantSemanticRouterSettings.defaultProvider
+        let baseURL = string(raw["baseURL"]) ?? defaultBaseURL(for: provider)
+        guard let model = string(raw["model"]),
+              !model.isEmpty else {
+            return "not_configured"
+        }
+        guard !baseURL.isEmpty else {
+            return "missing_base_url"
+        }
+        return "unavailable"
+    }
+
+    private static func semanticRouterRawConfig(
+        workspaceDirectory: String?,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> [String: Any] {
+        var raw = SpriteAssistantSemanticRouterSettings.userDefaultsObject()
+        for object in configObjects(workspaceDirectory: workspaceDirectory) {
+            guard let next = object["semanticRouter"] as? [String: Any] else { continue }
+            raw.merge(next) { _, new in new }
+        }
+
+        if let provider = trimmed(environment["CMUX_SPRITE_SEMANTIC_ROUTER_PROVIDER"]) {
+            raw["provider"] = provider
+        }
+        if let model = trimmed(environment["CMUX_SPRITE_SEMANTIC_ROUTER_MODEL"]) {
+            raw["model"] = model
+        }
+        if let baseURL = trimmed(environment["CMUX_SPRITE_SEMANTIC_ROUTER_BASE_URL"]) {
+            raw["baseURL"] = baseURL
+        }
+        if let timeout = trimmed(environment["CMUX_SPRITE_SEMANTIC_ROUTER_TIMEOUT_SECONDS"]),
+           let value = TimeInterval(timeout),
+           value.isFinite,
+           value > 0 {
+            raw["timeoutSeconds"] = value
+        }
+        if let apiKey = trimmed(environment["CMUX_SPRITE_SEMANTIC_ROUTER_API_KEY"]) {
+            raw["apiKey"] = apiKey
+        }
+        return raw
     }
 
     private static func defaultBaseURL(for provider: String) -> String {
@@ -4463,34 +4577,24 @@ struct SortAssistantIntentRouter: Sendable {
     private static let localSemanticRouterTestRequest = "Tell me the current repository context and current branch."
     private static let localSemanticRouterExpectedIntent = SortAssistantIntent.askContext
     private static let clearSessionCommands = ["/clear", "/new"]
-    private static let sortKeywords = [
-        "sort", "sorting", "reorder", "rank", "prioritize", "priority", "arrange",
-        "sidebar", "free sort", "order", "排序", "重排", "优先",
-        "侧边栏", "顺序"
-    ]
-    private static let contextKeywords = [
-        " repo ", " repository ", "current repo", "current repository", " git ", " branch ",
-        " remote ", " remotes ", " worktree ", " worktrees ", " cwd ", "current directory",
-        " directory ", " github ", " ghpr ", "pull request", " pr ", " prs ",
-        " ci ", " review ", " jira ", " submodule ",
-        "当前仓库", "仓库", "代码库", "当前目录", "目录", "分支", "远端",
-        "拉取请求", "评审", "子模块"
-    ]
-    private static let sortPermissionGrantKeywords = [
-        "grant", "allow", "approve", "yes", "ok", "okay", "go ahead", "do it",
-        "write access", "give write access", "授权", "允许", "批准", "可以", "执行"
-    ]
-    private static let sortPermissionDenyKeywords = [
-        "deny", "don't", "do not", "not grant", "not allow", "no permission",
-        "拒绝", "不要", "不允许"
+    private static let semanticIntentOrder: [SortAssistantIntent] = [
+        .askContext,
+        .explainCurrentOrder,
+        .proposeSort,
+        .applySort,
+        .manualReorderFeedback,
+        .rememberPreference,
+        .forgetPreference,
+        .rememberSpriteMemory,
+        .forgetSpriteMemory,
+        .undoSort,
+        .workspaceColor,
+        .normalChat,
     ]
 
     func immediateIntent(for text: String, externalGoal: Bool = false) -> SortAssistantIntent? {
         if Self.clearSessionCommands.contains(Self.slashCommandName(text)) {
             return .clearSession
-        }
-        if Self.isWorkspaceSortPermissionGrant(text) {
-            return .applySort
         }
         return nil
     }
@@ -4508,6 +4612,11 @@ struct SortAssistantIntentRouter: Sendable {
         }
 
         return await Task.detached(priority: .userInitiated) {
+            let toolCatalog = await Self.semanticMCPToolCatalog(
+                workspaceDirectory: workspaceDirectory,
+                debugSession: debugSession
+            )
+            var localIssue: SortAssistantSemanticRouterIssue?
             debugSession?.log("router.begin externalGoal=\(externalGoal) contextItems=\(conversationContext.count)")
             do {
                 let phaseStart = SortAssistantDebugSession.now()
@@ -4515,6 +4624,7 @@ struct SortAssistantIntentRouter: Sendable {
                     text: text,
                     externalGoal: externalGoal,
                     conversationContext: conversationContext,
+                    toolCatalog: toolCatalog,
                     workspaceDirectory: workspaceDirectory
                 )
                 guard !decision.containsClearSession,
@@ -4523,13 +4633,11 @@ struct SortAssistantIntentRouter: Sendable {
                         "router.local.rejected intent=\(decision.intent.rawValue) steps=\(decision.stepDebugDescription) confidence=\(Self.debugConfidence(decision.confidence))",
                         phaseStartNanos: phaseStart
                     )
-                    let fallback = Self.fallbackDecision(
-                        for: text,
-                        externalGoal: externalGoal,
-                        conversationContext: conversationContext
-                    )
-                    debugSession?.log("router.end provider=keywordFallback intent=\(fallback.intent.rawValue) reason=localRejected")
-                    return fallback
+                    throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                        stage: .local,
+                        code: "low_confidence",
+                        detail: "intent=\(decision.intent.rawValue) confidence=\(Self.debugConfidence(decision.confidence))"
+                    ))
                 }
                 debugSession?.log(
                     "router.end provider=local intent=\(decision.intent.rawValue) steps=\(decision.stepDebugDescription) confidence=\(Self.debugConfidence(decision.confidence)) adjustment=\(decision.routeAdjustment.debugDescription) fallback=false",
@@ -4537,10 +4645,11 @@ struct SortAssistantIntentRouter: Sendable {
                 )
                 return decision
             } catch {
-                debugSession?.log("router.local.failed error=\(Self.debugError(error))")
+                localIssue = Self.semanticIssue(from: error, stage: .local, fallbackCode: "failed")
+                debugSession?.log("router.local.failed error=\(localIssue?.debugDescription ?? Self.debugError(error))")
                 // Local semantic routing is optional. Claude Code remains the
-                // fallback for classification when no local provider is configured
-                // or the local provider is unavailable.
+                // semantic classifier when no local provider is configured or
+                // the local provider is unavailable.
             }
 
             do {
@@ -4548,31 +4657,44 @@ struct SortAssistantIntentRouter: Sendable {
                 let decision = try Self.classifyWithClaudeCode(
                     text: text,
                     externalGoal: externalGoal,
-                    conversationContext: conversationContext
+                    conversationContext: conversationContext,
+                    toolCatalog: toolCatalog
                 )
                 guard !decision.containsClearSession else {
                     debugSession?.log(
                         "router.claude.rejected intent=\(decision.intent.rawValue) steps=\(decision.stepDebugDescription) confidence=\(Self.debugConfidence(decision.confidence))",
                         phaseStartNanos: phaseStart
                     )
-                    return Self.fallbackDecision(
-                        for: text,
-                        externalGoal: externalGoal,
-                        conversationContext: conversationContext
+                    let report = Self.semanticUnavailableReport(
+                        reason: "claudeClearSessionRejected",
+                        localIssue: localIssue,
+                        claudeIssue: SortAssistantSemanticRouterIssue(
+                            stage: .claude,
+                            code: "clear_session_rejected",
+                            detail: "intent=\(decision.intent.rawValue)"
+                        )
                     )
+                    let unavailable = Self.semanticUnavailableDecision(reason: "claudeClearSessionRejected", report: report)
+                    debugSession?.log("router.end provider=semanticUnavailable intent=\(unavailable.intent.rawValue) \(report.debugDescription)")
+                    return unavailable
                 }
                 guard decision.confidence >= Self.semanticConfidenceFloor else {
                     debugSession?.log(
                         "router.claude.rejected intent=\(decision.intent.rawValue) steps=\(decision.stepDebugDescription) confidence=\(Self.debugConfidence(decision.confidence))",
                         phaseStartNanos: phaseStart
                     )
-                    let fallback = Self.fallbackDecision(
-                        for: text,
-                        externalGoal: externalGoal,
-                        conversationContext: conversationContext
+                    let report = Self.semanticUnavailableReport(
+                        reason: "claudeLowConfidence",
+                        localIssue: localIssue,
+                        claudeIssue: SortAssistantSemanticRouterIssue(
+                            stage: .claude,
+                            code: "low_confidence",
+                            detail: "intent=\(decision.intent.rawValue) confidence=\(Self.debugConfidence(decision.confidence))"
+                        )
                     )
-                    debugSession?.log("router.end provider=keywordFallback intent=\(fallback.intent.rawValue) reason=claudeLowConfidence")
-                    return fallback
+                    let unavailable = Self.semanticUnavailableDecision(reason: "claudeLowConfidence", report: report)
+                    debugSession?.log("router.end provider=semanticUnavailable intent=\(unavailable.intent.rawValue) \(report.debugDescription)")
+                    return unavailable
                 }
                 debugSession?.log(
                     "router.end provider=claude intent=\(decision.intent.rawValue) steps=\(decision.stepDebugDescription) confidence=\(Self.debugConfidence(decision.confidence)) adjustment=\(decision.routeAdjustment.debugDescription) fallback=false",
@@ -4580,14 +4702,16 @@ struct SortAssistantIntentRouter: Sendable {
                 )
                 return decision
             } catch {
-                debugSession?.log("router.claude.failed error=\(Self.debugError(error))")
-                let fallback = Self.fallbackDecision(
-                    for: text,
-                    externalGoal: externalGoal,
-                    conversationContext: conversationContext
+                let claudeIssue = Self.semanticIssue(from: error, stage: .claude, fallbackCode: "failed")
+                debugSession?.log("router.claude.failed error=\(claudeIssue.debugDescription)")
+                let report = Self.semanticUnavailableReport(
+                    reason: "claudeFailed",
+                    localIssue: localIssue,
+                    claudeIssue: claudeIssue
                 )
-                debugSession?.log("router.end provider=keywordFallback intent=\(fallback.intent.rawValue) reason=claudeFailed")
-                return fallback
+                let unavailable = Self.semanticUnavailableDecision(reason: "claudeFailed", report: report)
+                debugSession?.log("router.end provider=semanticUnavailable intent=\(unavailable.intent.rawValue) \(report.debugDescription)")
+                return unavailable
             }
         }.value
     }
@@ -4611,7 +4735,8 @@ struct SortAssistantIntentRouter: Sendable {
             externalGoal: false,
             conversationContext: [
                 "target_workspace: cmux id=00000000-0000-0000-0000-000000000000 directory=/tmp/cmux",
-            ]
+            ],
+            toolCatalog: await semanticMCPToolCatalog(workspaceDirectory: nil, includeBuiltIn: false)
         )
         return SortAssistantLocalSemanticRouterTestResult(
             request: localSemanticRouterTestRequest,
@@ -4622,108 +4747,54 @@ struct SortAssistantIntentRouter: Sendable {
         )
     }
 
-    private static func fallbackDecision(
-        for text: String,
-        externalGoal: Bool = false,
-        conversationContext: [String] = []
+    private static func semanticUnavailableDecision(
+        reason: String,
+        report: SortAssistantSemanticRouterUnavailableReport? = nil
     ) -> SortAssistantIntentDecision {
-        let lower = normalizedIntentText(text)
-        let intent: SortAssistantIntent
-        let strongSortRelated = containsAny(lower, [
-            "sort", "sorting", "reorder", "rank", "prioritize", "arrange",
-            "free sort", "排序", "重排"
-        ])
-        let sidebarOrderRelated = containsAny(lower, ["sidebar", "workspace sidebar", "侧边栏"]) &&
-            containsAny(lower, ["order", "priority", "priorities", "urgent", "urgency", "顺序", "优先", "紧急"])
-        let isSortRelated = strongSortRelated || sidebarOrderRelated || containsAny(lower, [
-            "move workspace", "move workspaces", "workspace order",
-            "放到", "移动", "置顶"
-        ])
-        if containsAny(lower, ["undo", "revert", "撤销", "恢复刚才", "还原"]) {
-            intent = .undoSort
-        } else if isWorkspaceColorFallbackGoal(
-            text: text,
-            normalizedText: lower,
-            conversationContext: conversationContext
-        ) {
-            intent = .workspaceColor
-        } else if containsAny(lower, ["forget", "delete memory", "忘记", "别记", "删除记忆"]) {
-            intent = .forgetPreference
-        } else if containsAny(lower, ["remember", "from now on", "以后", "记住", "下次", "以后都"]) {
-            intent = .rememberPreference
-        } else if !isSortRelated && containsAny(lower, contextKeywords) {
-            intent = .askContext
-        } else if isSortRelated && containsAny(lower, ["why", "explain", "为什么", "解释"]) {
-            intent = .explainCurrentOrder
-        } else if containsAny(lower, ["feedback", "i moved", "我拖", "我移动", "刚才拖"]) {
-            intent = .manualReorderFeedback
-        } else if externalGoal {
-            intent = .applySort
-        } else if isSortRelated && containsAny(lower, ["apply", "sort it", "directly", "直接", "排好", "执行"]) {
-            intent = .applySort
-        } else if isSortRelated && containsAny(lower, ["suggest", "proposal", "preview", "recommend", "建议", "怎么排", "如何排", "先看看"]) {
-            intent = .proposeSort
-        } else if isSortRelated {
-            intent = .proposeSort
-        } else {
-            intent = .normalChat
-        }
         return SortAssistantIntentDecision(
-            intent: intent,
-            confidence: 0.2,
-            reason: "fallback",
-            isFallback: true
+            intent: .normalChat,
+            confidence: 0,
+            reason: reason,
+            isFallback: true,
+            semanticRouterUnavailableReport: report
         )
     }
 
-    private static func isWorkspaceColorFallbackGoal(
-        text: String,
-        normalizedText lower: String,
-        conversationContext: [String]
-    ) -> Bool {
-        let mentionsColor = containsAny(lower, [
-            " color ", " colors ", " colour ", " colours ", "颜色", "顏色", "配色"
-        ])
-        let mentionsWorkspaceSurface = containsAny(lower, [
-            " workspace ", " workspaces ", " tab ", " tabs ", " sidebar ", " current ",
-            " active ", " this ", " it ", "工作区", "工作區", "标签", "標籤", "侧边栏", "側邊欄", "当前", "目前"
-        ])
-        let colorAction = containsAny(lower, [
-            " set ", " change ", " make ", " use ", " apply ", " clear ", " reset ", " remove ",
-            "设置", "設定", "改成", "变成", "變成", "使用", "清除", "重置", "移除"
-        ])
-        if mentionsColor && (mentionsWorkspaceSurface || colorAction) {
-            return true
-        }
-        guard conversationMentionsWorkspaceColor(conversationContext) else {
-            return false
-        }
-        return textLooksLikeWorkspaceColorValue(text)
-            || containsAny(lower, sortPermissionGrantKeywords)
-            || containsAny(lower, [" set ", " change ", " apply ", " use ", "设置", "改成", "使用"])
+    private static func semanticUnavailableReport(
+        reason: String,
+        localIssue: SortAssistantSemanticRouterIssue?,
+        claudeIssue: SortAssistantSemanticRouterIssue?
+    ) -> SortAssistantSemanticRouterUnavailableReport {
+        SortAssistantSemanticRouterUnavailableReport(
+            reason: reason,
+            fallbackIntent: .normalChat,
+            localIssue: localIssue,
+            claudeIssue: claudeIssue
+        )
     }
 
-    private static func conversationMentionsWorkspaceColor(_ conversationContext: [String]) -> Bool {
-        let recent = conversationContext.suffix(8).joined(separator: "\n")
-        let normalized = normalizedIntentText(recent)
-        return containsAny(normalized, [
-            " workspace color ", " workspace colors ", " workspace_color ",
-            " tab color ", " tab colors ", " sidebar color ", " sidebar colors ",
-            "颜色", "顏色"
-        ])
-    }
-
-    private static func textLooksLikeWorkspaceColorValue(_ text: String) -> Bool {
-        if WorkspaceTabColorSettings.normalizedHex(text) != nil {
-            return true
+    private static func semanticIssue(
+        from error: Error,
+        stage: SortAssistantSemanticRouterIssue.Stage,
+        fallbackCode: String
+    ) -> SortAssistantSemanticRouterIssue {
+        if let error = error as? SortAssistantSemanticRouterRuntimeError {
+            return error.issue
         }
-        let normalizedTokens = normalizedIntentText(text)
-            .split(whereSeparator: { $0.isWhitespace })
-            .map(String.init)
-        let paletteNames = Set(WorkspaceTabColorSettings.palette().map {
-            normalizedSortAssistantIdentifier($0.name)
-        })
-        return normalizedTokens.contains { paletteNames.contains(normalizedSortAssistantIdentifier($0)) }
+        let nsError = error as NSError
+        if nsError.domain == NSCocoaErrorDomain {
+            return SortAssistantSemanticRouterIssue(
+                stage: stage,
+                code: "file_error",
+                detail: Self.debugError(error)
+            )
+        }
+        return SortAssistantSemanticRouterIssue(
+            stage: stage,
+            code: fallbackCode,
+            detail: Self.debugError(error),
+            status: nsError.code > 0 ? nsError.code : nil
+        )
     }
 
     private static func debugConfidence(_ confidence: Double) -> String {
@@ -4738,34 +4809,26 @@ struct SortAssistantIntentRouter: Sendable {
             .description
     }
 
-    private static func isWorkspaceSortPermissionGrant(_ text: String) -> Bool {
-        let lower = normalizedIntentText(text)
-        let compact = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let mentionsSortApply = compact.contains("sort_apply") || compact.contains("sort.apply")
-        let mentionsWorkspaceSorting = containsAny(lower, sortKeywords + [
-            "workspace", "workspaces", "complete the sort", "workspace sorting",
-            "工作区", "排序"
-        ])
-        guard mentionsSortApply || mentionsWorkspaceSorting else { return false }
-        guard !containsAny(lower, sortPermissionDenyKeywords) else { return false }
-        return containsAny(lower, sortPermissionGrantKeywords)
-    }
-
     private static func classifyWithConfiguredLocalLLM(
         text: String,
         externalGoal: Bool,
         conversationContext: [String],
+        toolCatalog: [[String: Any]],
         workspaceDirectory: String?
     ) async throws -> SortAssistantIntentDecision {
         guard let config = SpriteAssistantConfig.semanticRouterConfig(workspaceDirectory: workspaceDirectory) else {
-            throw NSError(domain: "SortAssistantIntentRouter", code: 3)
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .local,
+                code: SpriteAssistantConfig.semanticRouterConfigIssue(workspaceDirectory: workspaceDirectory)
+            ))
         }
 
         return try await classifyWithLocalLLM(
             config: config,
             text: text,
             externalGoal: externalGoal,
-            conversationContext: conversationContext
+            conversationContext: conversationContext,
+            toolCatalog: toolCatalog
         )
     }
 
@@ -4773,7 +4836,8 @@ struct SortAssistantIntentRouter: Sendable {
         config: SpriteAssistantSemanticRouterConfig,
         text: String,
         externalGoal: Bool,
-        conversationContext: [String]
+        conversationContext: [String],
+        toolCatalog: [[String: Any]]
     ) async throws -> SortAssistantIntentDecision {
         let content: String
         switch config.normalizedProvider {
@@ -4782,24 +4846,35 @@ struct SortAssistantIntentRouter: Sendable {
                 config: config,
                 text: text,
                 externalGoal: externalGoal,
-                conversationContext: conversationContext
+                conversationContext: conversationContext,
+                toolCatalog: toolCatalog
             )
         default:
             content = try await classifyWithOllama(
                 config: config,
                 text: text,
                 externalGoal: externalGoal,
-                conversationContext: conversationContext
+                conversationContext: conversationContext,
+                toolCatalog: toolCatalog
             )
         }
-        return try parseDecision(from: content)
+        do {
+            return try parseDecision(from: content)
+        } catch {
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .local,
+                code: "invalid_decision",
+                detail: Self.debugError(error)
+            ))
+        }
     }
 
     private static func classifyWithOllama(
         config: SpriteAssistantSemanticRouterConfig,
         text: String,
         externalGoal: Bool,
-        conversationContext: [String]
+        conversationContext: [String],
+        toolCatalog: [[String: Any]]
     ) async throws -> String {
         let url = try endpointURL(baseURL: config.baseURL, defaultPath: "/api/chat")
         let response = try await postLocalLLMJSON(
@@ -4812,7 +4887,8 @@ struct SortAssistantIntentRouter: Sendable {
                 "messages": localLLMMessages(
                     text: text,
                     externalGoal: externalGoal,
-                    conversationContext: conversationContext
+                    conversationContext: conversationContext,
+                    toolCatalog: toolCatalog
                 ),
                 "options": [
                     "temperature": 0,
@@ -4826,14 +4902,18 @@ struct SortAssistantIntentRouter: Sendable {
         if let content = response["response"] as? String {
             return content
         }
-        throw NSError(domain: "SortAssistantIntentRouter", code: 4)
+        throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+            stage: .local,
+            code: "missing_content"
+        ))
     }
 
     private static func classifyWithOpenAICompatibleLocalLLM(
         config: SpriteAssistantSemanticRouterConfig,
         text: String,
         externalGoal: Bool,
-        conversationContext: [String]
+        conversationContext: [String],
+        toolCatalog: [[String: Any]]
     ) async throws -> String {
         let url = try endpointURL(baseURL: config.baseURL, defaultPath: "/chat/completions")
         let response = try await postLocalLLMJSON(
@@ -4846,7 +4926,8 @@ struct SortAssistantIntentRouter: Sendable {
                 "messages": localLLMMessages(
                     text: text,
                     externalGoal: externalGoal,
-                    conversationContext: conversationContext
+                    conversationContext: conversationContext,
+                    toolCatalog: toolCatalog
                 ),
             ]
         )
@@ -4854,7 +4935,10 @@ struct SortAssistantIntentRouter: Sendable {
               let first = choices.first,
               let message = first["message"] as? [String: Any],
               let content = message["content"] as? String else {
-            throw NSError(domain: "SortAssistantIntentRouter", code: 5)
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .local,
+                code: "missing_content"
+            ))
         }
         return content
     }
@@ -4862,7 +4946,8 @@ struct SortAssistantIntentRouter: Sendable {
     private static func localLLMMessages(
         text: String,
         externalGoal: Bool,
-        conversationContext: [String]
+        conversationContext: [String],
+        toolCatalog: [[String: Any]]
     ) -> [[String: String]] {
         [
             [
@@ -4874,7 +4959,8 @@ struct SortAssistantIntentRouter: Sendable {
                 "content": semanticUserPrompt(
                     text: text,
                     externalGoal: externalGoal,
-                    conversationContext: conversationContext
+                    conversationContext: conversationContext,
+                    toolCatalog: toolCatalog
                 ),
             ],
         ]
@@ -4882,7 +4968,11 @@ struct SortAssistantIntentRouter: Sendable {
 
     private static func endpointURL(baseURL: String, defaultPath: String) throws -> URL {
         guard let base = URL(string: baseURL) else {
-            throw NSError(domain: "SortAssistantIntentRouter", code: 6)
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .local,
+                code: "invalid_base_url",
+                detail: baseURL
+            ))
         }
         let normalizedDefault = defaultPath.hasPrefix("/") ? defaultPath : "/\(defaultPath)"
         if base.path.hasSuffix(normalizedDefault) {
@@ -4898,7 +4988,11 @@ struct SortAssistantIntentRouter: Sendable {
         }
         components?.path = nextPath
         guard let url = components?.url else {
-            throw NSError(domain: "SortAssistantIntentRouter", code: 7)
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .local,
+                code: "invalid_base_url",
+                detail: baseURL
+            ))
         }
         return url
     }
@@ -4926,10 +5020,18 @@ struct SortAssistantIntentRouter: Sendable {
         let (data, response) = try await session.data(for: request)
         if let http = response as? HTTPURLResponse,
            !(200..<300).contains(http.statusCode) {
-            throw NSError(domain: "SortAssistantIntentRouter", code: http.statusCode)
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .local,
+                code: "http_status",
+                detail: url.absoluteString,
+                status: http.statusCode
+            ))
         }
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw NSError(domain: "SortAssistantIntentRouter", code: 8)
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .local,
+                code: "invalid_json"
+            ))
         }
         return object
     }
@@ -4937,11 +5039,16 @@ struct SortAssistantIntentRouter: Sendable {
     private static func classifyWithClaudeCode(
         text: String,
         externalGoal: Bool,
-        conversationContext: [String]
+        conversationContext: [String],
+        toolCatalog: [[String: Any]]
     ) throws -> SortAssistantIntentDecision {
         let executable = claudeCodeExecutable()
         if executable.contains("/") && !FileManager.default.isExecutableFile(atPath: executable) {
-            throw NSError(domain: "SortAssistantIntentRouter", code: 1)
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .claude,
+                code: "executable_missing",
+                detail: executable
+            ))
         }
 
         let output = try runClaudeCode(
@@ -4950,7 +5057,8 @@ struct SortAssistantIntentRouter: Sendable {
                 "-p", semanticUserPrompt(
                     text: text,
                     externalGoal: externalGoal,
-                    conversationContext: conversationContext
+                    conversationContext: conversationContext,
+                    toolCatalog: toolCatalog
                 ),
                 "--output-format", SortAssistantClaudeCodeRuntime.outputFormat,
                 "--allowed-tools", "",
@@ -4961,21 +5069,35 @@ struct SortAssistantIntentRouter: Sendable {
             timeoutSeconds: semanticTimeoutSeconds
         )
         guard output.status == 0 else {
-            throw NSError(domain: "SortAssistantIntentRouter", code: Int(output.status))
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .claude,
+                code: "exited",
+                detail: output.stderr,
+                status: Int(output.status)
+            ))
         }
 
         let content = SortAssistantClaudeOutputParser.resultText(from: output.stdout) ?? output.stdout
-        return try parseDecision(from: content)
+        do {
+            return try parseDecision(from: content)
+        } catch {
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .claude,
+                code: "invalid_decision",
+                detail: Self.debugError(error)
+            ))
+        }
     }
 
     private static var semanticSystemPrompt: String {
         """
         You are the semantic intent router for cmux's sprite assistant. Classify the latest input into one or more ordered task routes. Do not default to sorting.
+        Use the availableMCPTools and routeCatalog in the user payload as the source of truth for tool capabilities and route affordances.
         Return only one strict JSON object with this schema:
         {"intent":"ask_context|clear_session|explain_current_order|propose_sort|apply_sort|manual_reorder_feedback|remember_preference|forget_preference|remember_sprite_memory|forget_sprite_memory|undo_sort|workspace_color|normal_chat","sortRoute":"default|color_group|null","steps":[{"intent":"apply_sort","sortRoute":"default|color_group|null"}],"routeAdjustment":{"promptFragmentMode":"append|replace","promptFragments":["workspace_color"],"removePromptFragments":["normal_chat"],"allowedToolsMode":"append|replace","allowedTools":["workspace_color_set"],"removeAllowedTools":["sort_apply"]},"confidence":0.0,"reason":"short"}
 
         Intent meanings:
-        - ask_context: the user asks what list/context/signals you can see, including GitHub, ghpr, PR, CI, review, Jira, Git, branch, submodule, current directory, or repository context.
+        - ask_context: the user asks what list/context/signals you can see, including GitHub, ghpr, PR, CI, review, Jira, Git, branch, submodule, current directory, repository context, dead/stale/inactive/unused workspaces, workspace usage, recent sessions, or last-active workspaces.
         - clear_session: reserved for exact slash commands handled outside this semantic router; do not return it for natural-language input.
         - explain_current_order: the user asks why the sidebar is ordered this way.
         - propose_sort: the user asks for a recommendation, preview, suggestion, or how to sort without clearly asking to apply it.
@@ -5000,6 +5122,7 @@ struct SortAssistantIntentRouter: Sendable {
         - Do not classify "who are you", "who you are", "what are you", or "what can you do" as apply_sort.
         - Classify the latest input using recentConversation when it is a follow-up. Pronouns like "it", "that", and "this" may refer to the previous assistant answer.
         - Questions or follow-ups about GitHub/ghpr/PR/CI/review/Jira/Git/repository/current repo/current directory/submodule context are ask_context unless the user asks to sort or reorder with those signals.
+        - Questions about dead/stale/inactive/unused workspace detection, workspace usage, recent sessions, last active workspaces, git activity, or file modification timestamps are ask_context unless the user asks to sort or reorder.
         - Mentions of "workspace", "repo", "context", "current", "status", "branch", "PR", "urgent", or "priority" are not sorting requests by themselves.
         - Choose propose_sort/apply_sort only when the user explicitly asks to sort, order, reorder, rank, prioritize, arrange, move, or group workspace/sidebar items, or when recentConversation is already about a sort result and the latest input continues that sort task.
         - If the input is not explicitly about sorting the workspace sidebar, classify normal_chat or ask_context.
@@ -5017,7 +5140,7 @@ struct SortAssistantIntentRouter: Sendable {
         - Use routeAdjustment when the current turn needs prompt/tool affordances that are not fully represented by the primary intent, especially short follow-ups inside an existing conversation.
         - Use routeAdjustment modes dynamically: append when adding missing affordances, replace when the latest turn switches or narrows the active task, and removePromptFragments/removeAllowedTools when stale prompt guidance or tools should be subtracted.
         - routeAdjustment.promptFragments may only use: normal_chat, context, workspace_color, sort, sort_color_group, explain_order, sort_memory, sprite_memory, undo.
-        - routeAdjustment.allowedTools may only use cmux sprite MCP tool names. Common examples: list_state, workspace_color_get, workspace_color_set, workspace_color_clear, sort_context, sort_preview, sort_apply, memory_query, sprite_memory_query, repository_context, github_context.
+        - routeAdjustment.allowedTools may only use cmux sprite MCP tool names from availableMCPTools.
         - If the latest input is read-only after a write-capable turn, replace allowedTools with a read-only list or remove the stale write tools.
         - If intent or any step is workspace_color, never replace allowedTools with an empty list. Use workspace_color_get for read-only color turns, and include the relevant workspace_color_* tool for changes.
         - Only request write tools such as workspace_color_set, workspace_color_clear, sort_apply, sort_undo, memory_write_candidate, memory_forget, sprite_memory_write, or sprite_memory_forget when the latest input clearly asks to mutate state.
@@ -5027,17 +5150,348 @@ struct SortAssistantIntentRouter: Sendable {
     private static func semanticUserPrompt(
         text: String,
         externalGoal: Bool,
-        conversationContext: [String]
+        conversationContext: [String],
+        toolCatalog: [[String: Any]]
     ) -> String {
         let payload: [String: Any] = [
             "input": text,
             "externalGoal": externalGoal,
             "recentConversation": conversationContext,
-            "surface": "cmux_sprite_assistant"
+            "surface": "cmux_sprite_assistant",
+            "availableMCPTools": toolCatalog,
+            "routeCatalog": semanticRouteCatalog(),
         ]
         let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
         let json = String(data: data, encoding: .utf8) ?? #"{"input":""}"#
         return "Classify this user input:\n\(json)"
+    }
+
+    private struct SemanticMCPServerSpec {
+        let name: String
+        let command: String
+        let args: [String]
+        let env: [String: String]
+        let cwd: String?
+    }
+
+    private static let semanticMCPToolDiscoveryTimeoutNanoseconds: UInt64 = 2_000_000_000
+
+    private actor SemanticMCPToolDiscoverySession {
+        private let server: SemanticMCPServerSpec
+        private var process: Process?
+        private var stdin: Pipe?
+        private var stdout: Pipe?
+        private var stderr: Pipe?
+        private var client: MCP.Client?
+
+        init(server: SemanticMCPServerSpec) {
+            self.server = server
+        }
+
+        func discover() async throws -> [MCP.Tool] {
+            let process = Process()
+            if server.command.contains("/") {
+                process.executableURL = URL(fileURLWithPath: server.command)
+                process.arguments = server.args
+            } else {
+                process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+                process.arguments = [server.command] + server.args
+            }
+            if let cwd = server.cwd, !cwd.isEmpty {
+                process.currentDirectoryURL = URL(fileURLWithPath: (cwd as NSString).expandingTildeInPath, isDirectory: true)
+            }
+            process.environment = ProcessInfo.processInfo.environment.merging(server.env) { _, new in new }
+
+            let stdin = Pipe()
+            let stdout = Pipe()
+            let stderr = Pipe()
+            stderr.fileHandleForReading.readabilityHandler = { handle in
+                _ = handle.availableData
+            }
+            process.standardInput = stdin
+            process.standardOutput = stdout
+            process.standardError = stderr
+
+            self.process = process
+            self.stdin = stdin
+            self.stdout = stdout
+            self.stderr = stderr
+
+            try process.run()
+
+            let client = MCP.Client(
+                name: "cmux-sprite-semantic-router",
+                version: "0.1.0"
+            )
+            self.client = client
+            let transport = StdioTransport(
+                input: .init(rawValue: stdout.fileHandleForReading.fileDescriptor),
+                output: .init(rawValue: stdin.fileHandleForWriting.fileDescriptor)
+            )
+
+            do {
+                _ = try await client.connect(transport: transport)
+                let tools = try await listAllTools(client: client)
+                await client.disconnect()
+                cleanup()
+                return tools
+            } catch {
+                await client.disconnect()
+                cleanup()
+                throw error
+            }
+        }
+
+        func cancel() async {
+            if let client {
+                await client.disconnect()
+            }
+            cleanup()
+        }
+
+        private func listAllTools(client: MCP.Client) async throws -> [MCP.Tool] {
+            var tools: [MCP.Tool] = []
+            var cursor: String?
+            repeat {
+                let page = try await client.listTools(cursor: cursor)
+                tools.append(contentsOf: page.tools)
+                cursor = page.nextCursor
+            } while cursor != nil
+            return tools
+        }
+
+        private func cleanup() {
+            stderr?.fileHandleForReading.readabilityHandler = nil
+            try? stdin?.fileHandleForWriting.close()
+            try? stdout?.fileHandleForReading.close()
+            try? stderr?.fileHandleForReading.close()
+            if let process, process.isRunning {
+                process.terminate()
+            }
+            client = nil
+            process = nil
+            stdin = nil
+            stdout = nil
+            stderr = nil
+        }
+    }
+
+    private static func semanticMCPToolCatalog(
+        workspaceDirectory: String?,
+        includeBuiltIn: Bool = true,
+        externalServersOverride: [String: Any]? = nil,
+        debugSession: SortAssistantDebugSession? = nil
+    ) async -> [[String: Any]] {
+        let servers = semanticMCPServerSpecs(
+            workspaceDirectory: workspaceDirectory,
+            includeBuiltIn: includeBuiltIn,
+            externalServersOverride: externalServersOverride
+        )
+        var catalog: [[String: Any]] = []
+        for server in servers {
+            let tools = await semanticMCPTools(server: server)
+            debugSession?.log("router.mcp.toolsList server=\(server.name) tools=\(tools.count)")
+            catalog.append(contentsOf: tools)
+        }
+        return catalog
+    }
+
+    private static func semanticMCPServerSpecs(
+        workspaceDirectory: String?,
+        includeBuiltIn: Bool,
+        externalServersOverride: [String: Any]?
+    ) -> [SemanticMCPServerSpec] {
+        var specs: [SemanticMCPServerSpec] = []
+        if includeBuiltIn {
+            var env: [String: String] = [
+                "CMUX_SOCKET_PATH": SocketControlSettings.socketPath(),
+            ]
+#if DEBUG
+            if let debugLogPath = debugLogPathForMCPDiscovery() {
+                env["CMUX_DEBUG_LOG"] = debugLogPath
+                env["CMUX_SPRITE_MCP_DEBUG"] = "1"
+            }
+#endif
+            if let workspaceDirectory, !workspaceDirectory.isEmpty {
+                env["CMUX_WORKSPACE_DIRECTORY"] = workspaceDirectory
+            }
+            specs.append(SemanticMCPServerSpec(
+                name: "cmux_sprite",
+                command: cmuxCLIPathForMCP(),
+                args: [
+                    "--socket",
+                    SocketControlSettings.socketPath(),
+                    "mcp",
+                    "sprite-assistant",
+                ],
+                env: env,
+                cwd: nil
+            ))
+        }
+
+        let externalServers = externalServersOverride
+            ?? SpriteAssistantConfig.externalMCPServers(workspaceDirectory: workspaceDirectory)
+        let externalSpecs = externalServers.keys.sorted().compactMap { name -> SemanticMCPServerSpec? in
+            guard let object = externalServers[name] as? [String: Any],
+                  let command = mcpString(object["command"]) else {
+                return nil
+            }
+            return SemanticMCPServerSpec(
+                name: name,
+                command: command,
+                args: mcpStringArray(object["args"]),
+                env: mcpStringDictionary(object["env"]),
+                cwd: mcpString(object["cwd"] ?? object["workingDirectory"] ?? object["working_directory"])
+            )
+        }
+        specs.append(contentsOf: externalSpecs)
+        return specs
+    }
+
+    private static func semanticMCPTools(server: SemanticMCPServerSpec) async -> [[String: Any]] {
+        let session = SemanticMCPToolDiscoverySession(server: server)
+        let discovery = Task {
+            try await session.discover()
+        }
+        let timeout = Task {
+            try? await Task.sleep(nanoseconds: semanticMCPToolDiscoveryTimeoutNanoseconds)
+            discovery.cancel()
+            await session.cancel()
+        }
+
+        do {
+            let tools = try await discovery.value
+            timeout.cancel()
+            await session.cancel()
+            return tools.compactMap { tool in
+                semanticMCPToolPayload(tool, serverName: server.name)
+            }
+        } catch {
+            timeout.cancel()
+            await session.cancel()
+            return []
+        }
+    }
+
+    private static func semanticMCPToolPayload(_ tool: MCP.Tool, serverName: String) -> [String: Any]? {
+        guard let name = mcpString(tool.name) else {
+            return nil
+        }
+        var payload: [String: Any] = [
+            "server": serverName,
+            "name": name,
+            "qualifiedName": "mcp__\(serverName)__\(name)",
+        ]
+        if let title = mcpString(tool.title) {
+            payload["title"] = title
+        }
+        if let description = mcpString(tool.description) {
+            payload["description"] = description
+        }
+        if let inputSchema = mcpEncodedJSONObject(tool.inputSchema) {
+            payload["inputSchema"] = inputSchema
+        }
+        if let outputSchema = tool.outputSchema.flatMap(mcpEncodedJSONObject) {
+            payload["outputSchema"] = outputSchema
+        }
+        if let annotations = mcpEncodedJSONObject(tool.annotations) as? [String: Any],
+           !annotations.isEmpty {
+            payload["annotations"] = annotations
+        }
+        if serverName == "cmux_sprite" {
+            payload["mutating"] = sortAssistantMutatingInternalTools.contains(name)
+        }
+        return payload
+    }
+
+    private static func mcpEncodedJSONObject<T: Encodable>(_ value: T) -> Any? {
+        guard let data = try? JSONEncoder().encode(value) else {
+            return nil
+        }
+        return try? JSONSerialization.jsonObject(with: data)
+    }
+
+    private static func mcpString(_ value: Any?) -> String? {
+        guard let value, !(value is NSNull) else { return nil }
+        if let string = value as? String {
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let value = value as? CustomStringConvertible {
+            let trimmed = value.description.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        return nil
+    }
+
+    private static func mcpStringArray(_ value: Any?) -> [String] {
+        if let strings = value as? [String] {
+            return strings.compactMap(mcpString)
+        }
+        if let values = value as? [Any] {
+            return values.compactMap(mcpString)
+        }
+        return mcpString(value).map { [$0] } ?? []
+    }
+
+    private static func mcpStringDictionary(_ value: Any?) -> [String: String] {
+        guard let object = value as? [String: Any] else {
+            return [:]
+        }
+        return object.reduce(into: [:]) { partial, pair in
+            if let value = mcpString(pair.value) {
+                partial[pair.key] = value
+            }
+        }
+    }
+
+    private static func cmuxCLIPathForMCP() -> String {
+        let environment = ProcessInfo.processInfo.environment
+        if let path = environment["CMUX_DIGEST_CMUX"],
+           FileManager.default.isExecutableFile(atPath: path) {
+            return path
+        }
+        if let resources = Bundle.main.resourceURL {
+            let bundled = resources.appendingPathComponent("bin/cmux").path
+            if FileManager.default.isExecutableFile(atPath: bundled) {
+                return bundled
+            }
+        }
+        if FileManager.default.isExecutableFile(atPath: "/tmp/cmux-cli") {
+            return "/tmp/cmux-cli"
+        }
+        return "cmux"
+    }
+
+#if DEBUG
+    private static func debugLogPathForMCPDiscovery() -> String? {
+        if let path = ProcessInfo.processInfo.environment["CMUX_DEBUG_LOG"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !path.isEmpty {
+            return path
+        }
+        let lastPathFile = "/tmp/cmux-last-debug-log-path"
+        if let path = try? String(contentsOfFile: lastPathFile, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !path.isEmpty {
+            return path
+        }
+        return nil
+    }
+#endif
+
+    private static func semanticRouteCatalog() -> [[String: Any]] {
+        let actionRouter = SortAssistantActionRouter()
+        return semanticIntentOrder.map { intent in
+            let route = actionRouter.route(for: intent)
+            return [
+                "intent": intent.rawValue,
+                "mode": route.mode.rawValue,
+                "needsConfirmation": route.needsConfirmation,
+                "allowedTools": route.allowedTools,
+                "memoryWritePolicy": route.memoryWritePolicy.rawValue,
+            ] as [String: Any]
+        }
     }
 
     private static func claudeCodeExecutable() -> String {
@@ -5069,6 +5523,23 @@ struct SortAssistantIntentRouter: Sendable {
         let status: Int32
     }
 
+    private final class ProcessTimeoutFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+
+        func markTimedOut() {
+            lock.lock()
+            value = true
+            lock.unlock()
+        }
+
+        var didTimeOut: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+    }
+
     private static func runClaudeCode(
         executable: String,
         arguments: [String],
@@ -5089,9 +5560,17 @@ struct SortAssistantIntentRouter: Sendable {
         process.standardOutput = stdout
         process.standardError = stderr
 
+        let timeoutFlag = ProcessTimeoutFlag()
         let timeout = DispatchWorkItem {
             if process.isRunning {
+                timeoutFlag.markTimedOut()
                 process.terminate()
+                let pid = process.processIdentifier
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) {
+                    if process.isRunning {
+                        kill(pid, SIGKILL)
+                    }
+                }
             }
         }
         DispatchQueue.global(qos: .utility).asyncAfter(
@@ -5107,6 +5586,14 @@ struct SortAssistantIntentRouter: Sendable {
         }
         process.waitUntilExit()
         timeout.cancel()
+
+        if timeoutFlag.didTimeOut {
+            throw SortAssistantSemanticRouterRuntimeError(issue: SortAssistantSemanticRouterIssue(
+                stage: .claude,
+                code: "timed_out",
+                timeoutSeconds: Int(timeoutSeconds.rounded())
+            ))
+        }
 
         return ProcessOutput(
             stdout: String(data: stdout.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? "",
@@ -5145,6 +5632,14 @@ struct SortAssistantIntentRouter: Sendable {
 
     static func parseDecisionForTesting(_ content: String) throws -> SortAssistantIntentDecision {
         try parseDecision(from: content)
+    }
+
+    static func semanticMCPToolCatalogForTesting(externalServers: [String: Any]) async -> [[String: Any]] {
+        await semanticMCPToolCatalog(
+            workspaceDirectory: nil,
+            includeBuiltIn: false,
+            externalServersOverride: externalServers
+        )
     }
 
     private static func routeAdjustmentValue(_ object: [String: Any]) -> SortAssistantRouteAdjustment {
@@ -5335,22 +5830,6 @@ struct SortAssistantIntentRouter: Sendable {
             .lowercased()
             .replacingOccurrences(of: "-", with: "_") ?? ""
         return normalized.isEmpty ? nil : normalized
-    }
-
-    private func containsAny(_ text: String, _ needles: [String]) -> Bool {
-        Self.containsAny(text, needles)
-    }
-
-    private static func containsAny(_ text: String, _ needles: [String]) -> Bool {
-        needles.contains { text.contains($0) }
-    }
-
-    private static func normalizedIntentText(_ text: String) -> String {
-        var lower = text.lowercased()
-        for separator in [".", ",", "?", "!", ":", ";", "/", "\\", "-", "_", "(", ")", "[", "]", "{", "}", "\n", "\t"] {
-            lower = lower.replacingOccurrences(of: separator, with: " ")
-        }
-        return " " + lower + " "
     }
 
     private static func slashCommandName(_ text: String) -> String {
@@ -5932,6 +6411,8 @@ struct SortAssistantMCPRequest: Sendable {
     let routeSteps: [SortAssistantRouteStep]
     let route: SortAssistantActionRoute
     let routeAdjustment: SortAssistantRouteAdjustment
+    let visibleScopeSignature: String
+    let requiresScopeRefresh: Bool
     let conversationContext: [String]
     let includeConversationContext: Bool
     let explicitSlashCommand: Bool
@@ -5946,6 +6427,10 @@ struct SortAssistantMCPRequest: Sendable {
     var claudeSessionReason: String {
         claudeSessionReused ? "conversation_history" : "conversation_start"
     }
+
+    var scopeRefreshReason: String {
+        requiresScopeRefresh ? (claudeSessionReused ? "scope_changed" : "conversation_start") : "scope_reused"
+    }
 }
 
 struct SortAssistantMCPProgressUpdate: Sendable {
@@ -5955,6 +6440,7 @@ struct SortAssistantMCPProgressUpdate: Sendable {
 typealias SortAssistantMCPProgressHandler = @Sendable (SortAssistantMCPProgressUpdate) -> Void
 
 private enum SortAssistantClaudePromptProfile: String, Sendable {
+    case semanticRouterBootstrap = "semantic_router_bootstrap"
     case conversation
     case general
     case routedFragments = "routed_fragments"
@@ -6001,6 +6487,15 @@ struct SortAssistantMCPClientTimeoutError: LocalizedError, Sendable {
 
 struct SortAssistantMCPClient: Sendable {
     private static let runTimeoutSeconds: TimeInterval = 60
+    private static let semanticRouterServerName = "cmux_semantic_router"
+    private static let semanticRouterToolName = "route"
+    private static let semanticRouterSearchToolName = "search"
+    private static let semanticRouterQualifiedToolName = "mcp__cmux_semantic_router__route"
+    private static let semanticRouterQualifiedSearchToolName = "mcp__cmux_semantic_router__search"
+    private static let semanticRouterQualifiedToolNames = [
+        semanticRouterQualifiedToolName,
+        semanticRouterQualifiedSearchToolName,
+    ]
 
     private struct PromptBundle {
         let profile: SortAssistantClaudePromptProfile
@@ -6009,12 +6504,32 @@ struct SortAssistantMCPClient: Sendable {
         let fragmentNames: [String]
     }
 
+    private struct MCPRuntimePlan {
+        let mcpServers: [String: Any]
+        let externalServerNames: [String]
+        let externalAllowedTools: [String]
+        let externalPolicy: String
+
+        var serverNames: [String] {
+            mcpServers.keys.sorted()
+        }
+    }
+
+    private enum MCPExposureMode: String {
+        case routerOnly = "router_only"
+        case expanded
+    }
+
     private struct MCPConfigFile {
         let url: URL
+        let semanticRouterPayloadURL: URL?
+        let exposureMode: MCPExposureMode
         let serverNames: [String]
         let externalServerNames: [String]
         let externalAllowedTools: [String]
+        let allowedTools: [String]
         let byteCount: Int
+        let semanticRouterPayloadByteCount: Int
         let externalPolicy: String
     }
 
@@ -6036,18 +6551,58 @@ struct SortAssistantMCPClient: Sendable {
             throw NSError(domain: "SortAssistantMCPClient", code: 1)
         }
 
+        let routedPromptBundle = promptBundle(for: request)
+        let runtimePlan = mcpRuntimePlan(for: request)
+        let semanticRouterPayload = semanticRouterPayloadObject(
+            request: request,
+            promptBundle: routedPromptBundle,
+            runtimePlan: runtimePlan
+        )
+
+        let executionResumeSession: Bool
+        if request.requiresScopeRefresh {
+            try refreshSemanticRouterScope(
+                request: request,
+                runtimePlan: runtimePlan,
+                semanticRouterPayload: semanticRouterPayload,
+                executable: executable,
+                progressHandler: progressHandler
+            )
+            executionResumeSession = request.claudeSessionId != nil
+        } else {
+            executionResumeSession = request.claudeSessionReused
+            request.debugSession?.log(
+                "mcp.scope.reuse signatureHash=\(request.visibleScopeSignature.hashValue) reason=\(request.scopeRefreshReason)"
+            )
+        }
+
         let configStart = SortAssistantDebugSession.now()
-        let mcpConfig = try writeMCPConfig(request)
+        let mcpConfig = try writeMCPConfig(
+            request,
+            runtimePlan: runtimePlan,
+            semanticRouterPayload: semanticRouterPayload,
+            exposureMode: .expanded
+        )
         request.debugSession?.log(
-            "mcp.config.end servers=\(mcpConfig.serverNames.count) externalServers=\(mcpConfig.externalServerNames.count) serverNames=\(mcpConfig.serverNames.joined(separator: ",")) externalPolicy=\(mcpConfig.externalPolicy) bytes=\(mcpConfig.byteCount)",
+            "mcp.config.end exposure=\(mcpConfig.exposureMode.rawValue) servers=\(mcpConfig.serverNames.count) externalServers=\(mcpConfig.externalServerNames.count) serverNames=\(mcpConfig.serverNames.joined(separator: ",")) externalPolicy=\(mcpConfig.externalPolicy) bytes=\(mcpConfig.byteCount) semanticRouterPayloadBytes=\(mcpConfig.semanticRouterPayloadByteCount)",
             phaseStartNanos: configStart
         )
-        defer { try? FileManager.default.removeItem(at: mcpConfig.url) }
+        defer {
+            try? FileManager.default.removeItem(at: mcpConfig.url)
+            if let semanticRouterPayloadURL = mcpConfig.semanticRouterPayloadURL {
+                try? FileManager.default.removeItem(at: semanticRouterPayloadURL)
+            }
+        }
 
-        let promptBundle = promptBundle(for: request)
-        let arguments = try claudeArguments(request: request, mcpConfig: mcpConfig, promptBundle: promptBundle)
+        let promptBundle = semanticRouterBootstrapPromptBundle(for: request)
+        let arguments = try claudeArguments(
+            request: request,
+            mcpConfig: mcpConfig,
+            promptBundle: promptBundle,
+            resumeSession: executionResumeSession
+        )
         request.debugSession?.log(
-            "mcp.claude.begin allowedTools=\(request.route.allowedTools.count) externalAllowedTools=\(mcpConfig.externalAllowedTools.count) allowedToolNames=\(request.route.allowedTools.joined(separator: ",")) externalServers=\(mcpConfig.externalServerNames.joined(separator: ",")) mode=\(request.route.mode.rawValue) promptProfile=\(promptBundle.profile.rawValue) promptFragments=\(promptBundle.fragmentNames.joined(separator: ",")) routeSteps=\(request.routeSteps.debugDescriptionJoined) adjustment=\(request.routeAdjustment.debugDescription) systemPromptChars=\(promptBundle.systemPrompt.count) userPromptChars=\(promptBundle.userPrompt.count) includeContext=\(request.includeConversationContext ? 1 : 0) sessionReused=\(request.claudeSessionReused ? 1 : 0) sessionReason=\(request.claudeSessionReason) \(SortAssistantClaudeCodeRuntime.debugSummary(sessionId: request.claudeSessionId, resumeSession: request.claudeSessionReused))"
+            "mcp.claude.begin exposure=\(mcpConfig.exposureMode.rawValue) allowedTools=\(mcpConfig.allowedTools.count) externalAllowedTools=\(mcpConfig.externalAllowedTools.count) allowedToolNames=\(mcpConfig.allowedTools.joined(separator: ",")) externalServers=\(mcpConfig.externalServerNames.joined(separator: ",")) mode=\(request.route.mode.rawValue) promptProfile=\(promptBundle.profile.rawValue) routedPromptProfile=\(routedPromptBundle.profile.rawValue) promptFragments=\(routedPromptBundle.fragmentNames.joined(separator: ",")) routeSteps=\(request.routeSteps.debugDescriptionJoined) adjustment=\(request.routeAdjustment.debugDescription) scopeRefresh=\(request.requiresScopeRefresh ? 1 : 0) scopeReason=\(request.scopeRefreshReason) systemPromptChars=\(promptBundle.systemPrompt.count) userPromptChars=\(promptBundle.userPrompt.count) routedSystemPromptChars=\(routedPromptBundle.systemPrompt.count) routedUserPromptChars=\(routedPromptBundle.userPrompt.count) includeContext=\(request.includeConversationContext ? 1 : 0) sessionReused=\(executionResumeSession ? 1 : 0) sessionReason=\(request.claudeSessionReason) \(SortAssistantClaudeCodeRuntime.debugSummary(sessionId: request.claudeSessionId, resumeSession: executionResumeSession))"
         )
         let claudeStart = SortAssistantDebugSession.now()
         let output = try runClaudeCode(
@@ -6081,26 +6636,84 @@ struct SortAssistantMCPClient: Sendable {
         return parsed
     }
 
+    private static func refreshSemanticRouterScope(
+        request: SortAssistantMCPRequest,
+        runtimePlan: MCPRuntimePlan,
+        semanticRouterPayload: [String: Any],
+        executable: String,
+        progressHandler: SortAssistantMCPProgressHandler?
+    ) throws {
+        let configStart = SortAssistantDebugSession.now()
+        let mcpConfig = try writeMCPConfig(
+            request,
+            runtimePlan: runtimePlan,
+            semanticRouterPayload: semanticRouterPayload,
+            exposureMode: .routerOnly
+        )
+        request.debugSession?.log(
+            "mcp.scope.config.end exposure=\(mcpConfig.exposureMode.rawValue) servers=\(mcpConfig.serverNames.count) serverNames=\(mcpConfig.serverNames.joined(separator: ",")) allowedTools=\(mcpConfig.allowedTools.joined(separator: ",")) bytes=\(mcpConfig.byteCount) semanticRouterPayloadBytes=\(mcpConfig.semanticRouterPayloadByteCount) signatureHash=\(request.visibleScopeSignature.hashValue) reason=\(request.scopeRefreshReason)",
+            phaseStartNanos: configStart
+        )
+        defer {
+            try? FileManager.default.removeItem(at: mcpConfig.url)
+            if let semanticRouterPayloadURL = mcpConfig.semanticRouterPayloadURL {
+                try? FileManager.default.removeItem(at: semanticRouterPayloadURL)
+            }
+        }
+
+        let promptBundle = semanticRouterScopeRefreshPromptBundle(for: request)
+        let arguments = try claudeArguments(
+            request: request,
+            mcpConfig: mcpConfig,
+            promptBundle: promptBundle,
+            resumeSession: request.claudeSessionReused
+        )
+        request.debugSession?.log(
+            "mcp.scope.claude.begin allowedTools=\(mcpConfig.allowedTools.count) allowedToolNames=\(mcpConfig.allowedTools.joined(separator: ",")) sessionReused=\(request.claudeSessionReused ? 1 : 0) \(SortAssistantClaudeCodeRuntime.debugSummary(sessionId: request.claudeSessionId, resumeSession: request.claudeSessionReused))"
+        )
+        let scopeStart = SortAssistantDebugSession.now()
+        let output = try runClaudeCode(
+            executable: executable,
+            arguments: arguments,
+            timeoutSeconds: runTimeoutSeconds,
+            debugSession: request.debugSession,
+            progressHandler: progressHandler
+        )
+        request.debugSession?.log(
+            "mcp.scope.claude.end status=\(output.status) stdoutBytes=\(output.stdout.utf8.count) stderrBytes=\(output.stderr.utf8.count)",
+            phaseStartNanos: scopeStart
+        )
+        guard output.status == 0 else {
+            request.debugSession?.log(
+                "mcp.scope.claude.failed status=\(output.status) stdoutBytes=\(output.stdout.utf8.count) stderrBytes=\(output.stderr.utf8.count)"
+            )
+            throw SortAssistantMCPClientProcessError(
+                status: output.status,
+                stdout: output.stdout,
+                stderr: output.stderr
+            )
+        }
+    }
+
     private static func claudeArguments(
         request: SortAssistantMCPRequest,
         mcpConfig: MCPConfigFile,
-        promptBundle: PromptBundle
+        promptBundle: PromptBundle,
+        resumeSession: Bool
     ) throws -> [String] {
-        let allowedTools = (request.route.allowedTools.map { "mcp__cmux_sprite__\($0)" } +
-            mcpConfig.externalAllowedTools).joined(separator: ",")
         return [
             "-p", promptBundle.userPrompt,
             "--output-format", SortAssistantClaudeCodeRuntime.outputFormat,
             "--mcp-config", mcpConfig.url.path,
             "--strict-mcp-config",
-            "--allowed-tools", allowedTools,
+            "--allowed-tools", mcpConfig.allowedTools.joined(separator: ","),
             "--model", "haiku",
         ] +
             SortAssistantClaudeCodeRuntime.outputFormatArguments +
             (try SortAssistantClaudeCodeRuntime.isolatedArguments(
                 systemPrompt: promptBundle.systemPrompt,
                 sessionId: request.claudeSessionId,
-                resumeSession: request.claudeSessionReused
+                resumeSession: resumeSession
             ))
     }
 
@@ -6114,6 +6727,24 @@ struct SortAssistantMCPClient: Sendable {
             systemPrompt: routedSystemPrompt(fragmentNames: fragmentNames),
             userPrompt: userPrompt(request),
             fragmentNames: fragmentNames
+        )
+    }
+
+    private static func semanticRouterBootstrapPromptBundle(for request: SortAssistantMCPRequest) -> PromptBundle {
+        PromptBundle(
+            profile: .semanticRouterBootstrap,
+            systemPrompt: semanticRouterBootstrapSystemPrompt,
+            userPrompt: semanticRouterBootstrapUserPrompt(request),
+            fragmentNames: ["semantic_router"]
+        )
+    }
+
+    private static func semanticRouterScopeRefreshPromptBundle(for request: SortAssistantMCPRequest) -> PromptBundle {
+        PromptBundle(
+            profile: .semanticRouterBootstrap,
+            systemPrompt: semanticRouterScopeRefreshSystemPrompt,
+            userPrompt: semanticRouterScopeRefreshUserPrompt(request),
+            fragmentNames: ["semantic_router"]
         )
     }
 
@@ -6228,13 +6859,67 @@ struct SortAssistantMCPClient: Sendable {
         """
     }
 
+    private static var semanticRouterBootstrapSystemPrompt: String {
+        """
+        You are cmux sprite. Use the semantic router MCP result already present in this session when it is fresh for the current request; otherwise prefer calling mcp__cmux_semantic_router__search before doing substantive work so you can use its route bundle for this turn.
+
+        The route bundle contains systemPrompt, userPrompt, taskPlan, mcpList, and executionAllowedTools. Use systemPrompt and userPrompt as the detailed instructions, stay within executionAllowedTools for execution work, and return the strict JSON response shape described by the route bundle.
+        """
+    }
+
+    private static var semanticRouterScopeRefreshSystemPrompt: String {
+        """
+        You are cmux sprite's MCP scope refresher. Only the local semantic router MCP is visible in this phase.
+
+        Call mcp__cmux_semantic_router__search to retrieve the route bundle for the current request. Do not execute the user's task in this phase. Return only this JSON after the search result is available:
+        {"message":"scope refreshed","choicePrompt":null,"card":null}
+        """
+    }
+
+    private static func semanticRouterBootstrapUserPrompt(_ request: SortAssistantMCPRequest) -> String {
+        var payload: [String: Any] = [
+            "goal": request.goal,
+            "workspaceId": request.workspaceId.map { $0 as Any } ?? NSNull(),
+            "workspaceDirectory": request.workspaceDirectory.map { $0 as Any } ?? NSNull(),
+            "explicitSlashCommand": request.explicitSlashCommand,
+            "routerTool": semanticRouterQualifiedToolName,
+            "searchTool": semanticRouterQualifiedSearchToolName,
+            "scopeRefreshAlreadyPerformed": request.requiresScopeRefresh,
+            "visibleScopeSignature": request.visibleScopeSignature,
+        ]
+        if request.includeConversationContext {
+            payload["recentConversationItemCount"] = request.conversationContext.count
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
+        let json = String(data: data, encoding: .utf8) ?? "{}"
+        return "Handle this cmux sprite request. Reuse the fresh semantic router search result in this session when available; otherwise search the router before execution:\n\(json)"
+    }
+
+    private static func semanticRouterScopeRefreshUserPrompt(_ request: SortAssistantMCPRequest) -> String {
+        var payload: [String: Any] = [
+            "goal": request.goal,
+            "workspaceId": request.workspaceId.map { $0 as Any } ?? NSNull(),
+            "workspaceDirectory": request.workspaceDirectory.map { $0 as Any } ?? NSNull(),
+            "explicitSlashCommand": request.explicitSlashCommand,
+            "searchTool": semanticRouterQualifiedSearchToolName,
+            "visibleScopeSignature": request.visibleScopeSignature,
+            "scopeRefreshReason": request.scopeRefreshReason,
+        ]
+        if request.includeConversationContext {
+            payload["recentConversationItemCount"] = request.conversationContext.count
+        }
+        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])) ?? Data()
+        let json = String(data: data, encoding: .utf8) ?? "{}"
+        return "Refresh the visible MCP scope through the local semantic router search tool:\n\(json)"
+    }
+
     private static func promptFragment(named name: String) -> String? {
         switch name {
         case "normal_chat":
             return "normal_chat: Answer naturally and briefly. Use recentConversation when it helps."
         case "context":
             return """
-            context: Gather relevant context before answering. Use context_collect for plugin context, repository_context for the current local repository, ghpr_context or github_pr_context for pull requests, github_context for cached sidebar GitHub metadata, and workspace_digest_get for workspace digest context. If context data is empty, report the concrete limitation.
+            context: Gather relevant context before answering. Use context_collect for plugin context, repository_context for local repository activity, ghpr_context or github_pr_context for pull requests, github_context for cached sidebar GitHub metadata, and workspace_digest_get for workspace digest context. For all-workspace questions such as dead, stale, inactive, or unused workspaces, first call list_state and github_context with includeAllWorkspaces=true, then call repository_context for relevant workspace directories. If context data is empty or a requested signal such as file mtimes or session usage is unavailable, report that concrete limitation.
             """
         case "workspace_color":
             return """
@@ -6351,7 +7036,115 @@ struct SortAssistantMCPClient: Sendable {
         }
     }
 
-    private static func writeMCPConfig(_ request: SortAssistantMCPRequest) throws -> MCPConfigFile {
+    private static func semanticRouterPayloadObject(
+        request: SortAssistantMCPRequest,
+        promptBundle: PromptBundle,
+        runtimePlan: MCPRuntimePlan
+    ) -> [String: Any] {
+        let steps = normalizedRouteSteps(for: request)
+        let executionAllowedTools = executionAllowedTools(for: request, runtimePlan: runtimePlan)
+        let claudeAllowedTools = claudeAllowedTools(for: request, runtimePlan: runtimePlan)
+        var payload: [String: Any] = [
+            "version": 1,
+            "surface": "cmux_sprite_assistant",
+            "goal": request.goal,
+            "systemPrompt": promptBundle.systemPrompt,
+            "userPrompt": promptBundle.userPrompt,
+            "promptProfile": promptBundle.profile.rawValue,
+            "promptFragments": promptBundle.fragmentNames,
+            "intent": request.intent.rawValue,
+            "taskPlan": [
+                "scope": "current_request",
+                "steps": routeStepPayload(steps),
+            ],
+            "workspaceId": request.workspaceId.map { $0 as Any } ?? NSNull(),
+            "workspaceDirectory": request.workspaceDirectory.map { $0 as Any } ?? NSNull(),
+            "explicitSlashCommand": request.explicitSlashCommand,
+            "route": [
+                "mode": request.route.mode.rawValue,
+                "needsConfirmation": request.route.needsConfirmation,
+                "allowedTools": request.route.allowedTools,
+                "memoryWritePolicy": request.route.memoryWritePolicy.rawValue,
+            ],
+            "mcpList": mcpListPayload(
+                request: request,
+                runtimePlan: runtimePlan,
+                executionAllowedTools: executionAllowedTools
+            ),
+            "mcpServers": runtimePlan.serverNames,
+            "externalMCPServers": runtimePlan.externalServerNames,
+            "executionAllowedTools": executionAllowedTools,
+            "claudeAllowedTools": claudeAllowedTools,
+            "visibleScope": [
+                "signature": request.visibleScopeSignature,
+                "refreshRequired": request.requiresScopeRefresh,
+                "refreshReason": request.scopeRefreshReason,
+                "initialVisibleMCPServers": [semanticRouterServerName],
+                "initialVisibleTools": semanticRouterQualifiedToolNames,
+                "expandedMCPServers": runtimePlan.serverNames,
+                "expandedAllowedTools": claudeAllowedTools,
+            ],
+            "toolUsePolicy": [
+                "routerTool": semanticRouterQualifiedToolName,
+                "searchTool": semanticRouterQualifiedSearchToolName,
+                "preferRouterFirst": true,
+                "routerIsGuidance": true,
+                "executionAllowedToolsAreRecommended": true,
+                "initialVisibilityIsRouterOnly": true,
+            ],
+        ]
+        if request.includeConversationContext {
+            payload["recentConversation"] = request.conversationContext
+        }
+        if !request.routeAdjustment.isEmpty {
+            payload["routeAdjustment"] = [
+                "promptFragmentMode": request.routeAdjustment.promptFragmentMode.rawValue,
+                "promptFragments": request.routeAdjustment.promptFragments,
+                "removedPromptFragments": request.routeAdjustment.removedPromptFragments,
+                "allowedToolsMode": request.routeAdjustment.allowedToolsMode.rawValue,
+                "allowedTools": request.routeAdjustment.allowedTools,
+                "removedAllowedTools": request.routeAdjustment.removedAllowedTools,
+            ]
+        }
+        return payload
+    }
+
+    private static func mcpListPayload(
+        request: SortAssistantMCPRequest,
+        runtimePlan: MCPRuntimePlan,
+        executionAllowedTools: [String]
+    ) -> [[String: Any]] {
+        var entries: [[String: Any]] = [
+            [
+                "name": semanticRouterServerName,
+                "role": "semantic_router",
+                "tools": [semanticRouterToolName, semanticRouterSearchToolName],
+                "qualifiedTools": semanticRouterQualifiedToolNames,
+            ],
+        ]
+
+        if !request.route.allowedTools.isEmpty {
+            entries.append([
+                "name": "cmux_sprite",
+                "role": "sprite_execution",
+                "tools": request.route.allowedTools,
+                "qualifiedTools": request.route.allowedTools.map { "mcp__cmux_sprite__\($0)" },
+            ])
+        }
+
+        for serverName in runtimePlan.externalServerNames {
+            let prefix = "mcp__\(serverName)__"
+            let allowedTools = executionAllowedTools.filter { $0.hasPrefix(prefix) }
+            entries.append([
+                "name": serverName,
+                "role": "external",
+                "qualifiedTools": allowedTools,
+            ])
+        }
+        return entries
+    }
+
+    private static func mcpRuntimePlan(for request: SortAssistantMCPRequest) -> MCPRuntimePlan {
         var env: [String: String] = [
             "CMUX_SOCKET_PATH": request.socketPath,
         ]
@@ -6381,15 +7174,64 @@ struct SortAssistantMCPClient: Sendable {
             : []
 
         var mcpServers = externalServers
-        mcpServers["cmux_sprite"] = [
+        if !request.route.allowedTools.isEmpty {
+            mcpServers["cmux_sprite"] = [
+                "command": request.cmuxCLIPath,
+                "args": [
+                    "--socket",
+                    request.socketPath,
+                    "mcp",
+                    "sprite-assistant",
+                ],
+                "env": env,
+            ]
+        }
+
+        return MCPRuntimePlan(
+            mcpServers: mcpServers,
+            externalServerNames: externalServerNames,
+            externalAllowedTools: externalAllowedTools,
+            externalPolicy: includeExternal ? "loaded_for_intent" : "sprite_only_for_intent"
+        )
+    }
+
+    private static func writeMCPConfig(
+        _ request: SortAssistantMCPRequest,
+        runtimePlan: MCPRuntimePlan,
+        semanticRouterPayload: [String: Any],
+        exposureMode: MCPExposureMode
+    ) throws -> MCPConfigFile {
+        let semanticRouterPayloadURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-sprite-semantic-router-\(UUID().uuidString).json")
+        let semanticRouterPayloadData = try JSONSerialization.data(
+            withJSONObject: semanticRouterPayload,
+            options: [.prettyPrinted, .sortedKeys]
+        )
+        try semanticRouterPayloadData.write(to: semanticRouterPayloadURL, options: [.atomic])
+
+        var semanticRouterEnv: [String: String] = [
+            "CMUX_SPRITE_SEMANTIC_ROUTER_PAYLOAD_PATH": semanticRouterPayloadURL.path,
+        ]
+#if DEBUG
+        if let debugLogPath = debugLogPathForMCP() {
+            semanticRouterEnv["CMUX_DEBUG_LOG"] = debugLogPath
+        }
+#endif
+
+        var mcpServers: [String: Any]
+        switch exposureMode {
+        case .routerOnly:
+            mcpServers = [:]
+        case .expanded:
+            mcpServers = runtimePlan.mcpServers
+        }
+        mcpServers[semanticRouterServerName] = [
             "command": request.cmuxCLIPath,
             "args": [
-                "--socket",
-                request.socketPath,
                 "mcp",
-                "sprite-assistant",
+                "semantic-router",
             ],
-            "env": env,
+            "env": semanticRouterEnv,
         ]
 
         let config: [String: Any] = [
@@ -6398,14 +7240,60 @@ struct SortAssistantMCPClient: Sendable {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("cmux-sprite-mcp-\(UUID().uuidString).json")
         let data = try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys])
-        try data.write(to: url, options: [.atomic])
+        do {
+            try data.write(to: url, options: [.atomic])
+        } catch {
+            try? FileManager.default.removeItem(at: semanticRouterPayloadURL)
+            throw error
+        }
         return MCPConfigFile(
             url: url,
+            semanticRouterPayloadURL: semanticRouterPayloadURL,
+            exposureMode: exposureMode,
             serverNames: mcpServers.keys.sorted(),
-            externalServerNames: externalServerNames,
-            externalAllowedTools: externalAllowedTools,
+            externalServerNames: exposureMode == .expanded ? runtimePlan.externalServerNames : [],
+            externalAllowedTools: exposureMode == .expanded ? runtimePlan.externalAllowedTools : [],
+            allowedTools: allowedTools(
+                for: request,
+                runtimePlan: runtimePlan,
+                exposureMode: exposureMode
+            ),
             byteCount: data.count,
-            externalPolicy: includeExternal ? "loaded_for_intent" : "sprite_only_for_intent"
+            semanticRouterPayloadByteCount: semanticRouterPayloadData.count,
+            externalPolicy: exposureMode == .expanded ? runtimePlan.externalPolicy : "router_only_scope_refresh"
+        )
+    }
+
+    private static func allowedTools(
+        for request: SortAssistantMCPRequest,
+        runtimePlan: MCPRuntimePlan,
+        exposureMode: MCPExposureMode
+    ) -> [String] {
+        switch exposureMode {
+        case .routerOnly:
+            return semanticRouterQualifiedToolNames
+        case .expanded:
+            return claudeAllowedTools(for: request, runtimePlan: runtimePlan)
+        }
+    }
+
+    private static func executionAllowedTools(
+        for request: SortAssistantMCPRequest,
+        runtimePlan: MCPRuntimePlan
+    ) -> [String] {
+        orderedUniqueSortAssistant(
+            request.route.allowedTools.map { "mcp__cmux_sprite__\($0)" } +
+                runtimePlan.externalAllowedTools
+        )
+    }
+
+    private static func claudeAllowedTools(
+        for request: SortAssistantMCPRequest,
+        runtimePlan: MCPRuntimePlan
+    ) -> [String] {
+        orderedUniqueSortAssistant(
+            semanticRouterQualifiedToolNames +
+                executionAllowedTools(for: request, runtimePlan: runtimePlan)
         )
     }
 
@@ -6657,24 +7545,108 @@ struct SortAssistantMCPClient: Sendable {
         }
 
         private static func localizedProgressThinking() -> String {
-            String(localized: "sortAssistant.mcp.stream.thinking", defaultValue: "Claude is thinking...")
+            String(localized: "sortAssistant.mcp.stream.thinking", defaultValue: "Thinking...")
         }
 
         private static func localizedProgressUsingTools(_ toolNames: [String]) -> String {
-            let tools = orderedUniqueSortAssistant(toolNames)
-                .map { $0.replacingOccurrences(of: "_", with: " ") }
-                .joined(separator: ", ")
+            let displayNames = orderedUniqueSortAssistant(toolNames)
+                .map(prettyToolUseName)
+            if displayNames.count == 1, let tool = displayNames.first {
+                return String(
+                    format: String(
+                        localized: "sortAssistant.mcp.stream.usingTool",
+                        defaultValue: "%@..."
+                    ),
+                    tool
+                )
+            }
+            let tools = displayNames.joined(separator: ", ")
             return String(
                 format: String(
                     localized: "sortAssistant.mcp.stream.usingTools",
-                    defaultValue: "Using %@..."
+                    defaultValue: "Using tools: %@..."
                 ),
                 tools
             )
         }
 
         private static func localizedProgressFinalizing() -> String {
-            String(localized: "sortAssistant.mcp.stream.finalizing", defaultValue: "Finalizing the answer...")
+            String(localized: "sortAssistant.mcp.stream.finalizing", defaultValue: "Finalizing...")
+        }
+
+        private static func prettyToolUseName(_ rawName: String) -> String {
+            let toolName = unqualifiedToolName(rawName)
+            switch toolName {
+            case "search":
+                return String(localized: "sortAssistant.mcp.tool.search", defaultValue: "Searching semantic router")
+            case "route":
+                return String(localized: "sortAssistant.mcp.tool.route", defaultValue: "Reading semantic route")
+            case "workspace_color_get":
+                return String(localized: "sortAssistant.mcp.tool.workspaceColorGet", defaultValue: "Reading workspace color")
+            case "workspace_color_set":
+                return String(localized: "sortAssistant.mcp.tool.workspaceColorSet", defaultValue: "Setting workspace color")
+            case "workspace_color_clear":
+                return String(localized: "sortAssistant.mcp.tool.workspaceColorClear", defaultValue: "Clearing workspace color")
+            case "list_state":
+                return String(localized: "sortAssistant.mcp.tool.listState", defaultValue: "Reading workspace list")
+            case "repository_context":
+                return String(localized: "sortAssistant.mcp.tool.repositoryContext", defaultValue: "Reading repository context")
+            case "context_collect":
+                return String(localized: "sortAssistant.mcp.tool.contextCollect", defaultValue: "Collecting context")
+            case "github_context":
+                return String(localized: "sortAssistant.mcp.tool.githubContext", defaultValue: "Reading GitHub context")
+            case "github_pr_context", "ghpr_context":
+                return String(localized: "sortAssistant.mcp.tool.prContext", defaultValue: "Reading pull request context")
+            case "ghpr_status":
+                return String(localized: "sortAssistant.mcp.tool.prStatus", defaultValue: "Checking pull request status")
+            case "workspace_digest_get":
+                return String(localized: "sortAssistant.mcp.tool.workspaceDigest", defaultValue: "Reading workspace digest")
+            case "workspace_digest_progress":
+                return String(localized: "sortAssistant.mcp.tool.workspaceDigestProgress", defaultValue: "Checking digest progress")
+            case "memory_query":
+                return String(localized: "sortAssistant.mcp.tool.memoryQuery", defaultValue: "Reading sort memory")
+            case "memory_write_candidate":
+                return String(localized: "sortAssistant.mcp.tool.memoryWrite", defaultValue: "Preparing memory update")
+            case "memory_forget":
+                return String(localized: "sortAssistant.mcp.tool.memoryForget", defaultValue: "Forgetting sort memory")
+            case "sprite_memory_query":
+                return String(localized: "sortAssistant.mcp.tool.spriteMemoryQuery", defaultValue: "Reading sprite memory")
+            case "sprite_memory_write":
+                return String(localized: "sortAssistant.mcp.tool.spriteMemoryWrite", defaultValue: "Writing sprite memory")
+            case "sprite_memory_forget":
+                return String(localized: "sortAssistant.mcp.tool.spriteMemoryForget", defaultValue: "Forgetting sprite memory")
+            case "sort_context":
+                return String(localized: "sortAssistant.mcp.tool.sortContext", defaultValue: "Reading sort context")
+            case "sort_preview":
+                return String(localized: "sortAssistant.mcp.tool.sortPreview", defaultValue: "Previewing sort")
+            case "sort_apply":
+                return String(localized: "sortAssistant.mcp.tool.sortApply", defaultValue: "Applying sort")
+            case "sort_explain":
+                return String(localized: "sortAssistant.mcp.tool.sortExplain", defaultValue: "Explaining order")
+            case "sort_undo":
+                return String(localized: "sortAssistant.mcp.tool.sortUndo", defaultValue: "Undoing sort")
+            default:
+                return fallbackPrettyToolName(toolName)
+            }
+        }
+
+        private static func unqualifiedToolName(_ rawName: String) -> String {
+            let parts = rawName.components(separatedBy: "__")
+            if parts.count >= 3, parts.first == "mcp" {
+                return parts.dropFirst(2).joined(separator: "__")
+            }
+            return rawName
+        }
+
+        private static func fallbackPrettyToolName(_ toolName: String) -> String {
+            toolName
+                .replacingOccurrences(of: "_", with: " ")
+                .split(separator: " ")
+                .map { word in
+                    guard let first = word.first else { return "" }
+                    return first.uppercased() + String(word.dropFirst())
+                }
+                .joined(separator: " ")
         }
     }
 
@@ -7906,6 +8878,7 @@ final class SortAssistantCoordinator: ObservableObject {
     private weak var lastWorkspaceTabStore: WorkspaceTabStore?
     private var claudeConversationSessionId = UUID()
     private var claudeConversationSessionStarted = false
+    private var claudeVisibleScopeSignature: String?
     // Workspace-color binding for the sprite assistant's recovery handle.
     // Published so SwiftUI can re-render the colored marker when the active
     // workspace's customColor changes (or when the selected workspace itself
@@ -8016,6 +8989,7 @@ final class SortAssistantCoordinator: ObservableObject {
         memoryCandidate = nil
         messages.removeAll()
         isSorting = false
+        claudeVisibleScopeSignature = nil
         if appendConfirmation {
             append(.init(
                 kind: .assistant,
@@ -8160,7 +9134,7 @@ final class SortAssistantCoordinator: ObservableObject {
         pendingIntentRequestId = requestId
         let conversationContext = semanticConversationContext(workspaceTarget: workspaceTarget)
         let semanticWorkspaceDirectory = workspaceTarget?.directory ?? Self.workspaceDirectoryForMCP(tabManager: tabManager)
-        append(.init(
+        let progressMessageId = append(.init(
             kind: .progress,
             text: String(localized: "sortAssistant.intent.running", defaultValue: "Understanding the request...")
         ))
@@ -8176,6 +9150,8 @@ final class SortAssistantCoordinator: ObservableObject {
             guard let self else { return }
             guard self.pendingIntentRequestId == requestId else { return }
             self.pendingIntentRequestId = nil
+            self.removeMessage(id: progressMessageId)
+            self.appendSemanticRouterUnavailableReportIfNeeded(decision.semanticRouterUnavailableReport)
             guard let tabManager, let workspaceTabStore else { return }
             self.handleSubmitIntent(
                 decision.intent,
@@ -8187,7 +9163,6 @@ final class SortAssistantCoordinator: ObservableObject {
                 sortRoute: decision.sortRoute,
                 routeSteps: decision.steps,
                 routeAdjustment: decision.routeAdjustment,
-                allowKeywordSortRouteFallback: decision.isFallback,
                 debugSession: debugSession
             )
         }
@@ -8645,22 +9620,47 @@ final class SortAssistantCoordinator: ObservableObject {
         debugSession: SortAssistantDebugSession
     ) {
         let routingText = Self.semanticSortRoutingText(goal: goal, intent: intent)
-        let fallbackRoute: SortAssistantSortRoute? = Self.isColorGroupGoal(routingText) ? .colorGroup : nil
+        let requestId = UUID()
+        pendingIntentRequestId = requestId
+        let conversationContext = semanticConversationContext(workspaceTarget: workspaceTarget)
+        let semanticWorkspaceDirectory = workspaceTarget?.directory ?? Self.workspaceDirectoryForMCP(tabManager: tabManager)
         debugSession.log(
-            "router.skipped source=slashSort intent=\(intent.rawValue) sortRoute=\(fallbackRoute?.rawValue ?? "nil")"
+            "router.semantic.begin source=slashSort intent=\(intent.rawValue)"
         )
-        handleSubmitIntent(
-            intent,
-            trimmed: goal,
-            tabManager: tabManager,
-            workspaceTabStore: workspaceTabStore,
-            forceApply: forceApply,
-            workspaceTarget: workspaceTarget,
-            sortRoute: fallbackRoute,
-            allowKeywordSortRouteFallback: false,
-            explicitSlashCommand: explicitSlashCommand,
-            debugSession: debugSession
-        )
+        let progressMessageId = append(.init(
+            kind: .progress,
+            text: String(localized: "sortAssistant.intent.running", defaultValue: "Understanding the request...")
+        ))
+
+        Task { [weak self, weak tabManager, weak workspaceTabStore] in
+            let decision = await SortAssistantIntentRouter().semanticIntent(
+                for: routingText,
+                externalGoal: forceApply,
+                conversationContext: conversationContext,
+                workspaceDirectory: semanticWorkspaceDirectory,
+                debugSession: debugSession
+            )
+            guard let self else { return }
+            guard self.pendingIntentRequestId == requestId else { return }
+            self.pendingIntentRequestId = nil
+            self.removeMessage(id: progressMessageId)
+            self.appendSemanticRouterUnavailableReportIfNeeded(decision.semanticRouterUnavailableReport)
+            guard let tabManager, let workspaceTabStore else { return }
+            let resolvedSortRoute = decision.steps.first { $0.intent.isSortRouted }?.sortRoute ?? decision.sortRoute
+            self.handleSubmitIntent(
+                intent,
+                trimmed: goal,
+                tabManager: tabManager,
+                workspaceTabStore: workspaceTabStore,
+                forceApply: forceApply,
+                workspaceTarget: workspaceTarget,
+                sortRoute: resolvedSortRoute,
+                routeSteps: [SortAssistantRouteStep(intent: intent, sortRoute: resolvedSortRoute)],
+                routeAdjustment: decision.routeAdjustment,
+                explicitSlashCommand: explicitSlashCommand,
+                debugSession: debugSession
+            )
+        }
     }
 
     private static func semanticSortRoutingText(
@@ -9038,7 +10038,7 @@ final class SortAssistantCoordinator: ObservableObject {
     ) -> Bool {
         let phaseStart = SortAssistantDebugSession.now()
         let isSemanticColorGroup = sortRoute == .colorGroup
-        guard isSemanticColorGroup || Self.isColorGroupGoal(goal) else { return false }
+        guard isSemanticColorGroup else { return false }
         reloadFreeSortMemories(reason: "colorGroup")
         guard let request = Self.colorGroupSortRequest(
             from: goal,
@@ -9522,7 +10522,6 @@ final class SortAssistantCoordinator: ObservableObject {
         sortRoute: SortAssistantSortRoute? = nil,
         routeSteps: [SortAssistantRouteStep]? = nil,
         routeAdjustment: SortAssistantRouteAdjustment = .empty,
-        allowKeywordSortRouteFallback: Bool = true,
         explicitSlashCommand: Bool = false,
         debugSession: SortAssistantDebugSession? = nil
     ) {
@@ -9577,9 +10576,7 @@ final class SortAssistantCoordinator: ObservableObject {
 
         if intent.isSortRouted {
             let mode: SortAssistantRunMode = (forceApply || intent == .applySort) ? .apply : .preview
-            let shouldTryColorGroup = steps.count == 1 && (effectiveSortRoute == .colorGroup
-                || (allowKeywordSortRouteFallback && Self.isColorGroupGoal(trimmed))
-            )
+            let shouldTryColorGroup = steps.count == 1 && effectiveSortRoute == .colorGroup
             if shouldTryColorGroup, handleColorGroupSortIfNeeded(
                 goal: trimmed,
                 mode: mode,
@@ -9655,6 +10652,163 @@ final class SortAssistantCoordinator: ObservableObject {
         return " " + lower.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ") + " "
     }
 
+    private func appendSemanticRouterUnavailableReportIfNeeded(
+        _ report: SortAssistantSemanticRouterUnavailableReport?
+    ) {
+        guard let report else { return }
+        append(.init(
+            kind: .warning,
+            text: Self.semanticRouterUnavailableMessage(report)
+        ))
+    }
+
+    private static func semanticRouterUnavailableMessage(
+        _ report: SortAssistantSemanticRouterUnavailableReport
+    ) -> String {
+        var lines = [
+            String(
+                format: String(
+                    localized: "sortAssistant.semanticRouter.unavailable",
+                    defaultValue: "Semantic router unavailable; falling back to %@."
+                ),
+                report.fallbackIntent.rawValue
+            ),
+        ]
+        if let localIssue = report.localIssue {
+            lines.append("- \(semanticRouterIssueMessage(localIssue))")
+        }
+        if let claudeIssue = report.claudeIssue {
+            lines.append("- \(semanticRouterIssueMessage(claudeIssue))")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private static func semanticRouterIssueMessage(_ issue: SortAssistantSemanticRouterIssue) -> String {
+        switch (issue.stage, issue.code) {
+        case (.local, "not_configured"):
+            return String(
+                localized: "sortAssistant.semanticRouter.local.notConfigured",
+                defaultValue: "Local router: not configured (set a semantic router model in Sprite settings or semanticRouter.model)."
+            )
+        case (.local, "disabled"):
+            return String(
+                localized: "sortAssistant.semanticRouter.local.disabled",
+                defaultValue: "Local router: disabled in Sprite semantic router settings."
+            )
+        case (.local, "missing_base_url"):
+            return String(
+                localized: "sortAssistant.semanticRouter.local.missingBaseURL",
+                defaultValue: "Local router: base URL is empty."
+            )
+        case (.local, "invalid_base_url"):
+            return String(
+                localized: "sortAssistant.semanticRouter.local.invalidBaseURL",
+                defaultValue: "Local router: base URL is invalid."
+            )
+        case (.local, "http_status"):
+            return String(
+                format: String(
+                    localized: "sortAssistant.semanticRouter.local.httpStatus",
+                    defaultValue: "Local router: endpoint returned HTTP %@."
+                ),
+                issue.status.map(String.init) ?? "unknown"
+            )
+        case (.local, "invalid_json"):
+            return String(
+                localized: "sortAssistant.semanticRouter.local.invalidJSON",
+                defaultValue: "Local router: response was not a JSON object."
+            )
+        case (.local, "missing_content"):
+            return String(
+                localized: "sortAssistant.semanticRouter.local.missingContent",
+                defaultValue: "Local router: response did not include model content."
+            )
+        case (.local, "invalid_decision"):
+            return String(
+                localized: "sortAssistant.semanticRouter.local.invalidDecision",
+                defaultValue: "Local router: response did not match the route JSON schema."
+            )
+        case (.local, "low_confidence"):
+            return String(
+                localized: "sortAssistant.semanticRouter.local.lowConfidence",
+                defaultValue: "Local router: returned low confidence."
+            )
+        case (.claude, "timed_out"):
+            return String(
+                format: String(
+                    localized: "sortAssistant.semanticRouter.claude.timedOut",
+                    defaultValue: "Claude fallback router: timed out after %@s."
+                ),
+                issue.timeoutSeconds.map(String.init) ?? "unknown"
+            )
+        case (.claude, "exited"):
+            return String(
+                format: String(
+                    localized: "sortAssistant.semanticRouter.claude.exited",
+                    defaultValue: "Claude fallback router: exited with status %@."
+                ),
+                issue.status.map(String.init) ?? "unknown"
+            )
+        case (.claude, "executable_missing"):
+            return String(
+                localized: "sortAssistant.semanticRouter.claude.executableMissing",
+                defaultValue: "Claude fallback router: Claude Code executable was not found."
+            )
+        case (.claude, "invalid_decision"):
+            return String(
+                localized: "sortAssistant.semanticRouter.claude.invalidDecision",
+                defaultValue: "Claude fallback router: response did not match the route JSON schema."
+            )
+        case (.claude, "low_confidence"):
+            return String(
+                localized: "sortAssistant.semanticRouter.claude.lowConfidence",
+                defaultValue: "Claude fallback router: returned low confidence."
+            )
+        case (.claude, "clear_session_rejected"):
+            return String(
+                localized: "sortAssistant.semanticRouter.claude.clearSessionRejected",
+                defaultValue: "Claude fallback router: rejected a clear-session route for this request."
+            )
+        case (.local, _):
+            return String(
+                format: String(
+                    localized: "sortAssistant.semanticRouter.local.failed",
+                    defaultValue: "Local router: %@."
+                ),
+                issue.detail ?? issue.code
+            )
+        case (.claude, _):
+            return String(
+                format: String(
+                    localized: "sortAssistant.semanticRouter.claude.failed",
+                    defaultValue: "Claude fallback router: %@."
+                ),
+                issue.detail ?? issue.code
+            )
+        }
+    }
+
+    private static func visibleScopeSignature(
+        intent: SortAssistantIntent,
+        steps: [SortAssistantRouteStep],
+        route: SortAssistantActionRoute,
+        routeAdjustment: SortAssistantRouteAdjustment,
+        explicitSlashCommand: Bool,
+        workspaceDirectory: String?
+    ) -> String {
+        [
+            "intent=\(intent.rawValue)",
+            "steps=\(steps.debugDescriptionJoined)",
+            "mode=\(route.mode.rawValue)",
+            "confirm=\(route.needsConfirmation ? 1 : 0)",
+            "memory=\(route.memoryWritePolicy.rawValue)",
+            "tools=\(route.allowedTools.joined(separator: ","))",
+            "adjustment=\(routeAdjustment.debugDescription)",
+            "slash=\(explicitSlashCommand ? 1 : 0)",
+            "workspace=\(workspaceDirectory ?? "")",
+        ].joined(separator: "|")
+    }
+
     private func startMCPAssistant(
         goal: String,
         intent: SortAssistantIntent,
@@ -9695,9 +10849,23 @@ final class SortAssistantCoordinator: ObservableObject {
         isSorting = true
         let conversationContext = semanticConversationContext(workspaceTarget: workspaceTarget)
         let resolvedWorkspaceId = workspaceTarget?.id ?? tabManager.selectedTabId
+        let resolvedWorkspaceDirectory = workspaceTarget?.directory ?? Self.workspaceDirectoryForMCP(tabManager: tabManager)
         let claudeSessionId = claudeConversationSessionId
         let claudeSessionReused = claudeConversationSessionStarted
         let includeConversationContext = !claudeConversationSessionStarted
+        let visibleScopeSignature = Self.visibleScopeSignature(
+            intent: intent,
+            steps: steps,
+            route: route,
+            routeAdjustment: routeAdjustment,
+            explicitSlashCommand: explicitSlashCommand,
+            workspaceDirectory: resolvedWorkspaceDirectory
+        )
+        let requiresScopeRefresh = !claudeConversationSessionStarted
+            || claudeVisibleScopeSignature != visibleScopeSignature
+        debugSession.log(
+            "mcp.scope.plan refresh=\(requiresScopeRefresh ? 1 : 0) previous=\(claudeVisibleScopeSignature == nil ? "nil" : "set") signatureHash=\(visibleScopeSignature.hashValue)"
+        )
 #if DEBUG
         let debugRequestId = UUID()
         debugLogSpriteGeometrySnapshot(
@@ -9706,19 +10874,15 @@ final class SortAssistantCoordinator: ObservableObject {
 #endif
         let progressMessageId = append(.init(
             kind: .progress,
-            text: String(localized: "sortAssistant.mcp.running", defaultValue: "Calling sprite MCP tools...")
+            text: String(localized: "sortAssistant.mcp.running", defaultValue: "Preparing assistant tools...")
         ))
         let generation = sessionGeneration
-#if DEBUG
         let progressHandler: SortAssistantMCPProgressHandler? = { [weak self] update in
             Task { @MainActor [weak self] in
                 guard let self, self.sessionGeneration == generation else { return }
                 self.updateMessage(id: progressMessageId, text: update.message)
             }
         }
-#else
-        let progressHandler: SortAssistantMCPProgressHandler? = nil
-#endif
 
         let request = SortAssistantMCPRequest(
             goal: goal,
@@ -9726,11 +10890,13 @@ final class SortAssistantCoordinator: ObservableObject {
             routeSteps: steps,
             route: route,
             routeAdjustment: routeAdjustment,
+            visibleScopeSignature: visibleScopeSignature,
+            requiresScopeRefresh: requiresScopeRefresh,
             conversationContext: conversationContext,
             includeConversationContext: includeConversationContext,
             explicitSlashCommand: explicitSlashCommand,
             workspaceId: resolvedWorkspaceId?.uuidString,
-            workspaceDirectory: workspaceTarget?.directory ?? Self.workspaceDirectoryForMCP(tabManager: tabManager),
+            workspaceDirectory: resolvedWorkspaceDirectory,
             socketPath: SocketControlSettings.socketPath(),
             cmuxCLIPath: Self.cmuxCLIPathForMCP(),
             claudeSessionId: claudeSessionId,
@@ -9751,6 +10917,7 @@ final class SortAssistantCoordinator: ObservableObject {
                     return
                 }
                 self.claudeConversationSessionStarted = true
+                self.claudeVisibleScopeSignature = request.visibleScopeSignature
                 self.isSorting = false
                 self.removeMessage(id: progressMessageId)
 #if DEBUG
@@ -10907,6 +12074,8 @@ final class SortAssistantCoordinator: ObservableObject {
             return "assistant"
         case .progress:
             return "assistant_status"
+        case .warning:
+            return "assistant_warning"
         case .error:
             return "assistant_error"
         }

@@ -117133,6 +117133,727 @@
         }
       }
     },
+    "sortAssistant.semanticRouter.claude.clearSessionRejected": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router: rejected a clear-session route for this request."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude フォールバックルーター: このリクエストのセッション消去ルートを拒否しました。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router：拒绝了本次请求的 clear-session route。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.claude.executableMissing": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router: Claude Code executable was not found."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude フォールバックルーター: Claude Code 実行ファイルが見つかりません。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router：找不到 Claude Code 可执行文件。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.claude.exited": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router: exited with status %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude フォールバックルーター: ステータス %@ で終了しました。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router：退出状态码 %@。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.claude.failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router: %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude フォールバックルーター: %@。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router：%@。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.claude.invalidDecision": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router: response did not match the route JSON schema."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude フォールバックルーター: 応答がルート JSON スキーマに一致しません。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router：返回内容不符合 route JSON schema。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.claude.lowConfidence": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router: returned low confidence."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude フォールバックルーター: 信頼度が低い結果を返しました。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router：返回结果置信度过低。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.claude.timedOut": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router: timed out after %@s."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude フォールバックルーター: %@ 秒後にタイムアウトしました。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude fallback router：%@ 秒后超时。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.disabled": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: disabled in Sprite semantic router settings."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: Sprite semantic router 設定で無効になっています。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：已在 Sprite semantic router 设置中禁用。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: %@。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：%@。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.httpStatus": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: endpoint returned HTTP %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: エンドポイントが HTTP %@ を返しました。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：endpoint 返回 HTTP %@。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.invalidBaseURL": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: base URL is invalid."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: ベース URL が無効です。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：base URL 无效。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.invalidDecision": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: response did not match the route JSON schema."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: 応答がルート JSON スキーマに一致しません。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：返回内容不符合 route JSON schema。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.invalidJSON": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: response was not a JSON object."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: 応答が JSON オブジェクトではありません。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：返回内容不是 JSON object。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.lowConfidence": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: returned low confidence."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: 信頼度が低い結果を返しました。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：返回结果置信度过低。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.missingBaseURL": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: base URL is empty."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: ベース URL が空です。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：base URL 为空。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.missingContent": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: response did not include model content."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: 応答にモデル出力が含まれていません。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：返回内容中没有 model content。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.local.notConfigured": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router: not configured (set a semantic router model in Sprite settings or semanticRouter.model)."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ローカルルーター: 未設定です（Sprite 設定または semanticRouter.model でモデルを設定してください）。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local router：未配置（请在 Sprite 设置或 semanticRouter.model 中设置模型）。"
+          }
+        }
+      }
+    },
+    "sortAssistant.semanticRouter.unavailable": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Semantic router unavailable; falling back to %@."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Semantic router を利用できません。%@ にフォールバックします。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Semantic router 不可用；正在 fallback 到 %@。"
+          }
+        }
+      }
+    },
+    "sortAssistant.mcp.running": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing assistant tools..."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アシスタントツールを準備中..."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在准备助手工具..."
+          }
+        }
+      }
+    },
+    "sortAssistant.mcp.stream.finalizing": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Finalizing..."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仕上げ中..."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在收尾..."
+          }
+        }
+      }
+    },
+    "sortAssistant.mcp.stream.thinking": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Thinking..."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "考えています..."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在思考..."
+          }
+        }
+      }
+    },
+    "sortAssistant.mcp.stream.usingTool": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@..."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@..."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@..."
+          }
+        }
+      }
+    },
+    "sortAssistant.mcp.stream.usingTools": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Using tools: %@..."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ツールを使用中: %@..."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在使用工具：%@..."
+          }
+        }
+      }
+    },
+    "sortAssistant.mcp.tool.contextCollect": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Collecting context" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "コンテキストを収集中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在收集上下文" } }
+      }
+    },
+    "sortAssistant.mcp.tool.githubContext": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading GitHub context" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "GitHub コンテキストを読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取 GitHub 上下文" } }
+      }
+    },
+    "sortAssistant.mcp.tool.listState": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading workspace list" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ワークスペース一覧を読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取工作区列表" } }
+      }
+    },
+    "sortAssistant.mcp.tool.memoryForget": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Forgetting sort memory" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "並べ替えメモリを削除中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在删除排序记忆" } }
+      }
+    },
+    "sortAssistant.mcp.tool.memoryQuery": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading sort memory" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "並べ替えメモリを読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取排序记忆" } }
+      }
+    },
+    "sortAssistant.mcp.tool.memoryWrite": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Preparing memory update" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "メモリ更新を準備中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在准备记忆更新" } }
+      }
+    },
+    "sortAssistant.mcp.tool.prContext": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading pull request context" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "プルリクエストのコンテキストを読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取 PR 上下文" } }
+      }
+    },
+    "sortAssistant.mcp.tool.prStatus": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Checking pull request status" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "プルリクエストの状態を確認中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在检查 PR 状态" } }
+      }
+    },
+    "sortAssistant.mcp.tool.repositoryContext": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading repository context" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "リポジトリコンテキストを読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取仓库上下文" } }
+      }
+    },
+    "sortAssistant.mcp.tool.route": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading semantic route" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "セマンティックルートを読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取 semantic route" } }
+      }
+    },
+    "sortAssistant.mcp.tool.search": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Searching semantic router" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "セマンティックルーターを検索中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在搜索 semantic router" } }
+      }
+    },
+    "sortAssistant.mcp.tool.sortApply": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Applying sort" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "並べ替えを適用中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在应用排序" } }
+      }
+    },
+    "sortAssistant.mcp.tool.sortContext": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading sort context" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "並べ替えコンテキストを読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取排序上下文" } }
+      }
+    },
+    "sortAssistant.mcp.tool.sortExplain": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Explaining order" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "順序を説明中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在解释顺序" } }
+      }
+    },
+    "sortAssistant.mcp.tool.sortPreview": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Previewing sort" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "並べ替えをプレビュー中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在预览排序" } }
+      }
+    },
+    "sortAssistant.mcp.tool.sortUndo": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Undoing sort" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "並べ替えを元に戻しています" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在撤销排序" } }
+      }
+    },
+    "sortAssistant.mcp.tool.spriteMemoryForget": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Forgetting sprite memory" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Sprite メモリを削除中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在删除 Sprite 记忆" } }
+      }
+    },
+    "sortAssistant.mcp.tool.spriteMemoryQuery": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading sprite memory" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Sprite メモリを読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取 Sprite 记忆" } }
+      }
+    },
+    "sortAssistant.mcp.tool.spriteMemoryWrite": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Writing sprite memory" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "Sprite メモリを書き込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在写入 Sprite 记忆" } }
+      }
+    },
+    "sortAssistant.mcp.tool.workspaceColorClear": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Clearing workspace color" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ワークスペースの色を消去中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在清除工作区颜色" } }
+      }
+    },
+    "sortAssistant.mcp.tool.workspaceColorGet": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading workspace color" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ワークスペースの色を読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取工作区颜色" } }
+      }
+    },
+    "sortAssistant.mcp.tool.workspaceColorSet": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Setting workspace color" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ワークスペースの色を設定中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在设置工作区颜色" } }
+      }
+    },
+    "sortAssistant.mcp.tool.workspaceDigest": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Reading workspace digest" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ワークスペースダイジェストを読み込み中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在读取工作区摘要" } }
+      }
+    },
+    "sortAssistant.mcp.tool.workspaceDigestProgress": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Checking digest progress" } },
+        "ja": { "stringUnit": { "state": "translated", "value": "ダイジェストの進行状況を確認中" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "正在检查摘要进度" } }
+      }
+    },
     "sortAssistant.workspaceColor.cleared": {
       "extractionState": "manual",
       "localizations": {

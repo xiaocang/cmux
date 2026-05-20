@@ -4775,17 +4775,167 @@ struct CMUXCLI {
         switch subcommand {
         case "sprite-assistant", "sprite", "sort-assistant":
             try runSpriteAssistantMCPServer(socketPath: socketPath, explicitPassword: explicitPassword)
+        case "semantic-router", "sprite-semantic-router", "router":
+            try runSemanticRouterMCPServer()
         case "help", "--help", "-h":
             print("""
             Usage:
               cmux mcp sprite-assistant
+              cmux mcp semantic-router
 
             Starts the cmux sprite assistant MCP server over stdio. The server exposes
             memory, sort, list, workspace color, plugin context, ghpr, GitHub, and workspace digest tools.
+            The semantic-router server exposes the routed sprite prompt bundle for a single request.
             """)
         default:
             throw CLIError(message: "Unknown mcp subcommand: \(subcommand)")
         }
+    }
+
+    private func runSemanticRouterMCPServer() throws {
+#if DEBUG
+        CLIDebugLog.log("sprite.semanticRouterMCP.server.start")
+#endif
+        while let line = readLine(strippingNewline: true) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let data = trimmed.data(using: .utf8),
+                  let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            guard let id = request["id"] else {
+                continue
+            }
+            let method = request["method"] as? String ?? ""
+            let params = request["params"] as? [String: Any] ?? [:]
+            do {
+                writeMCPResponse([
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": try semanticRouterMCPResult(method: method, params: params),
+                ])
+            } catch let error as CLIError {
+                writeMCPResponse([
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": [
+                        "code": -32000,
+                        "message": error.message,
+                    ],
+                ])
+            } catch {
+                writeMCPResponse([
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "error": [
+                        "code": -32000,
+                        "message": String(describing: error),
+                    ],
+                ])
+            }
+        }
+    }
+
+    private func semanticRouterMCPResult(
+        method: String,
+        params: [String: Any]
+    ) throws -> [String: Any] {
+        switch method {
+        case "initialize":
+            return [
+                "protocolVersion": "2024-11-05",
+                "capabilities": [
+                    "tools": [
+                        "listChanged": false,
+                    ],
+                ],
+                "serverInfo": [
+                    "name": "cmux-sprite-semantic-router",
+                    "version": "0.1.0",
+                ],
+            ]
+        case "ping":
+            return [:]
+        case "tools/list":
+            return ["tools": [semanticRouterMCPSearchTool(), semanticRouterMCPRouteTool()]]
+        case "prompts/list":
+            return ["prompts": []]
+        case "resources/list":
+            return ["resources": []]
+        case "tools/call":
+            guard let toolName = params["name"] as? String else {
+                throw CLIError(message: "tools/call requires params.name")
+            }
+            guard toolName == "route" || toolName == "search" else {
+                throw CLIError(message: "Unknown semantic router MCP tool: \(toolName)")
+            }
+            let payload = try semanticRouterMCPPayload()
+            return [
+                "content": [
+                    [
+                        "type": "text",
+                        "text": compactJSONString(payload),
+                    ],
+                ],
+                "isError": false,
+            ]
+        default:
+            throw CLIError(message: "Unsupported MCP method: \(method)")
+        }
+    }
+
+    private func semanticRouterMCPRouteTool() -> [String: Any] {
+        [
+            "name": "route",
+            "description": "Return the authoritative cmux sprite semantic route bundle for this turn: full prompt, MCP server list, task plan, and allowed tools.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "goal": stringSchema(description: "Optional user request text for traceability."),
+                ],
+                "required": [],
+                "additionalProperties": true,
+            ] as [String: Any],
+        ]
+    }
+
+    private func semanticRouterMCPSearchTool() -> [String: Any] {
+        [
+            "name": "search",
+            "description": "Search the local semantic router for the MCP visibility scope needed for this turn, including the detailed prompt, MCP list, task plan, and allow list.",
+            "inputSchema": [
+                "type": "object",
+                "properties": [
+                    "goal": stringSchema(description: "Optional user request text for traceability."),
+                    "currentScope": stringSchema(description: "Optional current MCP scope signature."),
+                ],
+                "required": [],
+                "additionalProperties": true,
+            ] as [String: Any],
+        ]
+    }
+
+    private func semanticRouterMCPPayload() throws -> [String: Any] {
+        let environment = ProcessInfo.processInfo.environment
+        if let path = environment["CMUX_SPRITE_SEMANTIC_ROUTER_PAYLOAD_PATH"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !path.isEmpty {
+            let data = try Data(contentsOf: URL(fileURLWithPath: path))
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw CLIError(message: "Semantic router payload file is not a JSON object.")
+            }
+            return object
+        }
+
+        if let raw = environment["CMUX_SPRITE_SEMANTIC_ROUTER_PAYLOAD"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !raw.isEmpty,
+           let data = raw.data(using: .utf8),
+           let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return object
+        }
+
+        throw CLIError(message: "Semantic router payload is not configured.")
     }
 
     private func runSpriteAssistantMCPServer(
@@ -5255,7 +5405,7 @@ struct CMUXCLI {
             ),
             spriteMCPTool(
                 name: "repository_context",
-                description: "Return local Git repository context for the active workspace directory: repo root, branch, HEAD, dirty state, remotes, worktrees, and GitHub repository slugs.",
+                description: "Return local Git repository context for a workspace directory: repo root, branch, HEAD, last commit time, dirty state, remotes, worktrees, and GitHub repository slugs.",
                 properties: [
                     "directory": stringSchema(description: "Optional directory to inspect. Defaults to the active workspace directory."),
                 ]
@@ -5423,6 +5573,10 @@ struct CMUXCLI {
         let repositoryRoot = trimmedMCPText(root.stdout)
         let branch = trimmedMCPText(gitMCPCommand(directory: expandedDirectory, arguments: ["branch", "--show-current"]).stdout)
         let head = trimmedMCPText(gitMCPCommand(directory: expandedDirectory, arguments: ["rev-parse", "--short", "HEAD"]).stdout)
+        let lastCommit = gitMCPLastCommit(from: gitMCPCommand(
+            directory: expandedDirectory,
+            arguments: ["log", "-1", "--format=%cI%x1f%ct%x1f%s"]
+        ).stdout)
         let status = trimmedMCPText(gitMCPCommand(directory: expandedDirectory, arguments: ["status", "--porcelain", "-uno"]).stdout)
         let remoteOutput = gitMCPCommand(directory: expandedDirectory, arguments: ["remote", "-v"]).stdout
         let worktreeOutput = gitMCPCommand(directory: expandedDirectory, arguments: ["worktree", "list", "--porcelain"]).stdout
@@ -5435,12 +5589,35 @@ struct CMUXCLI {
             "repositoryRoot": repositoryRoot.isEmpty ? NSNull() as Any : repositoryRoot as Any,
             "branch": branch.isEmpty ? NSNull() as Any : branch as Any,
             "head": head.isEmpty ? NSNull() as Any : head as Any,
+            "lastCommitAt": lastCommit.iso8601.map { $0 as Any } ?? NSNull(),
+            "lastCommitUnix": lastCommit.unixTimestamp.map { $0 as Any } ?? NSNull(),
+            "lastCommitSubject": lastCommit.subject.map { $0 as Any } ?? NSNull(),
             "dirty": !status.isEmpty,
             "statusPorcelain": status,
             "remotes": remotes,
             "githubRepositories": githubRepositories,
             "worktrees": gitMCPWorktrees(from: worktreeOutput),
         ]
+    }
+
+    private func gitMCPLastCommit(from output: String) -> (iso8601: String?, unixTimestamp: Int?, subject: String?) {
+        let trimmed = trimmedMCPText(output)
+        guard !trimmed.isEmpty else {
+            return (nil, nil, nil)
+        }
+        let fields = trimmed.split(
+            separator: "\u{1F}",
+            maxSplits: 2,
+            omittingEmptySubsequences: false
+        ).map(String.init)
+        let iso8601 = fields.indices.contains(0) ? trimmedMCPText(fields[0]) : ""
+        let unixText = fields.indices.contains(1) ? trimmedMCPText(fields[1]) : ""
+        let subject = fields.indices.contains(2) ? trimmedMCPText(fields[2]) : ""
+        return (
+            iso8601.isEmpty ? nil : iso8601,
+            Int(unixText),
+            subject.isEmpty ? nil : subject
+        )
     }
 
     private func gitMCPCommand(directory: String, arguments: [String]) -> (status: Int32, stdout: String, stderr: String) {

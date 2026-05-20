@@ -100,6 +100,7 @@
 		C0DE50100000000000000008 /* CMUXPluginAPI in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50100000000000000006 /* CMUXPluginAPI */; };
 		C0DE50200000000000000007 /* CMUXEnhancementAPI in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50200000000000000006 /* CMUXEnhancementAPI */; };
 		C0DE50200000000000000008 /* CMUXEnhancementAPI in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50200000000000000006 /* CMUXEnhancementAPI */; };
+		5A4D435053444B0000000004 /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = 5A4D435053444B0000000002 /* MCP */; };
 		FEED0000000000000000F002 /* FeedCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEED0000000000000000F001 /* FeedCoordinator.swift */; };
 		FEED0000000000000000F005 /* FeedPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEED0000000000000000F004 /* FeedPanelView.swift */; };
 		FEED0000000000000000F013 /* FeedPermissionActionPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEED0000000000000000F012 /* FeedPermissionActionPolicy.swift */; };
@@ -1026,6 +1027,7 @@
 				C0DE50100000000000000007 /* CMUXPluginAPI in Frameworks */,
 				C0DE50200000000000000007 /* CMUXEnhancementAPI in Frameworks */,
 				F20F85FC5900550685FA33AD /* StackAuth in Frameworks */,
+				5A4D435053444B0000000004 /* MCP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1652,6 +1654,7 @@
 				C0DE50100000000000000006 /* CMUXPluginAPI */,
 				C0DE50200000000000000006 /* CMUXEnhancementAPI */,
 				A8BD195031FC4B82B4354297 /* StackAuth */,
+				5A4D435053444B0000000002 /* MCP */,
 			);
 			productName = GhosttyTabs;
 			productReference = A5001000 /* cmux.app */;
@@ -1804,6 +1807,7 @@
 				C0DE50100000000000000005 /* XCLocalSwiftPackageReference "CMUXPluginAPI" */,
 				C0DE50200000000000000005 /* XCLocalSwiftPackageReference "CMUXEnhancementAPI" */,
 				28B798BB9086C8E6B60C3355 /* XCLocalSwiftPackageReference "stack-auth-swift-sdk-prerelease" */,
+				5A4D435053444B0000000003 /* XCRemoteSwiftPackageReference "swift-sdk" */,
 			);
 			productRefGroup = A5001042 /* Products */;
 			projectDirPath = "";
@@ -2881,6 +2885,14 @@
 				minimumVersion = 2.4.1;
 			};
 		};
+		5A4D435053444B0000000003 /* XCRemoteSwiftPackageReference "swift-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/modelcontextprotocol/swift-sdk.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.12.1;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -2953,6 +2965,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 28B798BB9086C8E6B60C3355 /* XCLocalSwiftPackageReference "stack-auth-swift-sdk-prerelease" */;
 			productName = StackAuth;
+		};
+		5A4D435053444B0000000002 /* MCP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 5A4D435053444B0000000003 /* XCRemoteSwiftPackageReference "swift-sdk" */;
+			productName = MCP;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
