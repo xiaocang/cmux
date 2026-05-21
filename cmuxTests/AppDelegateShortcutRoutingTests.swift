@@ -3383,8 +3383,7 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
               let contentView = window.contentView,
               let manager = appDelegate.tabManagerFor(windowId: windowId),
               let workspace = manager.selectedWorkspace,
-              let browserPanelId = manager.openBrowser(inWorkspace: workspace.id),
-              let browserPanel = workspace.browserPanel(for: browserPanelId) else {
+              let browserPanelId = manager.openBrowser(inWorkspace: workspace.id) else {
             XCTFail("Expected focused browser panel")
             return
         }

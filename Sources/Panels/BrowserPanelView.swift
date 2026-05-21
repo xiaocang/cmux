@@ -7,10 +7,109 @@ import ObjectiveC
 private var cmuxBrowserPanelNeedsRenderingStateReattachKey: UInt8 = 0
 let browserOmnibarTextFieldIdentifier = NSUserInterfaceItemIdentifier("cmux.browserOmnibarTextField")
 
+private final class WeakOmnibarNativeTextField {
+    weak var field: OmnibarNativeTextField?
+
+    init(_ field: OmnibarNativeTextField) {
+        self.field = field
+    }
+}
+
+final class BrowserOmnibarNativeFieldRegistry {
+    static let shared = BrowserOmnibarNativeFieldRegistry()
+
+    // AppKit's shared field editor can retain stale responder-chain ownership
+    // during browser focus churn. Keep only weak live-field hints here; the
+    // field's panelId and currentEditor remain the ownership checks.
+    private var fields: [UUID: [WeakOmnibarNativeTextField]] = [:]
+
+    func register(_ field: OmnibarNativeTextField, panelId: UUID) {
+        var entries = fields[panelId] ?? []
+        entries.removeAll { entry in
+            guard let existing = entry.field else { return true }
+            return existing === field
+        }
+        entries.append(WeakOmnibarNativeTextField(field))
+        fields[panelId] = entries
+    }
+
+    func unregister(_ field: OmnibarNativeTextField, panelId: UUID) {
+        guard var entries = fields[panelId] else { return }
+        entries.removeAll { entry in
+            guard let existing = entry.field else { return true }
+            return existing === field
+        }
+        if entries.isEmpty {
+            fields.removeValue(forKey: panelId)
+        } else {
+            fields[panelId] = entries
+        }
+    }
+
+    func field(for panelId: UUID?, in window: NSWindow? = nil) -> OmnibarNativeTextField? {
+        guard let panelId else { return nil }
+        pruneDeadEntries(for: panelId)
+        guard let entries = fields[panelId] else { return nil }
+        let liveFields = entries.reversed().compactMap(\.field)
+        if let window {
+            return liveFields.first(where: { $0.window === window })
+        }
+        return liveFields.first(where: { $0.window != nil }) ?? liveFields.first
+    }
+
+    func fieldOwningEditor(_ editor: NSTextView, in window: NSWindow? = nil) -> OmnibarNativeTextField? {
+        for panelId in Array(fields.keys) {
+            pruneDeadEntries(for: panelId)
+        }
+
+        let liveFields = fields.values.flatMap { entries in
+            entries.reversed().compactMap(\.field)
+        }
+        if let window,
+           let windowField = liveFields.first(where: { $0.window === window && $0.currentEditor() === editor }) {
+            return windowField
+        }
+        if let registeredField = liveFields.first(where: { $0.currentEditor() === editor }) {
+            return registeredField
+        }
+
+        guard let root = window?.contentView?.superview ?? window?.contentView else {
+            return nil
+        }
+        var stack: [NSView] = [root]
+        while let view = stack.popLast() {
+            if let field = view as? OmnibarNativeTextField,
+               field.currentEditor() === editor {
+                return field
+            }
+            stack.append(contentsOf: view.subviews)
+        }
+        return nil
+    }
+
+    private func pruneDeadEntries(for panelId: UUID) {
+        guard var entries = fields[panelId] else { return }
+        entries.removeAll { $0.field == nil }
+        if entries.isEmpty {
+            fields.removeValue(forKey: panelId)
+        } else {
+            fields[panelId] = entries
+        }
+    }
+}
+
 private func browserPanelViewObjectID(_ object: AnyObject?) -> String {
     guard let object else { return "nil" }
     return String(describing: Unmanaged.passUnretained(object).toOpaque())
 }
+
+#if DEBUG
+private func browserOmnibarDebugSelectionDescription(_ editor: NSTextView?) -> String {
+    guard let editor else { return "selection=nil textLen=nil marked=0 inlineEditor=0" }
+    let range = editor.selectedRange()
+    return "selection=\(range.location),\(range.length) textLen=\(editor.string.utf16.count) marked=\(editor.hasMarkedText() ? 1 : 0) inlineEditor=1"
+}
+#endif
 
 private func browserPanelViewRectDescription(_ rect: NSRect) -> String {
     String(format: "%.1f,%.1f %.1fx%.1f", rect.origin.x, rect.origin.y, rect.width, rect.height)
@@ -716,7 +815,9 @@ struct BrowserPanelView: View {
                 OmnibarSuggestionsView(
                     engineName: searchEngine.displayName,
                     items: omnibarState.suggestions,
-                    selectedIndex: omnibarState.selectedSuggestionIndex,
+                    selectedIndex: omnibarState.hasExplicitSuggestionSelection
+                        ? omnibarState.selectedSuggestionIndex
+                        : -1,
                     isLoadingRemoteSuggestions: isLoadingRemoteSuggestions,
                     searchSuggestionsEnabled: remoteSuggestionsEnabled,
                     onCommit: { item in
@@ -1021,7 +1122,10 @@ struct BrowserPanelView: View {
         return HStack(spacing: 0) {
             Button(action: {
                 #if DEBUG
-                cmuxDebugLog("browser.back panel=\(panel.id.uuidString.prefix(5))")
+                cmuxDebugLog(
+                    "browser.back panel=\(panel.id.uuidString.prefix(5)) " +
+                    "canGoBack=\(panel.canGoBack ? 1 : 0) canGoForward=\(panel.canGoForward ? 1 : 0)"
+                )
                 #endif
                 panel.goBack()
             }) {
@@ -1037,7 +1141,10 @@ struct BrowserPanelView: View {
 
             Button(action: {
                 #if DEBUG
-                cmuxDebugLog("browser.forward panel=\(panel.id.uuidString.prefix(5))")
+                cmuxDebugLog(
+                    "browser.forward panel=\(panel.id.uuidString.prefix(5)) " +
+                    "canGoBack=\(panel.canGoBack ? 1 : 0) canGoForward=\(panel.canGoForward ? 1 : 0)"
+                )
                 #endif
                 panel.goForward()
             }) {
@@ -1319,8 +1426,9 @@ struct BrowserPanelView: View {
                     handleOmnibarTap()
                 },
                 onSubmit: {
-                    if canHandleOmnibarSuggestionInteraction() {
-                        commitSelectedSuggestion()
+                    if canHandleOmnibarSuggestionInteraction(),
+                       let explicitSuggestion = omnibarSelectedSuggestionForExplicitCommit(in: omnibarState) {
+                        commitSuggestion(explicitSuggestion)
                     } else {
                         panel.navigateSmart(omnibarState.buffer)
                         hideSuggestions()
@@ -2016,12 +2124,6 @@ struct BrowserPanelView: View {
         applyOmnibarEffects(effects)
         isLoadingRemoteSuggestions = false
         inlineCompletion = nil
-    }
-
-    private func commitSelectedSuggestion() {
-        let idx = omnibarState.selectedSuggestionIndex
-        guard idx >= 0, idx < omnibarState.suggestions.count else { return }
-        commitSuggestion(omnibarState.suggestions[idx])
     }
 
     private func commitSuggestion(_ suggestion: OmnibarSuggestion) {
@@ -3005,13 +3107,49 @@ func omnibarDesiredSelectionRangeForInlineCompletion(
     let typedCount = inlineCompletion.typedText.utf16.count
     let typedPrefixSelection = NSRange(location: 0, length: typedCount)
     let displayCount = inlineCompletion.displayText.utf16.count
+    let isCaretAtTypedBoundary = currentSelection.location == typedCount && currentSelection.length == 0
     let isSelectAll = currentSelection.location == 0 && currentSelection.length == displayCount
-    if isSelectAll ||
+    if isCaretAtTypedBoundary ||
+        isSelectAll ||
         NSEqualRanges(currentSelection, inlineCompletion.suffixRange) ||
         NSEqualRanges(currentSelection, typedPrefixSelection) {
         return currentSelection
     }
     return inlineCompletion.suffixRange
+}
+
+func omnibarShouldAcceptInlineCompletionForForwardNavigation(
+    currentSelection: NSRange,
+    inlineCompletion: OmnibarInlineCompletion?
+) -> Bool {
+    guard let inlineCompletion else { return false }
+    let typedCount = inlineCompletion.typedText.utf16.count
+    let displayCount = inlineCompletion.displayText.utf16.count
+    let isCaretAtTypedBoundary = currentSelection.location == typedCount && currentSelection.length == 0
+    // Cmd+A followed by Right Arrow / End should land the caret at the end of
+    // the displayed text. Treat a select-all range as a forward-navigation
+    // intent so the inline completion is accepted (buffer becomes displayText)
+    // and the post-update caret resolves to displayCount instead of being
+    // re-clamped to the now-shorter typedText.
+    let isSelectAll = currentSelection.location == 0 && currentSelection.length == displayCount
+    return isCaretAtTypedBoundary || NSEqualRanges(currentSelection, inlineCompletion.suffixRange) || isSelectAll
+}
+
+func omnibarSelectionRangeAfterRemovingInlineCompletion(
+    currentSelection: NSRange,
+    text: String,
+    previouslyAppliedInlineCompletion: OmnibarInlineCompletion
+) -> NSRange {
+    let textLength = text.utf16.count
+    guard text == previouslyAppliedInlineCompletion.typedText else {
+        return NSRange(location: textLength, length: 0)
+    }
+
+    let location = min(currentSelection.location, textLength)
+    return NSRange(
+        location: location,
+        length: min(currentSelection.length, max(0, textLength - location))
+    )
 }
 
 func omnibarPublishedBufferTextForFieldChange(
@@ -3149,6 +3287,7 @@ struct OmnibarState: Equatable {
     var suggestions: [OmnibarSuggestion] = []
     var selectedSuggestionIndex: Int = 0
     var selectedSuggestionID: String?
+    var hasExplicitSuggestionSelection: Bool = false
     var isUserEditing: Bool = false
 }
 
@@ -3184,6 +3323,7 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
         state.suggestions = []
         state.selectedSuggestionIndex = 0
         state.selectedSuggestionID = nil
+        state.hasExplicitSuggestionSelection = false
         effects.shouldSelectAll = shouldSelectAll
 
     case .focusReasserted(let shouldSelectAll):
@@ -3198,6 +3338,7 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
         state.suggestions = []
         state.selectedSuggestionIndex = 0
         state.selectedSuggestionID = nil
+        state.hasExplicitSuggestionSelection = false
 
     case .focusLostPreserveBuffer(let url):
         state.isFocused = false
@@ -3206,6 +3347,7 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
         state.suggestions = []
         state.selectedSuggestionIndex = 0
         state.selectedSuggestionID = nil
+        state.hasExplicitSuggestionSelection = false
 
     case .panelURLChanged(let url):
         state.currentURLString = url
@@ -3214,6 +3356,7 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
             state.suggestions = []
             state.selectedSuggestionIndex = 0
             state.selectedSuggestionID = nil
+            state.hasExplicitSuggestionSelection = false
         }
 
     case .bufferChanged(let newValue):
@@ -3222,20 +3365,25 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
             state.isUserEditing = (newValue != state.currentURLString)
             state.selectedSuggestionIndex = 0
             state.selectedSuggestionID = nil
+            state.hasExplicitSuggestionSelection = false
             effects.shouldRefreshSuggestions = true
         }
 
     case .suggestionsUpdated(let items):
         let previousItems = state.suggestions
         let previousSelectedID = state.selectedSuggestionID
+        let previousSelectionWasExplicit = state.hasExplicitSuggestionSelection
         state.suggestions = items
+        state.hasExplicitSuggestionSelection = false
         if items.isEmpty {
             state.selectedSuggestionIndex = 0
             state.selectedSuggestionID = nil
-        } else if let previousSelectedID,
+        } else if previousSelectionWasExplicit,
+                  let previousSelectedID,
                   let existingIdx = items.firstIndex(where: { $0.id == previousSelectedID }) {
             state.selectedSuggestionIndex = existingIdx
             state.selectedSuggestionID = items[existingIdx].id
+            state.hasExplicitSuggestionSelection = true
         } else if let preferredSuggestionIndex = omnibarPreferredAutocompletionSuggestionIndex(
             suggestions: items,
             query: state.buffer
@@ -3262,11 +3410,13 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
             state.suggestions.count - 1
         )
         state.selectedSuggestionID = state.suggestions[state.selectedSuggestionIndex].id
+        state.hasExplicitSuggestionSelection = true
 
     case .highlightIndex(let idx):
         guard !state.suggestions.isEmpty else { break }
         state.selectedSuggestionIndex = min(max(0, idx), state.suggestions.count - 1)
         state.selectedSuggestionID = state.suggestions[state.selectedSuggestionIndex].id
+        state.hasExplicitSuggestionSelection = true
 
     case .escape:
         guard state.isFocused else { break }
@@ -3279,6 +3429,7 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
             state.suggestions = []
             state.selectedSuggestionIndex = 0
             state.selectedSuggestionID = nil
+            state.hasExplicitSuggestionSelection = false
             effects.shouldSelectAll = true
         } else {
             effects.shouldBlurToWebView = true
@@ -3286,6 +3437,13 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
     }
 
     return effects
+}
+
+func omnibarSelectedSuggestionForExplicitCommit(in state: OmnibarState) -> OmnibarSuggestion? {
+    guard state.hasExplicitSuggestionSelection else { return nil }
+    let idx = state.selectedSuggestionIndex
+    guard idx >= 0, idx < state.suggestions.count else { return nil }
+    return state.suggestions[idx]
 }
 
 struct OmnibarSuggestion: Identifiable, Hashable {
@@ -3589,12 +3747,13 @@ final class OmnibarNativeTextField: NSTextField {
 #if DEBUG
         let typingTimingStart = CmuxTypingTiming.start()
         var route = "super"
+        let beforeSelection = browserOmnibarDebugSelectionDescription(currentEditor() as? NSTextView)
         defer {
             CmuxTypingTiming.logDuration(
                 path: "browser.omnibar.keyDown",
                 startedAt: typingTimingStart,
                 event: event,
-                extra: "route=\(route)"
+                extra: "route=\(route) before=\(beforeSelection) after=\(browserOmnibarDebugSelectionDescription(currentEditor() as? NSTextView))"
             )
         }
 #endif
@@ -3604,6 +3763,9 @@ final class OmnibarNativeTextField: NSTextField {
         shiftClickAnchor = nil
         mouseSelectionState = nil
         if (currentEditor() as? NSTextView)?.hasMarkedText() == true {
+#if DEBUG
+            route = "markedTextSuper"
+#endif
             super.keyDown(with: event)
             return
         }
@@ -3918,12 +4080,13 @@ struct OmnibarTextFieldRepresentable: NSViewRepresentable {
 #if DEBUG
             let typingTimingStart = CmuxTypingTiming.start()
             var handled = false
+            let beforeSelection = browserOmnibarDebugSelectionDescription(textView)
             defer {
                 CmuxTypingTiming.logDuration(
                     path: "browser.omnibar.doCommandBy",
                     startedAt: typingTimingStart,
                     event: NSApp.currentEvent,
-                    extra: "handled=\(handled ? 1 : 0) selector=\(NSStringFromSelector(commandSelector))"
+                    extra: "handled=\(handled ? 1 : 0) selector=\(NSStringFromSelector(commandSelector)) inline=\(parent.inlineCompletion == nil ? 0 : 1) before=\(beforeSelection) after=\(browserOmnibarDebugSelectionDescription(textView))"
                 )
             }
 #endif
@@ -3956,7 +4119,7 @@ struct OmnibarTextFieldRepresentable: NSViewRepresentable {
 #endif
                 return true
             case #selector(NSResponder.moveRight(_:)), #selector(NSResponder.moveToEndOfLine(_:)):
-                if parent.inlineCompletion != nil {
+                if shouldAcceptInlineCompletionForForwardNavigation(textView) {
                     parent.onAcceptInlineCompletion()
 #if DEBUG
                     handled = true
@@ -4099,16 +4262,25 @@ struct OmnibarTextFieldRepresentable: NSViewRepresentable {
             return selected.location == typedCount && selected.length == 0
         }
 
+        private func shouldAcceptInlineCompletionForForwardNavigation(_ editor: NSTextView?) -> Bool {
+            guard let editor else { return false }
+            return omnibarShouldAcceptInlineCompletionForForwardNavigation(
+                currentSelection: editor.selectedRange(),
+                inlineCompletion: parent.inlineCompletion
+            )
+        }
+
         func handleKeyEvent(_ event: NSEvent, editor: NSTextView?) -> Bool {
 #if DEBUG
             let typingTimingStart = CmuxTypingTiming.start()
             var handled = false
+            let beforeSelection = browserOmnibarDebugSelectionDescription(editor)
             defer {
                 CmuxTypingTiming.logDuration(
                     path: "browser.omnibar.handleKeyEvent",
                     startedAt: typingTimingStart,
                     event: event,
-                    extra: "handled=\(handled ? 1 : 0)"
+                    extra: "handled=\(handled ? 1 : 0) key=\(event.keyCode) mods=\(event.modifierFlags.intersection(.deviceIndependentFlagsMask).rawValue) inline=\(parent.inlineCompletion == nil ? 0 : 1) before=\(beforeSelection) after=\(browserOmnibarDebugSelectionDescription(editor))"
                 )
             }
 #endif
@@ -4169,7 +4341,7 @@ struct OmnibarTextFieldRepresentable: NSViewRepresentable {
 #endif
                 return true
             case 124, 119: // Right arrow / End
-                if parent.inlineCompletion != nil {
+                if shouldAcceptInlineCompletionForForwardNavigation(editor) {
                     parent.onAcceptInlineCompletion()
 #if DEBUG
                     handled = true
@@ -4350,12 +4522,16 @@ struct OmnibarTextFieldRepresentable: NSViewRepresentable {
                     editor.setSelectedRange(desiredSelection)
                     context.coordinator.isProgrammaticMutation = false
                 }
-            } else if context.coordinator.appliedInlineCompletion != nil {
-                let end = text.utf16.count
+            } else if let previouslyAppliedInlineCompletion = context.coordinator.appliedInlineCompletion {
                 let current = editor.selectedRange()
-                if current.length != 0 || current.location != end {
+                let desiredSelection = omnibarSelectionRangeAfterRemovingInlineCompletion(
+                    currentSelection: current,
+                    text: text,
+                    previouslyAppliedInlineCompletion: previouslyAppliedInlineCompletion
+                )
+                if !NSEqualRanges(current, desiredSelection) {
                     context.coordinator.isProgrammaticMutation = true
-                    editor.setSelectedRange(NSRange(location: end, length: 0))
+                    editor.setSelectedRange(desiredSelection)
                     context.coordinator.isProgrammaticMutation = false
                 }
             }
@@ -4431,7 +4607,6 @@ private func browserOmnibarField(for responder: NSResponder?) -> OmnibarNativeTe
            field.currentEditor() === editor {
             return field
         }
-
     }
 
     return nil

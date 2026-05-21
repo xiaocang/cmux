@@ -6,12 +6,194 @@ import WebKit
 
 enum BrowserTextInputCorrectionDefaults {
     static let automaticSpellingCorrectionKey = "NSAutomaticSpellingCorrectionEnabled"
+    static let automaticQuoteSubstitutionKey = "NSAutomaticQuoteSubstitutionEnabled"
+    static let automaticDashSubstitutionKey = "NSAutomaticDashSubstitutionEnabled"
+    static let automaticTextReplacementKey = "NSAutomaticTextReplacementEnabled"
+    static let automaticTextCompletionKey = "NSAutomaticTextCompletionEnabled"
+    static let automaticCapitalizationKey = "NSAutomaticCapitalizationEnabled"
+    static let automaticPeriodSubstitutionKey = "NSAutomaticPeriodSubstitutionEnabled"
+    static let automaticInlinePredictionKey = "NSAutomaticInlinePredictionEnabled"
 
     static func register(in defaults: UserDefaults = .standard) {
         defaults.register(defaults: [
-            automaticSpellingCorrectionKey: false
+            automaticSpellingCorrectionKey: false,
+            automaticQuoteSubstitutionKey: false,
+            automaticDashSubstitutionKey: false,
+            automaticTextReplacementKey: false,
+            automaticTextCompletionKey: false,
+            automaticCapitalizationKey: false,
+            automaticPeriodSubstitutionKey: false,
+            automaticInlinePredictionKey: false,
         ])
     }
+}
+
+enum BrowserPageAutocompleteDisabler {
+    static let scriptSource = """
+    (() => {
+      try {
+        if (window.__cmuxDisableTextAutocompleteInstalled) return true;
+        window.__cmuxDisableTextAutocompleteInstalled = true;
+
+        const roots = new WeakSet();
+        const controlSelector = 'form,input:not([type="hidden"]),textarea,[contenteditable]:not([contenteditable="false"])';
+
+        const setAttr = (el, name, value) => {
+          try {
+            if (el.getAttribute(name) !== value) {
+              el.setAttribute(name, value);
+            }
+          } catch (_) {}
+        };
+
+        const removeAttr = (el, name) => {
+          try {
+            if (el.hasAttribute(name)) {
+              el.removeAttribute(name);
+            }
+          } catch (_) {}
+        };
+
+        const disableElement = (el) => {
+          if (!el || el.nodeType !== Node.ELEMENT_NODE) return;
+          const tag = String(el.tagName || '').toLowerCase();
+          if (tag === 'form') {
+            setAttr(el, 'autocomplete', 'off');
+            return;
+          }
+
+          const isTextControl = tag === 'input' || tag === 'textarea';
+          const isEditable = !!el.isContentEditable;
+          if (!isTextControl && !isEditable) return;
+
+          const type = tag === 'input'
+            ? String(el.getAttribute('type') || el.type || 'text').toLowerCase()
+            : '';
+          const autocompleteValue = type === 'password' ? 'new-password' : 'off';
+
+          if (isTextControl) {
+            setAttr(el, 'autocomplete', autocompleteValue);
+            try {
+              if (el.autocomplete !== autocompleteValue) {
+                el.autocomplete = autocompleteValue;
+              }
+            } catch (_) {}
+          }
+
+          setAttr(el, 'autocorrect', 'off');
+          setAttr(el, 'autocapitalize', 'off');
+          setAttr(el, 'spellcheck', 'false');
+          try { el.spellcheck = false; } catch (_) {}
+
+          if (tag === 'input' && type === 'search') {
+            setAttr(el, 'results', '0');
+            removeAttr(el, 'autosave');
+          }
+        };
+
+        // Targeted node sweep: disable the node itself, any matching controls
+        // inside its subtree, and follow its own shadow root if present.
+        // Discovery of shadow roots created via attachShadow is handled by the
+        // patched Element.prototype.attachShadow, so we don't walk every '*'.
+        const sweepNode = (node) => {
+          try {
+            if (!node || node.nodeType !== Node.ELEMENT_NODE) return;
+            disableElement(node);
+            if (node.shadowRoot) visitRoot(node.shadowRoot);
+            const controls = node.querySelectorAll ? node.querySelectorAll(controlSelector) : null;
+            if (controls) controls.forEach(disableElement);
+          } catch (_) {}
+        };
+
+        const visitRoot = (root) => {
+          if (!root) return;
+          const alreadyObserved = roots.has(root);
+          if (!alreadyObserved) {
+            roots.add(root);
+          }
+
+          try {
+            if (root.nodeType === Node.ELEMENT_NODE) {
+              disableElement(root);
+            }
+            const controls = root.querySelectorAll ? root.querySelectorAll(controlSelector) : null;
+            if (controls) controls.forEach(disableElement);
+          } catch (_) {}
+
+          if (alreadyObserved) return;
+
+          try {
+            const observer = new MutationObserver((mutations) => {
+              for (const mutation of mutations) {
+                if (mutation.type === 'attributes') {
+                  disableElement(mutation.target);
+                  continue;
+                }
+                mutation.addedNodes.forEach(sweepNode);
+              }
+            });
+            observer.observe(root, {
+              attributes: true,
+              childList: true,
+              subtree: true,
+              attributeFilter: [
+                'autocomplete',
+                'autocorrect',
+                'autocapitalize',
+                'spellcheck',
+                'results',
+                'autosave',
+                'type',
+                'contenteditable'
+              ]
+            });
+          } catch (_) {}
+        };
+
+        const installAttachShadowHook = () => {
+          try {
+            const proto = Element.prototype;
+            const original = proto.attachShadow;
+            if (typeof original !== 'function' || original.__cmuxDisableTextAutocompletePatched) return;
+            const patched = function(init) {
+              const root = original.call(this, init);
+              try { visitRoot(root); } catch (_) {}
+              return root;
+            };
+            Object.defineProperty(patched, '__cmuxDisableTextAutocompletePatched', { value: true });
+            Object.defineProperty(proto, 'attachShadow', {
+              configurable: true,
+              writable: true,
+              value: patched
+            });
+          } catch (_) {}
+        };
+
+        // focusin runs on every field that becomes focused, including ones inside
+        // shadow roots whose host was newly inserted. The MutationObserver keeps
+        // attributes from drifting back to defaults, so we don't also need an
+        // 'input' listener firing on every keystroke.
+        const disableFocusTarget = (ev) => {
+          try {
+            const target = ev?.target;
+            if (target && target.nodeType === Node.ELEMENT_NODE) {
+              disableElement(target);
+            } else {
+              disableElement(document.activeElement);
+            }
+          } catch (_) {}
+        };
+
+        installAttachShadowHook();
+        visitRoot(document);
+        document.addEventListener('DOMContentLoaded', () => visitRoot(document), true);
+        document.addEventListener('focusin', disableFocusTarget, true);
+        return true;
+      } catch (_) {
+        return false;
+      }
+    })();
+    """
 }
 
 extension WKWebView {
@@ -231,6 +413,35 @@ final class CmuxWebView: WKWebView {
         isFocusedCrossOriginFrameElement,
         resolvedCandidateElement,
         editableTarget,
+        textSelectionState(el) {
+          const target = editableTarget(el);
+          if (!target) {
+            return { canPaste: false, hasSelection: false };
+          }
+          if (isFocusedCrossOriginFrameElement(target)) {
+            return { canPaste: true, hasSelection: false };
+          }
+          if (isPlainTextTextControl(target)) {
+            const start = typeof target.selectionStart === "number" ? target.selectionStart : null;
+            const end = typeof target.selectionEnd === "number" ? target.selectionEnd : null;
+            return {
+              canPaste: true,
+              hasSelection: start !== null && end !== null && start !== end
+            };
+          }
+
+          const selection = target.ownerDocument?.getSelection?.() ?? null;
+          const selectionEndpointIsInsideTarget = (node) => {
+            const element = node?.nodeType === Node.ELEMENT_NODE ? node : node?.parentElement;
+            return !!element && (element === target || target.contains(element));
+          };
+          const hasSelection =
+            !!selection &&
+            !selection.isCollapsed &&
+            (selectionEndpointIsInsideTarget(selection.anchorNode) ||
+              selectionEndpointIsInsideTarget(selection.focusNode));
+          return { canPaste: true, hasSelection };
+        },
         canPasteAsPlainTextInto(el) {
           return !!editableTarget(el);
         }
@@ -255,14 +466,19 @@ final class CmuxWebView: WKWebView {
 
         \(pasteAsPlainTextSharedHelpersScriptSource)
 
-        const publishState = { lastCanPaste: null };
+        const publishState = { lastCanPaste: null, lastHasSelection: null };
 
-        const publish = (canPaste) => {
-          if (publishState.lastCanPaste === canPaste) return;
+        const publish = (canPaste, hasSelection) => {
+          if (
+            publishState.lastCanPaste === canPaste &&
+            publishState.lastHasSelection === hasSelection
+          ) return;
           publishState.lastCanPaste = canPaste;
+          publishState.lastHasSelection = hasSelection;
           window.__cmuxPasteAsPlainTextTargetAvailable = canPaste;
+          window.__cmuxPageTextInputHasSelection = hasSelection;
           try {
-            handler?.postMessage({ canPaste });
+            handler?.postMessage({ canPaste, hasSelection });
           } catch (_) {}
         };
 
@@ -271,7 +487,8 @@ final class CmuxWebView: WKWebView {
         };
 
         const publishForElement = (el) => {
-          publish(__cmuxPasteAsPlainTextHelpers.canPasteAsPlainTextInto(el));
+          const state = __cmuxPasteAsPlainTextHelpers.textSelectionState(el);
+          publish(!!state.canPaste, !!state.hasSelection);
         };
 
         document.addEventListener("focusin", (ev) => {
@@ -283,6 +500,15 @@ final class CmuxWebView: WKWebView {
         document.addEventListener("selectionchange", () => {
           publishForElement(document.activeElement);
         }, true);
+        document.addEventListener("select", () => {
+          publishForElement(document.activeElement);
+        }, true);
+        document.addEventListener("keyup", () => {
+          publishForElement(document.activeElement);
+        }, true);
+        document.addEventListener("mouseup", () => {
+          publishForElement(document.activeElement);
+        }, true);
         document.addEventListener("input", () => {
           publishForElement(document.activeElement);
         }, true);
@@ -292,11 +518,11 @@ final class CmuxWebView: WKWebView {
         document.addEventListener("mousedown", (ev) => {
           const target = ev && ev.target ? ev.target : null;
           if (!__cmuxPasteAsPlainTextHelpers.canPasteAsPlainTextInto(target)) {
-            publish(false);
+            publish(false, false);
           }
         }, true);
         window.addEventListener("beforeunload", () => {
-          publish(false);
+          publish(false, false);
         }, true);
 
         publishForElement(document.activeElement);
@@ -319,8 +545,12 @@ final class CmuxWebView: WKWebView {
                   let canPaste = body["canPaste"] as? Bool else {
                 return
             }
+            let hasSelection = body["hasSelection"] as? Bool ?? false
             Task { @MainActor [weak webView] in
-                webView?.updatePasteAsPlainTextTargetAvailable(canPaste)
+                webView?.updatePasteAsPlainTextTargetState(
+                    canPaste: canPaste,
+                    hasSelection: hasSelection
+                )
             }
         }
     }
@@ -371,6 +601,7 @@ final class CmuxWebView: WKWebView {
     var allowsFirstResponderAcquisition: Bool = true
     private var pointerFocusAllowanceDepth: Int = 0
     private var pasteAsPlainTextTargetAvailable = false
+    private var pageTextInputHasSelection = false
     private var lastPasteAsPlainTextPerformKeyEventTimestamp: TimeInterval?
     var allowsFirstResponderAcquisitionEffective: Bool {
         allowsFirstResponderAcquisition || pointerFocusAllowanceDepth > 0
@@ -390,6 +621,63 @@ final class CmuxWebView: WKWebView {
     }
 
     @objc var autocorrectionType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @objc var spellCheckingType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @objc var grammarCheckingType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @objc var smartQuotesType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @objc var smartDashesType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @objc var smartInsertDeleteType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @objc var textReplacementType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @objc var dataDetectionType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @objc var linkDetectionType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @objc var textCompletionType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @available(macOS 14.0, *)
+    @objc var inlinePredictionType: NSTextInputTraitType {
+        get { .no }
+        set {}
+    }
+
+    @available(macOS 15.0, *)
+    @objc var mathExpressionCompletionType: NSTextInputTraitType {
         get { .no }
         set {}
     }
@@ -415,16 +703,61 @@ final class CmuxWebView: WKWebView {
         )
     }
 
-    private func updatePasteAsPlainTextTargetAvailable(_ available: Bool) {
-        guard pasteAsPlainTextTargetAvailable != available else { return }
-        pasteAsPlainTextTargetAvailable = available
+    private func updatePasteAsPlainTextTargetState(canPaste: Bool, hasSelection: Bool) {
+        guard pasteAsPlainTextTargetAvailable != canPaste ||
+            pageTextInputHasSelection != hasSelection else { return }
+        pasteAsPlainTextTargetAvailable = canPaste
+        pageTextInputHasSelection = hasSelection
 #if DEBUG
         cmuxDebugLog(
             "browser.pasteAsPlainText.target " +
-            "web=\(ObjectIdentifier(self)) available=\(available ? 1 : 0)"
+            "web=\(ObjectIdentifier(self)) available=\(canPaste ? 1 : 0) " +
+            "selection=\(hasSelection ? 1 : 0)"
         )
 #endif
     }
+
+    func shouldLetSelectedPageTextHandleHorizontalArrowKey(_ event: NSEvent) -> Bool {
+        guard event.keyCode == 123 || event.keyCode == 124 else { return false }
+        let normalizedFlags = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .subtracting([.numericPad, .function, .capsLock])
+        guard normalizedFlags.isEmpty else { return false }
+        if pageTextInputHasSelection {
+            return true
+        }
+        return pageTextInputHasSelectionSynchronously()
+    }
+
+    private func pageTextInputHasSelectionSynchronously() -> Bool {
+        let script = """
+        (() => {
+            try {
+                const helpers = window.__cmuxPasteAsPlainTextHelpers;
+                if (helpers && typeof helpers.textSelectionState === 'function') {
+                    return !!helpers.textSelectionState(document.activeElement).hasSelection;
+                }
+                const active = document.activeElement;
+                if (!active) return false;
+                if (typeof active.selectionStart === 'number' && typeof active.selectionEnd === 'number') {
+                    return active.selectionStart !== active.selectionEnd;
+                }
+                const selection = document.getSelection ? document.getSelection() : null;
+                return !!selection && !selection.isCollapsed;
+            } catch (_) {
+                return false;
+            }
+        })();
+        """
+        let evaluation = evaluateJavaScriptSynchronously(script, timeout: 0.05)
+        return evaluation.completed && ((evaluation.result as? Bool) ?? false)
+    }
+
+#if DEBUG
+    func debugSetPageTextInputState(canPaste: Bool, hasSelection: Bool) {
+        updatePasteAsPlainTextTargetState(canPaste: canPaste, hasSelection: hasSelection)
+    }
+#endif
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
         PaneFirstClickFocusSettings.isEnabled()

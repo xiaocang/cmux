@@ -1833,6 +1833,177 @@ final class BrowserDeveloperToolsConfigurationTests: XCTestCase {
         }
     }
 
+    func testBrowserPanelDisablesPageAutocompleteControls() async throws {
+        let panel = BrowserPanel(workspaceId: UUID())
+        panel.webView.loadHTMLString(
+            """
+            <!doctype html>
+            <html>
+              <body>
+                <form id="form" autocomplete="on">
+                  <input id="text" type="text" autocomplete="on" autocorrect="on" autocapitalize="sentences" spellcheck="true">
+                  <input id="search" type="search" autocomplete="on" results="5" autosave="cmux-search">
+                  <input id="password" type="password" autocomplete="current-password">
+                  <textarea id="textarea" autocomplete="on" spellcheck="true"></textarea>
+                </form>
+                <div id="host"></div>
+                <script>
+                  const host = document.getElementById('host');
+                  const shadow = host.attachShadow({ mode: 'open' });
+                  const shadowInput = document.createElement('input');
+                  shadowInput.id = 'shadow-input';
+                  shadowInput.autocomplete = 'on';
+                  shadow.appendChild(shadowInput);
+                  setTimeout(() => {
+                    const dynamic = document.createElement('input');
+                    dynamic.id = 'dynamic';
+                    dynamic.autocomplete = 'on';
+                    document.body.appendChild(dynamic);
+                  }, 0);
+                </script>
+              </body>
+            </html>
+            """,
+            baseURL: URL(string: "https://example.test/")!
+        )
+
+        let state = try await waitForAutocompleteDisabledState(panel: panel)
+        XCTAssertEqual(state["formAutocomplete"] as? String, "off")
+        XCTAssertEqual(state["textAutocomplete"] as? String, "off")
+        XCTAssertEqual(state["textAutocorrect"] as? String, "off")
+        XCTAssertEqual(state["textAutocapitalize"] as? String, "off")
+        XCTAssertEqual(state["textSpellcheck"] as? String, "false")
+        XCTAssertEqual(state["textSpellcheckProperty"] as? Bool, false)
+        XCTAssertEqual(state["searchAutocomplete"] as? String, "off")
+        XCTAssertEqual(state["searchResults"] as? String, "0")
+        XCTAssertEqual(state["searchAutosave"] as? Bool, false)
+        XCTAssertEqual(state["passwordAutocomplete"] as? String, "new-password")
+        XCTAssertEqual(state["textareaAutocomplete"] as? String, "off")
+        XCTAssertEqual(state["dynamicAutocomplete"] as? String, "off")
+        XCTAssertEqual(state["shadowAutocomplete"] as? String, "off")
+    }
+
+    func testBrowserPageSelectedTextDefersHorizontalArrowEvenBeforeNativeCacheUpdates() async throws {
+        let panel = BrowserPanel(workspaceId: UUID())
+        panel.webView.loadHTMLString(
+            """
+            <!doctype html>
+            <html>
+              <body>
+                <input id="link" type="url" value="https://example.test/path">
+                <script>
+                  const input = document.getElementById("link");
+                  input.focus();
+                  input.setSelectionRange(0, input.value.length);
+                </script>
+              </body>
+            </html>
+            """,
+            baseURL: URL(string: "https://example.test/")!
+        )
+
+        try await waitForBrowserPageSelectedText(panel: panel)
+        let event = try XCTUnwrap(
+            NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: 0,
+                context: nil,
+                characters: "\u{F702}",
+                charactersIgnoringModifiers: "\u{F702}",
+                isARepeat: false,
+                keyCode: 123
+            )
+        )
+
+        panel.webView.debugSetPageTextInputState(canPaste: true, hasSelection: false)
+
+        XCTAssertTrue(
+            panel.webView.shouldLetSelectedPageTextHandleHorizontalArrowKey(event),
+            "Selected page URL inputs should bypass browser arrow pre-forwarding even if the async native cache is stale"
+        )
+    }
+
+    private func waitForAutocompleteDisabledState(
+        panel: BrowserPanel,
+        timeout: TimeInterval = 2.0
+    ) async throws -> [String: Any] {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if let state = try? await autocompleteDisabledState(panel: panel),
+               state["ready"] as? Bool == true,
+               state["dynamicAutocomplete"] as? String == "off",
+               state["shadowAutocomplete"] as? String == "off" {
+                return state
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return try XCTUnwrap(try await autocompleteDisabledState(panel: panel))
+    }
+
+    private func waitForBrowserPageSelectedText(
+        panel: BrowserPanel,
+        timeout: TimeInterval = 2.0
+    ) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if try await browserPageHasSelectedText(panel: panel) {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(try await browserPageHasSelectedText(panel: panel))
+    }
+
+    private func browserPageHasSelectedText(panel: BrowserPanel) async throws -> Bool {
+        (try await panel.evaluateJavaScript(
+            """
+            (() => {
+              const input = document.getElementById("link");
+              if (!input || document.activeElement !== input) return false;
+              if (typeof input.selectionStart !== "number" || typeof input.selectionEnd !== "number") return false;
+              return input.selectionStart !== input.selectionEnd;
+            })()
+            """
+        ) as? Bool) ?? false
+    }
+
+    private func autocompleteDisabledState(panel: BrowserPanel) async throws -> [String: Any]? {
+        guard let json = try await panel.evaluateJavaScript(
+            """
+            (() => {
+              const byId = (id) => document.getElementById(id);
+              const shadowInput = byId('host')?.shadowRoot?.getElementById('shadow-input') || null;
+              const dynamic = byId('dynamic');
+              const text = byId('text');
+              const search = byId('search');
+              return JSON.stringify({
+                ready: document.readyState === 'complete' && !!dynamic && !!shadowInput,
+                formAutocomplete: byId('form')?.getAttribute('autocomplete') || '',
+                textAutocomplete: text?.getAttribute('autocomplete') || '',
+                textAutocorrect: text?.getAttribute('autocorrect') || '',
+                textAutocapitalize: text?.getAttribute('autocapitalize') || '',
+                textSpellcheck: text?.getAttribute('spellcheck') || '',
+                textSpellcheckProperty: text ? text.spellcheck : null,
+                searchAutocomplete: search?.getAttribute('autocomplete') || '',
+                searchResults: search?.getAttribute('results') || '',
+                searchAutosave: search ? search.hasAttribute('autosave') : true,
+                passwordAutocomplete: byId('password')?.getAttribute('autocomplete') || '',
+                textareaAutocomplete: byId('textarea')?.getAttribute('autocomplete') || '',
+                dynamicAutocomplete: dynamic?.getAttribute('autocomplete') || '',
+                shadowAutocomplete: shadowInput?.getAttribute('autocomplete') || ''
+              });
+            })()
+            """
+        ) as? String else {
+            return nil
+        }
+        let data = Data(json.utf8)
+        return try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
     func testBrowserPanelRefreshesUnderPageBackgroundColorWhenGhosttyBackgroundChanges() {
         let panel = BrowserPanel(workspaceId: UUID())
         let updatedColor = NSColor(srgbRed: 0.18, green: 0.29, blue: 0.44, alpha: 1.0)
@@ -4257,6 +4428,102 @@ final class BrowserOmnibarKeyboardNavigationTests: XCTestCase {
 
 final class BrowserIMEKeyDownRoutingTests: XCTestCase {
     @MainActor
+    func testWindowPerformKeyEquivalentDefersHorizontalArrowWhenPageTextIsSelected() {
+        _ = NSApplication.shared
+        AppDelegate.installWindowResponderSwizzlesForTesting()
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        window.contentView = container
+
+        let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
+        webView.autoresizingMask = [.width, .height]
+        container.addSubview(webView)
+
+        let responder = BrowserMarkedTextProbeTextView(frame: NSRect(x: 0, y: 0, width: 32, height: 20))
+        webView.addSubview(responder)
+
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        XCTAssertTrue(window.makeFirstResponder(responder))
+        webView.debugSetPageTextInputState(canPaste: true, hasSelection: true)
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\u{F702}",
+            charactersIgnoringModifiers: "\u{F702}",
+            isARepeat: false,
+            keyCode: 123
+        ) else {
+            XCTFail("Failed to construct Left Arrow event")
+            return
+        }
+
+        let consumed = window.performKeyEquivalent(with: event)
+
+        XCTAssertFalse(consumed, "Selected page text should receive horizontal arrows through normal keyDown dispatch")
+        XCTAssertEqual(responder.keyDownEvents.count, 0, "The key-equivalent phase should not pre-forward the arrow")
+    }
+
+    @MainActor
+    func testWindowPerformKeyEquivalentStillForwardsHorizontalArrowWhenPageTextSelectionIsCollapsed() {
+        _ = NSApplication.shared
+        AppDelegate.installWindowResponderSwizzlesForTesting()
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        let container = NSView(frame: window.contentRect(forFrameRect: window.frame))
+        window.contentView = container
+
+        let webView = CmuxWebView(frame: container.bounds, configuration: WKWebViewConfiguration())
+        webView.autoresizingMask = [.width, .height]
+        container.addSubview(webView)
+
+        let responder = BrowserMarkedTextProbeTextView(frame: NSRect(x: 0, y: 0, width: 32, height: 20))
+        webView.addSubview(responder)
+
+        window.makeKeyAndOrderFront(nil)
+        defer { window.orderOut(nil) }
+
+        XCTAssertTrue(window.makeFirstResponder(responder))
+        webView.debugSetPageTextInputState(canPaste: true, hasSelection: false)
+        guard let event = NSEvent.keyEvent(
+            with: .keyDown,
+            location: .zero,
+            modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime,
+            windowNumber: window.windowNumber,
+            context: nil,
+            characters: "\u{F703}",
+            charactersIgnoringModifiers: "\u{F703}",
+            isARepeat: false,
+            keyCode: 124
+        ) else {
+            XCTFail("Failed to construct Right Arrow event")
+            return
+        }
+
+        let consumed = window.performKeyEquivalent(with: event)
+
+        XCTAssertTrue(consumed, "Collapsed page text selection should keep the browser arrow pre-forwarding path")
+        XCTAssertEqual(responder.keyDownEvents.map(\.keyCode), [124])
+    }
+
+    @MainActor
     func testWindowPerformKeyEquivalentDoesNotForwardReturnDuringMarkedTextComposition() {
         _ = NSApplication.shared
         AppDelegate.installWindowResponderSwizzlesForTesting()
@@ -4467,6 +4734,84 @@ final class BrowserReturnKeyDownRoutingTests: XCTestCase {
                 flags: [.control]
             )
         )
+    }
+}
+
+final class BrowserArrowKeyDownRoutingTests: XCTestCase {
+    func testRoutesPlainBrowserOmnibarArrows() {
+        for keyCode: UInt16 in 123...126 {
+            XCTAssertTrue(
+                shouldDispatchBrowserOmnibarArrowViaFirstResponderKeyDown(
+                    keyCode: keyCode,
+                    firstResponderIsBrowserOmnibar: true,
+                    flags: []
+                )
+            )
+        }
+    }
+
+    func testDoesNotRouteOmnibarArrowsWithMarkedText() {
+        XCTAssertFalse(
+            shouldDispatchBrowserOmnibarArrowViaFirstResponderKeyDown(
+                keyCode: 123,
+                firstResponderIsBrowserOmnibar: true,
+                firstResponderHasMarkedText: true,
+                flags: []
+            )
+        )
+    }
+
+    func testDoesNotRouteModifiedOmnibarArrows() {
+        XCTAssertFalse(
+            shouldDispatchBrowserOmnibarArrowViaFirstResponderKeyDown(
+                keyCode: 124,
+                firstResponderIsBrowserOmnibar: true,
+                flags: [.command]
+            )
+        )
+        XCTAssertFalse(
+            shouldDispatchBrowserOmnibarArrowViaFirstResponderKeyDown(
+                keyCode: 124,
+                firstResponderIsBrowserOmnibar: true,
+                flags: [.option]
+            )
+        )
+    }
+
+    func testDoesNotRouteWhenFirstResponderIsNotOmnibar() {
+        XCTAssertFalse(
+            shouldDispatchBrowserOmnibarArrowViaFirstResponderKeyDown(
+                keyCode: 123,
+                firstResponderIsBrowserOmnibar: false,
+                flags: []
+            )
+        )
+    }
+
+    func testPreservesAddressBarTrackingForLiveOmnibarFieldDuringNonPointerWebFocus() {
+        let context = BrowserAddressBarTrackingContext(
+            trackedPanelMatchesWebView: true,
+            omnibarResponderActive: false,
+            preferredFocusIntentIsAddressBar: true,
+            suppressesWebViewFocus: false,
+            pointerInitiatedWebFocus: false,
+            liveOmnibarFieldExists: true
+        )
+
+        XCTAssertTrue(shouldPreserveBrowserAddressBarTrackingDuringWebViewFocus(context))
+    }
+
+    func testDoesNotPreserveAddressBarTrackingForPointerWebFocus() {
+        let context = BrowserAddressBarTrackingContext(
+            trackedPanelMatchesWebView: true,
+            omnibarResponderActive: false,
+            preferredFocusIntentIsAddressBar: true,
+            suppressesWebViewFocus: true,
+            pointerInitiatedWebFocus: true,
+            liveOmnibarFieldExists: true
+        )
+
+        XCTAssertFalse(shouldPreserveBrowserAddressBarTrackingDuringWebViewFocus(context))
     }
 }
 

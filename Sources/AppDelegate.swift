@@ -16145,6 +16145,15 @@ private extension NSWindow {
         // Some browser content (notably Google Docs) loses plain arrows when
         // NSWindow.performKeyEquivalent claims the arrow before WebKit sees
         // keyDown. Route those arrows directly to the first responder instead.
+        // Page text controls with a live selection need the normal keyDown path:
+        // left/right arrows collapse the selection, and pre-forwarding from the
+        // key-equivalent phase can leave URL/link editor fields stuck selected.
+        if firstResponderWebView?.shouldLetSelectedPageTextHandleHorizontalArrowKey(event) == true {
+#if DEBUG
+            cmuxDebugLog("  → selected page text owns horizontal arrow; deferring to keyDown")
+#endif
+            return false
+        }
         if shouldDispatchBrowserArrowViaFirstResponderKeyDown(
             keyCode: event.keyCode,
             firstResponderIsBrowser: firstResponderWebView != nil,
@@ -16499,6 +16508,14 @@ private extension NSWindow {
     }
 
     private static func cmuxTrackFieldEditor(_ fieldEditor: NSTextView, owningWebView webView: CmuxWebView?) {
+#if DEBUG
+        let omnibarPanel = browserOmnibarPanelId(for: fieldEditor).map { String($0.uuidString.prefix(5)) } ?? "nil"
+        cmuxDebugLog(
+            "browser.fieldEditor.owner field=\(ObjectIdentifier(fieldEditor)) " +
+            "web=\(webView.map { String(describing: ObjectIdentifier($0)) } ?? "nil") " +
+            "omnibarPanel=\(omnibarPanel)"
+        )
+#endif
         if let webView {
             objc_setAssociatedObject(
                 fieldEditor,

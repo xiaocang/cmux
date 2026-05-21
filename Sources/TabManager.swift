@@ -10117,6 +10117,10 @@ extension Notification.Name {
     static let workspaceOrderDidChange = Notification.Name("cmux.workspaceOrderDidChange")
 }
 
+enum BrowserFirstResponderNotificationUserInfoKey {
+    static let pointerInitiated = "pointerInitiated"
+}
+
 extension TabManager: CMUXLeaderModeOwner {}
 
 enum BrowserFirstResponderNotificationUserInfoKey {

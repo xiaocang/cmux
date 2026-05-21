@@ -3393,6 +3393,15 @@ final class BrowserPanel: Panel, ObservableObject {
                 forMainFrameOnly: true
             )
         )
+        // Disable WebKit/browser-owned input completions for page controls. This is
+        // intentionally all-frames so embedded login/search fields inherit the policy.
+        configuration.userContentController.addUserScript(
+            WKUserScript(
+                source: BrowserPageAutocompleteDisabler.scriptSource,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: false
+            )
+        )
         // Keep browser console/error/dialog telemetry active from document start on every navigation.
         // Main frame only — injecting into cross-origin iframes causes CAPTCHA providers
         // (reCAPTCHA, hCaptcha, Cloudflare Turnstile) to detect the overridden console.*
@@ -3427,7 +3436,7 @@ final class BrowserPanel: Panel, ObservableObject {
             WKUserScript(
                 source: CmuxWebView.pasteAsPlainTextFocusTrackingBootstrapScriptSource,
                 injectionTime: .atDocumentStart,
-                forMainFrameOnly: true
+                forMainFrameOnly: false
             )
         )
     }
@@ -5377,7 +5386,16 @@ extension BrowserPanel {
 
     /// Go back in history
     func goBack() {
-        guard canGoBack else { return }
+        guard canGoBack else {
+#if DEBUG
+            cmuxDebugLog(
+                "browser.history.goBack panel=\(id.uuidString.prefix(5)) " +
+                "action=skip canGoBack=0 native=\(nativeCanGoBack ? 1 : 0) " +
+                "restored=\(usesRestoredSessionHistory ? 1 : 0) restoredBack=\(restoredBackHistoryStack.count)"
+            )
+#endif
+            return
+        }
         reactivateDiscardedWebViewWithoutNavigation(reason: "goBack")
         cancelInFlightNavigationBeforeHistoryTraversal()
         if usesRestoredSessionHistory {
@@ -5390,6 +5408,13 @@ extension BrowserPanel {
                 }
                 restoredHistoryCurrentURL = targetURL
                 refreshNavigationAvailability()
+#if DEBUG
+                cmuxDebugLog(
+                    "browser.history.goBack panel=\(id.uuidString.prefix(5)) " +
+                    "action=restored restoredBack=\(restoredBackHistoryStack.count) " +
+                    "restoredForward=\(restoredForwardHistoryStack.count)"
+                )
+#endif
                 navigateWithoutInsecureHTTPPrompt(
                     to: targetURL,
                     recordTypedNavigation: false,
@@ -5399,32 +5424,56 @@ extension BrowserPanel {
             }
 
             if nativeCanGoBack {
+#if DEBUG
+                cmuxDebugLog("browser.history.goBack panel=\(id.uuidString.prefix(5)) action=native restored=1")
+#endif
                 webView.goBack()
                 return
             }
 
             refreshNavigationAvailability()
+#if DEBUG
+            cmuxDebugLog("browser.history.goBack panel=\(id.uuidString.prefix(5)) action=refreshOnly restored=1")
+#endif
             return
         }
 
+#if DEBUG
+        cmuxDebugLog("browser.history.goBack panel=\(id.uuidString.prefix(5)) action=native restored=0")
+#endif
         webView.goBack()
     }
 
     /// Go forward in history
     func goForward() {
-        guard canGoForward else { return }
+        guard canGoForward else {
+#if DEBUG
+            cmuxDebugLog(
+                "browser.history.goForward panel=\(id.uuidString.prefix(5)) " +
+                "action=skip canGoForward=0 native=\(nativeCanGoForward ? 1 : 0) " +
+                "restored=\(usesRestoredSessionHistory ? 1 : 0) restoredForward=\(restoredForwardHistoryStack.count)"
+            )
+#endif
+            return
+        }
         reactivateDiscardedWebViewWithoutNavigation(reason: "goForward")
         cancelInFlightNavigationBeforeHistoryTraversal()
         if usesRestoredSessionHistory {
             realignRestoredSessionHistoryToLiveCurrentIfPossible()
 
             if nativeCanGoForward {
+#if DEBUG
+                cmuxDebugLog("browser.history.goForward panel=\(id.uuidString.prefix(5)) action=native restored=1")
+#endif
                 webView.goForward()
                 return
             }
 
             guard let targetURL = restoredForwardHistoryStack.popLast() else {
                 refreshNavigationAvailability()
+#if DEBUG
+                cmuxDebugLog("browser.history.goForward panel=\(id.uuidString.prefix(5)) action=refreshOnly restored=1")
+#endif
                 return
             }
             if let current = resolvedCurrentSessionHistoryURL() {
@@ -5432,6 +5481,13 @@ extension BrowserPanel {
             }
             restoredHistoryCurrentURL = targetURL
             refreshNavigationAvailability()
+#if DEBUG
+            cmuxDebugLog(
+                "browser.history.goForward panel=\(id.uuidString.prefix(5)) " +
+                "action=restored restoredBack=\(restoredBackHistoryStack.count) " +
+                "restoredForward=\(restoredForwardHistoryStack.count)"
+            )
+#endif
             navigateWithoutInsecureHTTPPrompt(
                 to: targetURL,
                 recordTypedNavigation: false,
@@ -5440,6 +5496,9 @@ extension BrowserPanel {
             return
         }
 
+#if DEBUG
+        cmuxDebugLog("browser.history.goForward panel=\(id.uuidString.prefix(5)) action=native restored=0")
+#endif
         webView.goForward()
     }
 

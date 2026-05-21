@@ -570,6 +570,39 @@ final class OmnibarStateMachineTests: XCTestCase {
         XCTAssertEqual(state.suggestions[state.selectedSuggestionIndex].completion, "https://gmail.com/")
     }
 
+    func testImplicitAutocompleteSelectionDoesNotCommitOnSubmit() throws {
+        var state = OmnibarState()
+        _ = omnibarReduce(state: &state, event: .focusGained(currentURLString: "https://example.com/"))
+        _ = omnibarReduce(state: &state, event: .bufferChanged("gm"))
+
+        let rows: [OmnibarSuggestion] = [
+            .search(engineName: "Google", query: "gm"),
+            .history(url: "https://google.com/", title: "Google"),
+            .history(url: "https://gmail.com/", title: "Gmail"),
+        ]
+        _ = omnibarReduce(state: &state, event: .suggestionsUpdated(rows))
+
+        XCTAssertEqual(state.selectedSuggestionIndex, 2)
+        XCTAssertFalse(state.hasExplicitSuggestionSelection)
+        XCTAssertNil(omnibarSelectedSuggestionForExplicitCommit(in: state))
+    }
+
+    func testKeyboardSelectionIsExplicitForSubmit() throws {
+        var state = OmnibarState()
+        _ = omnibarReduce(state: &state, event: .focusGained(currentURLString: "https://example.com/"))
+        _ = omnibarReduce(state: &state, event: .bufferChanged("go"))
+
+        let rows: [OmnibarSuggestion] = [
+            .search(engineName: "Google", query: "go"),
+            .remoteSearchSuggestion("go tutorial"),
+        ]
+        _ = omnibarReduce(state: &state, event: .suggestionsUpdated(rows))
+        _ = omnibarReduce(state: &state, event: .moveSelection(delta: 1))
+
+        XCTAssertTrue(state.hasExplicitSuggestionSelection)
+        XCTAssertEqual(omnibarSelectedSuggestionForExplicitCommit(in: state), rows[1])
+    }
+
     @MainActor
     func testCommandBackspaceClearsInlineCompletionTypedPrefix() throws {
         let harness = OmnibarInlineDeletionHarness(
@@ -1378,6 +1411,118 @@ final class OmnibarSuggestionRankingTests: XCTestCase {
         )
 
         XCTAssertEqual(active, inline)
+    }
+
+    func testInlineCompletionSelectionKeepsCaretAtTypedBoundary() {
+        let inline = OmnibarInlineCompletion(
+            typedText: "gm",
+            displayText: "gmail.com",
+            acceptedText: "https://gmail.com/"
+        )
+
+        let selection = NSRange(location: 2, length: 0)
+        let desired = omnibarDesiredSelectionRangeForInlineCompletion(
+            currentSelection: selection,
+            inlineCompletion: inline
+        )
+
+        XCTAssertEqual(desired, selection)
+    }
+
+    func testForwardNavigationAcceptsInlineCompletionAtTypedBoundary() {
+        let inline = OmnibarInlineCompletion(
+            typedText: "gm",
+            displayText: "gmail.com",
+            acceptedText: "https://gmail.com/"
+        )
+
+        XCTAssertTrue(
+            omnibarShouldAcceptInlineCompletionForForwardNavigation(
+                currentSelection: NSRange(location: 2, length: 0),
+                inlineCompletion: inline
+            )
+        )
+    }
+
+    func testForwardNavigationAcceptsInlineCompletionSuffixSelection() {
+        let inline = OmnibarInlineCompletion(
+            typedText: "gm",
+            displayText: "gmail.com",
+            acceptedText: "https://gmail.com/"
+        )
+
+        XCTAssertTrue(
+            omnibarShouldAcceptInlineCompletionForForwardNavigation(
+                currentSelection: inline.suffixRange,
+                inlineCompletion: inline
+            )
+        )
+    }
+
+    func testForwardNavigationDoesNotAcceptInlineCompletionForPartialSelection() {
+        let inline = OmnibarInlineCompletion(
+            typedText: "gm",
+            displayText: "gmail.com",
+            acceptedText: "https://gmail.com/"
+        )
+
+        XCTAssertFalse(
+            omnibarShouldAcceptInlineCompletionForForwardNavigation(
+                currentSelection: NSRange(location: 1, length: 2),
+                inlineCompletion: inline
+            )
+        )
+    }
+
+    func testForwardNavigationAcceptsInlineCompletionForSelectAll() {
+        let inline = OmnibarInlineCompletion(
+            typedText: "gm",
+            displayText: "gmail.com",
+            acceptedText: "https://gmail.com/"
+        )
+
+        // Cmd+A in the omnibar selects the entire displayed text, including the
+        // auto-completed suffix. Pressing Right Arrow / End from that state should
+        // commit the inline completion so the caret lands at the end of the
+        // displayed URL rather than being snapped back to the typedText boundary.
+        XCTAssertTrue(
+            omnibarShouldAcceptInlineCompletionForForwardNavigation(
+                currentSelection: NSRange(location: 0, length: inline.displayText.utf16.count),
+                inlineCompletion: inline
+            )
+        )
+    }
+
+    func testRemovingInlineCompletionPreservesCaretInsideTypedPrefix() {
+        let inline = OmnibarInlineCompletion(
+            typedText: "gm",
+            displayText: "gmail.com",
+            acceptedText: "https://gmail.com/"
+        )
+
+        let selection = omnibarSelectionRangeAfterRemovingInlineCompletion(
+            currentSelection: NSRange(location: 1, length: 0),
+            text: "gm",
+            previouslyAppliedInlineCompletion: inline
+        )
+
+        XCTAssertEqual(selection, NSRange(location: 1, length: 0))
+    }
+
+    func testAcceptedInlineCompletionPlacesCaretAtEnd() {
+        let inline = OmnibarInlineCompletion(
+            typedText: "gm",
+            displayText: "gmail.com",
+            acceptedText: "https://gmail.com/"
+        )
+
+        let selection = omnibarSelectionRangeAfterRemovingInlineCompletion(
+            currentSelection: inline.suffixRange,
+            text: inline.displayText,
+            previouslyAppliedInlineCompletion: inline
+        )
+
+        XCTAssertEqual(selection, NSRange(location: inline.displayText.utf16.count, length: 0))
     }
 
     func testInlineCompletionSkipsTitleMatchWhoseURLDoesNotStartWithTypedText() {
