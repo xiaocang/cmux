@@ -5967,7 +5967,7 @@ struct SettingsView: View {
     }
 
     private var browserHiddenWebViewDiscardDelaySubtitle: String {
-        String(localized: "settings.browser.hiddenWebViewDiscardDelay.subtitle", defaultValue: "How long a browser tab must stay hidden before cmux frees its page memory. Active downloads, popups, developer tools, fullscreen, and loading pages are skipped.")
+        String(localized: "settings.browser.hiddenWebViewDiscardDelay.subtitle", defaultValue: "How long a browser tab must stay hidden before cmux frees its page memory. Active downloads, popups, developer tools, and fullscreen pages are skipped.")
     }
 
     private var browserHiddenWebViewDiscardDelayLabel: String {

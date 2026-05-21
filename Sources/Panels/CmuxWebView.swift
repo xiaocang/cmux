@@ -125,27 +125,12 @@ enum BrowserPageAutocompleteDisabler {
           try {
             const observer = new MutationObserver((mutations) => {
               for (const mutation of mutations) {
-                if (mutation.type === 'attributes') {
-                  disableElement(mutation.target);
-                  continue;
-                }
                 mutation.addedNodes.forEach(sweepNode);
               }
             });
             observer.observe(root, {
-              attributes: true,
               childList: true,
-              subtree: true,
-              attributeFilter: [
-                'autocomplete',
-                'autocorrect',
-                'autocapitalize',
-                'spellcheck',
-                'results',
-                'autosave',
-                'type',
-                'contenteditable'
-              ]
+              subtree: true
             });
           } catch (_) {}
         };
@@ -170,9 +155,10 @@ enum BrowserPageAutocompleteDisabler {
         };
 
         // focusin runs on every field that becomes focused, including ones inside
-        // shadow roots whose host was newly inserted. The MutationObserver keeps
-        // attributes from drifting back to defaults, so we don't also need an
-        // 'input' listener firing on every keystroke.
+        // shadow roots whose host was newly inserted. Do not observe attributes:
+        // pages often mutate autocomplete/spellcheck/contenteditable while rendering,
+        // and responding by writing those same attributes can create WebContent
+        // MutationObserver churn before the page finishes painting.
         const disableFocusTarget = (ev) => {
           try {
             const target = ev?.target;
@@ -607,6 +593,25 @@ final class CmuxWebView: WKWebView {
         allowsFirstResponderAcquisition || pointerFocusAllowanceDepth > 0
     }
     var debugPointerFocusAllowanceDepth: Int { pointerFocusAllowanceDepth }
+
+    func prepareForBrowserPanelRetirement() {
+        onContextMenuDownloadStateChanged = nil
+        onContextMenuOpenLinkInNewTab = nil
+        contextMenuLinkURLProvider = nil
+        contextMenuDefaultBrowserOpener = nil
+        contextMenuCanMoveTabToNewWorkspace = nil
+        contextMenuMoveTabToNewWorkspace = nil
+
+        let userContentController = configuration.userContentController
+        userContentController.removeAllUserScripts()
+        userContentController.removeScriptMessageHandler(forName: Self.pasteAsPlainTextFocusMessageHandlerName)
+        objc_setAssociatedObject(
+            userContentController,
+            &Self.pasteAsPlainTextFocusHandlerInstalledKey,
+            nil,
+            .OBJC_ASSOCIATION_RETAIN_NONATOMIC
+        )
+    }
 
     override init(frame: NSRect, configuration: WKWebViewConfiguration) {
         BrowserTextInputCorrectionDefaults.register()

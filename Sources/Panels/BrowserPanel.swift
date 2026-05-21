@@ -2488,6 +2488,11 @@ final class BrowserPanel: Panel, ObservableObject {
     private var suppressWebViewFocusForAddressBar: Bool = false
     private var addressBarFocusRestoreGeneration: UInt64 = 0
     private let blankURLString = "about:blank"
+    private let webContentCrashRecoveryWindow: TimeInterval = 30 * 60
+    private let maxAutomaticWebContentCrashRecoveries = 2
+    private var webContentCrashRecoveryURLString: String?
+    private var webContentCrashRecoveryDates: [Date] = []
+    private var repeatedWebContentCrashPageURL: URL?
     private static let addressBarFocusCaptureScript = """
     (() => {
       try {
@@ -3053,11 +3058,60 @@ final class BrowserPanel: Panel, ObservableObject {
     }
 
     private func scheduleHiddenWebViewDiscardIfNeeded(reason: String) {
+#if DEBUG
+        let blockers = hiddenWebViewDiscardBlockers()
+        let blockersDescription = blockers.joined(separator: ",")
+        cmuxDebugLog(
+            "browser.webview.discard.schedule panel=\(id.uuidString.prefix(5)) " +
+            "reason=\(reason) eligible=\(blockers.isEmpty ? 1 : 0) " +
+            "visible=\(isWebViewVisibleInUI ? 1 : 0) render=\(shouldRenderWebView ? 1 : 0) " +
+            "loading=\(isLoading ? 1 : 0) webLoading=\(webView.isLoading ? 1 : 0) " +
+            "blockers=\(blockersDescription)"
+        )
+#endif
         hiddenWebViewDiscardManager.scheduleIfNeeded(reason: reason)
     }
 
     private func cancelHiddenWebViewDiscard() {
         hiddenWebViewDiscardManager.cancel()
+    }
+
+    private func retireReplacedWebView(_ retiredWebView: WKWebView, reason: String) {
+#if DEBUG
+        let pidBefore = CmuxWebContentProcessIdentifier.pid(for: retiredWebView)
+        let pidBeforeDescription = pidBefore.map(String.init) ?? "nil"
+        let retiredURLDescription = retiredWebView.url?.absoluteString ?? "nil"
+        cmuxDebugLog(
+            "browser.webview.retire.begin panel=\(id.uuidString.prefix(5)) " +
+            "reason=\(reason) web=\(ObjectIdentifier(retiredWebView)) pid=\(pidBeforeDescription) " +
+            "url=\(retiredURLDescription)"
+        )
+#endif
+
+        BrowserWindowPortalRegistry.detach(webView: retiredWebView)
+        retiredWebView.stopLoading()
+        isMainFrameProvisionalNavigationActive = false
+        retiredWebView.navigationDelegate = nil
+        retiredWebView.uiDelegate = nil
+        tearDownReactGrabMessageHandler(for: retiredWebView)
+        if let retiredCmuxWebView = retiredWebView as? CmuxWebView {
+            retiredCmuxWebView.prepareForBrowserPanelRetirement()
+        } else {
+            retiredWebView.configuration.userContentController.removeAllUserScripts()
+        }
+
+        if let blankURL = URL(string: blankURLString) {
+            retiredWebView.load(URLRequest(url: blankURL))
+        } else {
+            retiredWebView.loadHTMLString("", baseURL: nil)
+        }
+
+#if DEBUG
+        cmuxDebugLog(
+            "browser.webview.retire.end panel=\(id.uuidString.prefix(5)) " +
+            "reason=\(reason) web=\(ObjectIdentifier(retiredWebView)) pid=\(pidBeforeDescription)"
+        )
+#endif
     }
 
     private func reevaluateHiddenWebViewDiscardScheduling(reason: String) {
@@ -3075,7 +3129,16 @@ final class BrowserPanel: Panel, ObservableObject {
     @discardableResult
     func discardHiddenWebViewForMemory(reason: String, now: Date = Date()) -> Bool {
         let blockers = hiddenWebViewDiscardBlockers()
-        guard blockers.isEmpty else { return false }
+        guard blockers.isEmpty else {
+#if DEBUG
+            let blockersDescription = blockers.joined(separator: ",")
+            cmuxDebugLog(
+                "browser.webview.discard.blocked panel=\(id.uuidString.prefix(5)) " +
+                "reason=\(reason) blockers=\(blockersDescription)"
+            )
+#endif
+            return false
+        }
 
         cancelHiddenWebViewDiscard()
 
@@ -3084,6 +3147,16 @@ final class BrowserPanel: Panel, ObservableObject {
         let history = sessionNavigationHistorySnapshot()
         let historyCurrentURL = preferredURLStringForOmnibar() ?? restoreURL?.absoluteString
         let desiredZoom = max(minPageZoom, min(maxPageZoom, oldWebView.pageZoom))
+
+#if DEBUG
+        let restoreURLDescription = restoreURL?.absoluteString ?? "nil"
+        cmuxDebugLog(
+            "browser.webview.discard.begin panel=\(id.uuidString.prefix(5)) " +
+            "reason=\(reason) web=\(ObjectIdentifier(oldWebView)) " +
+            "loading=\(isLoading ? 1 : 0) webLoading=\(oldWebView.isLoading ? 1 : 0) " +
+            "url=\(restoreURLDescription)"
+        )
+#endif
 
         invalidateSearchFocusRequests(reason: "webViewDiscard")
         searchState = nil
@@ -3098,14 +3171,7 @@ final class BrowserPanel: Panel, ObservableObject {
         webViewObservers.removeAll()
         webViewCancellables.removeAll()
         closeBackgroundPreloadHost(reason: "discardHiddenWebView")
-        BrowserWindowPortalRegistry.detach(webView: oldWebView)
-        oldWebView.stopLoading()
-        isMainFrameProvisionalNavigationActive = false
-        oldWebView.navigationDelegate = nil
-        oldWebView.uiDelegate = nil
-        if let oldCmuxWebView = oldWebView as? CmuxWebView {
-            oldCmuxWebView.onContextMenuDownloadStateChanged = nil
-        }
+        retireReplacedWebView(oldWebView, reason: "discardHiddenWebView")
 
         let replacement = Self.makeWebView(
             profileID: profileID,
@@ -3135,12 +3201,21 @@ final class BrowserPanel: Panel, ObservableObject {
         )
         refreshNavigationAvailability()
         refreshWebViewLifecycleState()
+#if DEBUG
+        let restoredURLDescription = restoreURL?.absoluteString ?? "nil"
+        cmuxDebugLog(
+            "browser.webview.discard.end panel=\(id.uuidString.prefix(5)) " +
+            "reason=\(reason) newWeb=\(ObjectIdentifier(replacement)) " +
+            "url=\(restoredURLDescription)"
+        )
+#endif
         return true
     }
 
     @discardableResult
     func restoreDiscardedWebViewIfNeeded(reason: String) -> Bool {
         return hiddenWebViewDiscardManager.restoreIfNeeded(reason: reason) {
+            let restoreDeveloperTools = preferredDeveloperToolsVisible
             shouldRenderWebView = true
             guard let restoreURL = restoredHistoryCurrentURL ?? currentURL else {
                 refreshNavigationAvailability()
@@ -3151,6 +3226,9 @@ final class BrowserPanel: Panel, ObservableObject {
                 recordTypedNavigation: false,
                 preserveRestoredSessionHistory: true
             )
+            if restoreDeveloperTools {
+                requestDeveloperToolsRefreshAfterNextAttach(reason: reason)
+            }
         }
     }
 
@@ -3483,8 +3561,13 @@ final class BrowserPanel: Panel, ObservableObject {
                 self.isMainFrameProvisionalNavigationActive = false
                 self.publishCommittedURL(from: webView)
                 self.realignRestoredSessionHistoryToLiveCurrentIfPossible()
-                boundHistoryStore.recordVisit(url: webView.url, title: webView.title)
-                self.refreshFavicon(from: webView)
+                if self.repeatedWebContentCrashPageURL == nil {
+                    boundHistoryStore.recordVisit(url: webView.url, title: webView.title)
+                    self.refreshFavicon(from: webView)
+                } else {
+                    self.faviconPNGData = nil
+                    self.lastFaviconURLString = nil
+                }
                 // Keep find-in-page open through load completion and refresh matches for the new DOM.
                 self.restoreFindStateAfterNavigation(replaySearch: true)
             }
@@ -3514,6 +3597,11 @@ final class BrowserPanel: Panel, ObservableObject {
     }
 
     private func publishCommittedURL(from webView: WKWebView) {
+        if let repeatedWebContentCrashPageURL {
+            currentURL = repeatedWebContentCrashPageURL
+            GlobalSearchCoordinator.shared.captureBrowserPanel(self)
+            return
+        }
         currentURL = Self.remoteProxyDisplayURL(for: webView.url)
         GlobalSearchCoordinator.shared.captureBrowserPanel(self)
     }
@@ -3927,6 +4015,7 @@ final class BrowserPanel: Panel, ObservableObject {
         proxyEndpoint: BrowserProxyEndpoint?,
         remoteStatus: BrowserRemoteWorkspaceStatus?
     ) {
+        resetWebContentCrashRecovery(reason: "workspaceReattach")
         workspaceId = newWorkspaceId
         usesRemoteWorkspaceProxy = isRemoteWorkspace
         let targetStore = isRemoteWorkspace
@@ -3956,6 +4045,7 @@ final class BrowserPanel: Panel, ObservableObject {
             BrowserProfileStore.shared.noteUsed(resolvedProfileID)
             return false
         }
+        resetWebContentCrashRecovery(reason: "profileSwitch")
 
         let previousWebView = webView
         let wasRenderable = shouldRenderWebView
@@ -3980,14 +4070,7 @@ final class BrowserPanel: Panel, ObservableObject {
         faviconRefreshGeneration &+= 1
         cancelPendingInteractiveBrowserPrompts(reason: "profileSwitch")
         closeBackgroundPreloadHost(reason: "profileSwitch")
-        BrowserWindowPortalRegistry.detach(webView: previousWebView)
-        previousWebView.stopLoading()
-        isMainFrameProvisionalNavigationActive = false
-        previousWebView.navigationDelegate = nil
-        previousWebView.uiDelegate = nil
-        if let previousCmuxWebView = previousWebView as? CmuxWebView {
-            previousCmuxWebView.onContextMenuDownloadStateChanged = nil
-        }
+        retireReplacedWebView(previousWebView, reason: "profileSwitch")
 
         profileID = resolvedProfileID
         historyStore = BrowserProfileStore.shared.historyStore(for: resolvedProfileID)
@@ -4170,9 +4253,11 @@ final class BrowserPanel: Panel, ObservableObject {
         refreshNavigationAvailability()
     }
 
-    func restoreSessionSnapshot(_ snapshot: SessionBrowserPanelSnapshot) {
+    func restoreSessionSnapshot(_ snapshot: SessionBrowserPanelSnapshot, renderWebView: Bool = true) {
+        resetWebContentCrashRecovery(reason: "restoreSessionSnapshot")
         let restoredURL = Self.sanitizedSessionHistoryURL(snapshot.urlString)
-        let shouldRenderRestoredWebView = snapshot.shouldRenderWebView && BrowserAvailabilitySettings.isEnabled()
+        let canRenderRestoredWebView = snapshot.shouldRenderWebView && BrowserAvailabilitySettings.isEnabled()
+        let shouldRenderRestoredWebView = canRenderRestoredWebView && renderWebView
         hiddenWebViewDiscardManager.updateRestoredSessionRenderIntent(snapshot.shouldRenderWebView)
 
         restoreSessionNavigationHistory(
@@ -4183,6 +4268,11 @@ final class BrowserPanel: Panel, ObservableObject {
 
         currentURL = restoredURL
         shouldRenderWebView = shouldRenderRestoredWebView
+
+        if canRenderRestoredWebView, !shouldRenderRestoredWebView, restoredURL != nil {
+            hiddenWebViewDiscardManager.markDiscarded(reason: "session_restore_hidden", now: Date())
+            refreshWebViewLifecycleState()
+        }
 
         guard shouldRenderRestoredWebView, let restoredURL else {
             refreshNavigationAvailability()
@@ -4309,11 +4399,235 @@ final class BrowserPanel: Panel, ObservableObject {
     }
 
     private func replaceWebViewAfterContentProcessTermination(for terminatedWebView: WKWebView) {
+        guard terminatedWebView === webView else { return }
+        let restoreURL = Self.remoteProxyDisplayURL(for: terminatedWebView.url) ?? currentURL
+        if shouldBlockAutomaticWebContentCrashRecovery(for: restoreURL) {
+            replaceWebViewWithRepeatedCrashPage(
+                from: terminatedWebView,
+                websiteDataStore: websiteDataStore,
+                crashedURL: restoreURL,
+                reason: "webcontent_process_terminated"
+            )
+            return
+        }
+
         replaceWebViewPreservingState(
             from: terminatedWebView,
             websiteDataStore: websiteDataStore,
             reason: "webcontent_process_terminated"
         )
+    }
+
+    private func shouldBlockAutomaticWebContentCrashRecovery(for restoreURL: URL?, now: Date = Date()) -> Bool {
+        let urlString = restoreURL?.absoluteString ?? blankURLString
+        if webContentCrashRecoveryURLString != urlString {
+            webContentCrashRecoveryURLString = urlString
+            webContentCrashRecoveryDates.removeAll()
+        }
+
+        webContentCrashRecoveryDates = webContentCrashRecoveryDates.filter {
+            now.timeIntervalSince($0) <= webContentCrashRecoveryWindow
+        }
+        webContentCrashRecoveryDates.append(now)
+
+        let crashCount = webContentCrashRecoveryDates.count
+        let shouldBlock = crashCount > maxAutomaticWebContentCrashRecoveries
+#if DEBUG
+        if shouldBlock {
+            cmuxDebugLog(
+                "browser.webcontent.recovery.blocked panel=\(id.uuidString.prefix(5)) " +
+                "count=\(crashCount) max=\(maxAutomaticWebContentCrashRecoveries) " +
+                "windowSeconds=\(Int(webContentCrashRecoveryWindow)) url=\(urlString)"
+            )
+        }
+#endif
+        return shouldBlock
+    }
+
+    private func resetWebContentCrashRecovery(reason: String) {
+        let didReset = webContentCrashRecoveryURLString != nil ||
+            !webContentCrashRecoveryDates.isEmpty ||
+            repeatedWebContentCrashPageURL != nil
+        webContentCrashRecoveryURLString = nil
+        webContentCrashRecoveryDates.removeAll()
+        repeatedWebContentCrashPageURL = nil
+
+#if DEBUG
+        if didReset {
+            cmuxDebugLog(
+                "browser.webcontent.recovery.reset panel=\(id.uuidString.prefix(5)) reason=\(reason)"
+            )
+        }
+#endif
+    }
+
+    private func replaceWebViewWithRepeatedCrashPage(
+        from oldWebView: WKWebView,
+        websiteDataStore: WKWebsiteDataStore,
+        crashedURL: URL?,
+        reason: String
+    ) {
+        guard oldWebView === webView else { return }
+
+        let wasRenderable = shouldRenderWebView
+        let crashedURLString = crashedURL?.absoluteString
+        let history = sessionNavigationHistorySnapshot()
+        let historyCurrentURL = preferredURLStringForOmnibar() ?? crashedURLString
+        let desiredZoom = max(minPageZoom, min(maxPageZoom, oldWebView.pageZoom))
+        let restoreDevTools = preferredDeveloperToolsVisible
+
+#if DEBUG
+        cmuxDebugLog(
+            "browser.webview.replace.crashPage.begin panel=\(id.uuidString.prefix(5)) " +
+            "reason=\(reason) renderable=\(wasRenderable ? 1 : 0) url=\(crashedURLString ?? "nil")"
+        )
+#endif
+
+        webViewObservers.removeAll()
+        webViewCancellables.removeAll()
+        faviconTask?.cancel()
+        faviconTask = nil
+        faviconRefreshGeneration &+= 1
+        loadingEndWorkItem?.cancel()
+        loadingEndWorkItem = nil
+        loadingGeneration &+= 1
+        activeDownloadCount = 0
+        isDownloading = false
+        isLoading = false
+        estimatedProgress = 0
+        nativeCanGoBack = false
+        nativeCanGoForward = false
+        cancelPendingInteractiveBrowserPrompts(reason: reason)
+        closeBackgroundPreloadHost(reason: reason)
+        retireReplacedWebView(oldWebView, reason: reason)
+
+        let replacement = Self.makeWebView(
+            profileID: profileID,
+            websiteDataStore: websiteDataStore
+        )
+        replacement.pageZoom = desiredZoom
+        webViewInstanceID = UUID()
+        resetWebViewLifecycleMetadata(resetVisibility: false)
+        webView = replacement
+        currentURL = crashedURL
+        pageTitle = String(
+            localized: "browser.error.webContentRepeatedCrash.title",
+            defaultValue: "Page crashed repeatedly"
+        )
+        faviconPNGData = nil
+        lastFaviconURLString = nil
+        navigationDelegate?.lastAttemptedURL = crashedURL
+        repeatedWebContentCrashPageURL = crashedURL
+        shouldRenderWebView = wasRenderable
+        refreshWebViewLifecycleState()
+
+        bindWebView(replacement)
+        applyBrowserThemeModeIfNeeded()
+
+        if !history.backHistoryURLStrings.isEmpty || !history.forwardHistoryURLStrings.isEmpty {
+            restoreSessionNavigationHistory(
+                backHistoryURLStrings: history.backHistoryURLStrings,
+                forwardHistoryURLStrings: history.forwardHistoryURLStrings,
+                currentURLString: historyCurrentURL
+            )
+        }
+
+        loadRepeatedWebContentCrashPage(in: replacement, crashedURL: crashedURL)
+        refreshNavigationAvailability()
+
+        if restoreDevTools {
+            requestDeveloperToolsRefreshAfterNextAttach(reason: reason)
+        }
+
+#if DEBUG
+        cmuxDebugLog(
+            "browser.webview.replace.crashPage.end panel=\(id.uuidString.prefix(5)) " +
+            "reason=\(reason) instance=\(webViewInstanceID.uuidString.prefix(6)) " +
+            "url=\(crashedURLString ?? "nil")"
+        )
+#endif
+    }
+
+    private func loadRepeatedWebContentCrashPage(in webView: WKWebView, crashedURL: URL?) {
+        let title = String(
+            localized: "browser.error.webContentRepeatedCrash.title",
+            defaultValue: "Page crashed repeatedly"
+        )
+        let message = String(
+            localized: "browser.error.webContentRepeatedCrash.message",
+            defaultValue: "cmux stopped reloading this page because its WebContent process keeps crashing. Use Reload to try again."
+        )
+        let urlHTML: String
+        if let crashedURL {
+            urlHTML = "<div class=\"url\">\(Self.escapeHTML(crashedURL.absoluteString))</div>"
+        } else {
+            urlHTML = ""
+        }
+        let html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>\(Self.escapeHTML(title))</title>
+          <style>
+            :root {
+              color-scheme: light dark;
+              font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            }
+            body {
+              margin: 0;
+              min-height: 100vh;
+              display: grid;
+              place-items: center;
+              background: Canvas;
+              color: CanvasText;
+            }
+            main {
+              width: min(560px, calc(100vw - 48px));
+            }
+            h1 {
+              margin: 0 0 12px;
+              font-size: 24px;
+              font-weight: 650;
+              letter-spacing: 0;
+            }
+            p {
+              margin: 0;
+              color: color-mix(in srgb, CanvasText 72%, transparent);
+              font-size: 14px;
+              line-height: 1.45;
+            }
+            .url {
+              margin-top: 18px;
+              padding: 10px 12px;
+              border: 1px solid color-mix(in srgb, CanvasText 14%, transparent);
+              border-radius: 6px;
+              color: color-mix(in srgb, CanvasText 62%, transparent);
+              font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+              overflow-wrap: anywhere;
+            }
+          </style>
+        </head>
+        <body>
+          <main>
+            <h1>\(Self.escapeHTML(title))</h1>
+            <p>\(Self.escapeHTML(message))</p>
+            \(urlHTML)
+          </main>
+        </body>
+        </html>
+        """
+        webView.loadHTMLString(html, baseURL: crashedURL)
+    }
+
+    private static func escapeHTML(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#39;")
     }
 
     private func replaceWebViewPreservingState(
@@ -4349,14 +4663,7 @@ final class BrowserPanel: Panel, ObservableObject {
         faviconRefreshGeneration &+= 1
         cancelPendingInteractiveBrowserPrompts(reason: reason)
         closeBackgroundPreloadHost(reason: reason)
-        BrowserWindowPortalRegistry.detach(webView: oldWebView)
-        oldWebView.stopLoading()
-        isMainFrameProvisionalNavigationActive = false
-        oldWebView.navigationDelegate = nil
-        oldWebView.uiDelegate = nil
-        if let oldCmuxWebView = oldWebView as? CmuxWebView {
-            oldCmuxWebView.onContextMenuDownloadStateChanged = nil
-        }
+        retireReplacedWebView(oldWebView, reason: reason)
 
         let replacement = Self.makeWebView(
             profileID: profileID,
@@ -4827,7 +5134,6 @@ final class BrowserPanel: Panel, ObservableObject {
 
     private func handleWebViewLoadingChanged(_ newValue: Bool) {
         if newValue {
-            cancelHiddenWebViewDiscard()
             // Any new load invalidates older favicon fetches, even for same-URL reloads.
             faviconRefreshGeneration &+= 1
             faviconTask?.cancel()
@@ -4841,6 +5147,11 @@ final class BrowserPanel: Panel, ObservableObject {
             loadingEndWorkItem = nil
             loadingStartedAt = Date()
             isLoading = true
+            if isWebViewVisibleInUI {
+                cancelHiddenWebViewDiscard()
+            } else {
+                scheduleHiddenWebViewDiscardIfNeeded(reason: "load.started.hidden")
+            }
             return
         }
 
@@ -4876,6 +5187,7 @@ final class BrowserPanel: Panel, ObservableObject {
     /// Navigate to a URL
     func navigate(to url: URL, recordTypedNavigation: Bool = false) {
         let request = URLRequest(url: url)
+        resetWebContentCrashRecovery(reason: "navigate")
         if shouldBlockInsecureHTTPNavigation(to: url) {
             presentInsecureHTTPAlert(for: request, intent: .currentTab, recordTypedNavigation: recordTypedNavigation)
             return
@@ -4902,6 +5214,7 @@ final class BrowserPanel: Panel, ObservableObject {
         preserveRestoredSessionHistory: Bool = false
     ) {
         guard let url = request.url else { return }
+        repeatedWebContentCrashPageURL = nil
         cancelHiddenWebViewDiscard()
         clearWebViewDiscardState(reason: "navigation")
         if usesRemoteWorkspaceProxy, remoteProxyEndpoint == nil {
@@ -5071,6 +5384,7 @@ final class BrowserPanel: Panel, ObservableObject {
         }
         switch intent {
         case .currentTab:
+            resetWebContentCrashRecovery(reason: "navigationRequest")
             navigateWithoutInsecureHTTPPrompt(request: request, recordTypedNavigation: false)
         case .newTab:
             openLinkInNewTab(request: request)
@@ -5141,6 +5455,7 @@ final class BrowserPanel: Panel, ObservableObject {
         case .alertSecondButtonReturn:
             switch intent {
             case .currentTab:
+                resetWebContentCrashRecovery(reason: "insecureHTTPProceed")
                 insecureHTTPBypassHostOnce = host
                 navigateWithoutInsecureHTTPPrompt(request: request, recordTypedNavigation: recordTypedNavigation)
             case .newTab:
@@ -5235,6 +5550,7 @@ extension BrowserPanel {
     }
 
     func resetForWorkspaceContextChange(reason: String) {
+        resetWebContentCrashRecovery(reason: reason)
         guard needsWorkspaceContextReset else {
             resetWebViewLifecycleMetadata()
 #if DEBUG
@@ -5303,14 +5619,7 @@ extension BrowserPanel {
         webViewCancellables.removeAll()
         cancelPendingInteractiveBrowserPrompts(reason: "contextReset")
         closeBackgroundPreloadHost(reason: "contextReset")
-        BrowserWindowPortalRegistry.detach(webView: oldWebView)
-        oldWebView.stopLoading()
-        isMainFrameProvisionalNavigationActive = false
-        oldWebView.navigationDelegate = nil
-        oldWebView.uiDelegate = nil
-        if let oldCmuxWebView = oldWebView as? CmuxWebView {
-            oldCmuxWebView.onContextMenuDownloadStateChanged = nil
-        }
+        retireReplacedWebView(oldWebView, reason: "contextReset")
 
         let replacement = Self.makeWebView(
             profileID: profileID,
@@ -5396,6 +5705,7 @@ extension BrowserPanel {
 #endif
             return
         }
+        resetWebContentCrashRecovery(reason: "goBack")
         reactivateDiscardedWebViewWithoutNavigation(reason: "goBack")
         cancelInFlightNavigationBeforeHistoryTraversal()
         if usesRestoredSessionHistory {
@@ -5456,6 +5766,7 @@ extension BrowserPanel {
 #endif
             return
         }
+        resetWebContentCrashRecovery(reason: "goForward")
         reactivateDiscardedWebViewWithoutNavigation(reason: "goForward")
         cancelInFlightNavigationBeforeHistoryTraversal()
         if usesRestoredSessionHistory {
@@ -5582,6 +5893,16 @@ extension BrowserPanel {
 
     /// Reload the current page
     func reload() {
+        if let retryURL = repeatedWebContentCrashPageURL {
+            resetWebContentCrashRecovery(reason: "reloadCrashPage")
+            navigateWithoutInsecureHTTPPrompt(
+                to: retryURL,
+                recordTypedNavigation: false,
+                preserveRestoredSessionHistory: usesRestoredSessionHistory
+            )
+            return
+        }
+        resetWebContentCrashRecovery(reason: "reload")
         if restoreDiscardedWebViewIfNeeded(reason: "reload") {
             return
         }
@@ -5971,6 +6292,11 @@ extension BrowserPanel {
     @discardableResult
     func showDeveloperTools() -> Bool {
         return enqueueDeveloperToolsVisibilityTransition(to: true, source: "show")
+    }
+
+    func restoreDeveloperToolsVisibilityIntentForSession() {
+        setPreferredDeveloperToolsVisible(true)
+        developerToolsRestoreRetryAttempt = 0
     }
 
     @discardableResult

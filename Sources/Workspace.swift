@@ -251,7 +251,10 @@ extension Workspace {
         )
     }
 
-    func restoreSessionSnapshot(_ snapshot: SessionWorkspaceSnapshot) {
+    func restoreSessionSnapshot(
+        _ snapshot: SessionWorkspaceSnapshot,
+        renderRestoredBrowserWebViews: Bool = true
+    ) {
         restoredTerminalScrollbackByPanelId.removeAll(keepingCapacity: false)
 #if DEBUG
         debugSessionSnapshotScrollbackFallbackPanelIds.removeAll(keepingCapacity: false)
@@ -286,6 +289,7 @@ extension Workspace {
                 entry.paneId,
                 snapshot: entry.snapshot,
                 panelSnapshotsById: panelSnapshotsById,
+                renderRestoredBrowserWebViews: renderRestoredBrowserWebViews,
                 oldToNewPanelIds: &oldToNewPanelIds
             )
         }
@@ -822,17 +826,26 @@ extension Workspace {
         _ paneId: PaneID,
         snapshot: SessionPaneLayoutSnapshot,
         panelSnapshotsById: [UUID: SessionPanelSnapshot],
+        renderRestoredBrowserWebViews: Bool,
         oldToNewPanelIds: inout [UUID: UUID]
     ) {
         let existingPanelIds = bonsplitController
             .tabs(inPane: paneId)
             .compactMap { panelIdFromSurfaceId($0.id) }
         let desiredOldPanelIds = snapshot.panelIds.filter { panelSnapshotsById[$0] != nil }
+        let selectedOldPanelId = snapshot.selectedPanelId.flatMap { selected in
+            desiredOldPanelIds.contains(selected) ? selected : nil
+        } ?? desiredOldPanelIds.first
 
         var createdPanelIds: [UUID] = []
         for oldPanelId in desiredOldPanelIds {
             guard let panelSnapshot = panelSnapshotsById[oldPanelId] else { continue }
-            guard let createdPanelId = createPanel(from: panelSnapshot, inPane: paneId) else { continue }
+            guard let createdPanelId = createPanel(
+                from: panelSnapshot,
+                inPane: paneId,
+                renderRestoredBrowserWebView: renderRestoredBrowserWebViews &&
+                    (selectedOldPanelId.map { oldPanelId == $0 } ?? false)
+            ) else { continue }
             createdPanelIds.append(createdPanelId)
             oldToNewPanelIds[oldPanelId] = createdPanelId
         }
@@ -903,7 +916,11 @@ extension Workspace {
         return storedBinding
     }
 
-    private func createPanel(from snapshot: SessionPanelSnapshot, inPane paneId: PaneID) -> UUID? {
+    private func createPanel(
+        from snapshot: SessionPanelSnapshot,
+        inPane paneId: PaneID,
+        renderRestoredBrowserWebView: Bool = true
+    ) -> UUID? {
         switch snapshot.type {
         case .terminal:
             let resumeBinding = snapshot.terminal?.resumeBinding
@@ -1022,7 +1039,11 @@ extension Workspace {
             ) else {
                 return nil
             }
-            applySessionPanelMetadata(snapshot, toPanelId: browserPanel.id)
+            applySessionPanelMetadata(
+                snapshot,
+                toPanelId: browserPanel.id,
+                renderRestoredBrowserWebView: renderRestoredBrowserWebView
+            )
             return browserPanel.id
         case .markdown:
             guard let filePath = snapshot.markdown?.filePath,
@@ -1061,7 +1082,11 @@ extension Workspace {
         }
     }
 
-    private func applySessionPanelMetadata(_ snapshot: SessionPanelSnapshot, toPanelId panelId: UUID) {
+    private func applySessionPanelMetadata(
+        _ snapshot: SessionPanelSnapshot,
+        toPanelId panelId: UUID,
+        renderRestoredBrowserWebView: Bool = true
+    ) {
         if let title = snapshot.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
             panelTitles[panelId] = title
         }
@@ -1107,11 +1132,18 @@ extension Workspace {
                 _ = browserPanel.setPageZoomFactor(pageZoom)
             }
 
-            browserPanel.restoreSessionSnapshot(browserSnapshot)
+            browserPanel.restoreSessionSnapshot(
+                browserSnapshot,
+                renderWebView: renderRestoredBrowserWebView
+            )
 
             if browserSnapshot.developerToolsVisible && BrowserAvailabilitySettings.isEnabled() {
-                _ = browserPanel.showDeveloperTools()
-                browserPanel.requestDeveloperToolsRefreshAfterNextAttach(reason: "session_restore")
+                if renderRestoredBrowserWebView {
+                    _ = browserPanel.showDeveloperTools()
+                    browserPanel.requestDeveloperToolsRefreshAfterNextAttach(reason: "session_restore")
+                } else {
+                    browserPanel.restoreDeveloperToolsVisibilityIntentForSession()
+                }
             } else {
                 _ = browserPanel.hideDeveloperTools()
             }
@@ -10315,31 +10347,24 @@ final class Workspace: Identifiable, ObservableObject {
         sourceSurface: ghostty_surface_t,
         inheritedConfig: CmuxSurfaceConfigTemplate
     ) -> Float? {
-        let runtimePoints = cmuxCurrentSurfaceFontSizePoints(sourceSurface)
         if let rooted = terminalInheritanceFontPointsByPanelId[terminalPanel.id], rooted > 0 {
-            if let runtimePoints, abs(runtimePoints - rooted) > 0.05 {
-                // Runtime zoom changed after lineage was seeded (manual zoom on descendant);
-                // treat runtime as the new root for future descendants.
-                return runtimePoints
-            }
             return rooted
         }
         if inheritedConfig.fontSize > 0 {
             return inheritedConfig.fontSize
         }
-        return runtimePoints
+        return cmuxCurrentSurfaceFontSizePoints(sourceSurface)
     }
 
-    private func rememberTerminalConfigInheritanceSource(_ terminalPanel: TerminalPanel) {
+    private func rememberTerminalConfigInheritanceSource(_ terminalPanel: TerminalPanel, fontPoints: Float? = nil) {
         lastTerminalConfigInheritancePanelId = terminalPanel.id
-        if let sourceSurface = terminalPanel.surface.surface,
-           let runtimePoints = cmuxCurrentSurfaceFontSizePoints(sourceSurface) {
-            let existing = terminalInheritanceFontPointsByPanelId[terminalPanel.id]
-            if existing == nil || abs((existing ?? runtimePoints) - runtimePoints) > 0.05 {
-                terminalInheritanceFontPointsByPanelId[terminalPanel.id] = runtimePoints
-            }
-            lastTerminalConfigInheritanceFontPoints =
-                terminalInheritanceFontPointsByPanelId[terminalPanel.id] ?? runtimePoints
+        if let fontPoints, fontPoints > 0 {
+            terminalInheritanceFontPointsByPanelId[terminalPanel.id] = fontPoints
+            lastTerminalConfigInheritanceFontPoints = fontPoints
+            return
+        }
+        if let cached = terminalInheritanceFontPointsByPanelId[terminalPanel.id], cached > 0 {
+            lastTerminalConfigInheritanceFontPoints = cached
         }
     }
 
@@ -10451,10 +10476,13 @@ final class Workspace: Identifiable, ObservableObject {
             }
             // Prevent ARC from releasing panel/surface before the C calls above complete.
             withExtendedLifetime((terminalPanel, surface)) {}
-            rememberTerminalConfigInheritanceSource(terminalPanel)
             if config.fontSize > 0 {
                 lastTerminalConfigInheritanceFontPoints = config.fontSize
             }
+            rememberTerminalConfigInheritanceSource(
+                terminalPanel,
+                fontPoints: config.fontSize > 0 ? config.fontSize : nil
+            )
             return config
         }
 

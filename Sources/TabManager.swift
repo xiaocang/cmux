@@ -10024,9 +10024,13 @@ extension TabManager {
         // emissions (empty tabs, nil selectedTabId) that can leave SwiftUI's
         // mountedWorkspaceIds empty and cause a frozen blank launch state (#399).
         var newTabs: [Workspace] = []
-        let workspaceSnapshots = snapshot.workspaces
+        let workspaceSnapshots = Array(snapshot.workspaces
             .prefix(SessionPersistencePolicy.maxWorkspacesPerWindow)
-        for workspaceSnapshot in workspaceSnapshots {
+        )
+        let selectedWorkspaceIndex = snapshot.selectedWorkspaceIndex.flatMap { index in
+            workspaceSnapshots.indices.contains(index) ? index : nil
+        } ?? workspaceSnapshots.indices.first
+        for (workspaceIndex, workspaceSnapshot) in workspaceSnapshots.enumerated() {
             let ordinal = Self.nextPortOrdinal
             Self.nextPortOrdinal += 1
             let workspace = Workspace(
@@ -10035,7 +10039,10 @@ extension TabManager {
                 portOrdinal: ordinal
             )
             workspace.owningTabManager = self
-            workspace.restoreSessionSnapshot(workspaceSnapshot)
+            workspace.restoreSessionSnapshot(
+                workspaceSnapshot,
+                renderRestoredBrowserWebViews: selectedWorkspaceIndex.map { workspaceIndex == $0 } ?? false
+            )
             wireClosedBrowserTracking(for: workspace)
             newTabs.append(workspace)
         }
@@ -10051,7 +10058,7 @@ extension TabManager {
 
         // Determine selection before mutating @Published properties.
         let newSelectedId: UUID?
-        if let selectedWorkspaceIndex = snapshot.selectedWorkspaceIndex,
+        if let selectedWorkspaceIndex,
            newTabs.indices.contains(selectedWorkspaceIndex) {
             newSelectedId = newTabs[selectedWorkspaceIndex].id
         } else {

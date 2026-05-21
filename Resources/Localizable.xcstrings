@@ -8708,6 +8708,40 @@
         }
       }
     },
+    "browser.error.webContentRepeatedCrash.message": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux stopped reloading this page because its WebContent process keeps crashing. Use Reload to try again."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "WebContent プロセスが繰り返しクラッシュするため、cmux はこのページの再読み込みを停止しました。再読み込みで再試行できます。"
+          }
+        }
+      }
+    },
+    "browser.error.webContentRepeatedCrash.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Page crashed repeatedly"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ページが繰り返しクラッシュしました"
+          }
+        }
+      }
+    },
     "browser.externalOpenFailure.copyLink": {
       "extractionState": "manual",
       "localizations": {
@@ -82198,13 +82232,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "How long a browser tab must stay hidden before cmux frees its page memory. Active downloads, popups, developer tools, fullscreen, and loading pages are skipped."
+            "value": "How long a browser tab must stay hidden before cmux frees its page memory. Active downloads, popups, developer tools, and fullscreen pages are skipped."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ブラウザタブが非表示になってから、cmux がページメモリを解放するまでの時間です。進行中のダウンロード、ポップアップ、開発者ツール、フルスクリーン、読み込み中のページは対象外です。"
+            "value": "ブラウザタブが非表示になってから、cmux がページメモリを解放するまでの時間です。進行中のダウンロード、ポップアップ、開発者ツール、フルスクリーンページは対象外です。"
           }
         }
       }

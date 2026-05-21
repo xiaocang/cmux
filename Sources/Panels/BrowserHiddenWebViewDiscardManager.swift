@@ -61,7 +61,6 @@ final class BrowserHiddenWebViewDiscardManager {
         if !snapshot.shouldRenderWebView { blockers.append("not_rendered") }
         if snapshot.hasPendingRemoteNavigation { blockers.append("pending_remote_navigation") }
         if !snapshot.hasCurrentURL { blockers.append("no_url") }
-        if snapshot.isLoading || snapshot.webViewIsLoading { blockers.append("loading") }
         if snapshot.isDownloading || snapshot.activeDownloadCount != 0 { blockers.append("download") }
         if snapshot.preferredDeveloperToolsVisible || snapshot.isDeveloperToolsVisible {
             blockers.append("developer_tools")
