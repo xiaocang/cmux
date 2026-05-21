@@ -1286,8 +1286,6 @@ class TabManager: ObservableObject {
     private var closeConfirmationInFlight = false
     var confirmCloseHandler: ((String, String, Bool) -> Bool)?
     private var agentPIDSweepTimer: DispatchSourceTimer?
-    private var workspaceGitMetadataPollTimer: DispatchSourceTimer?
-    private var selectedWorkspaceGitMetadataPollTimer: DispatchSourceTimer?
     private var workspaceGHPRMetadataRefreshTimer: DispatchSourceTimer?
     private let requestGHPRMetadataRefresh: (String) -> Void
     private let enhancementSystem: CMUXEnhancementAppProviding
@@ -1369,8 +1367,6 @@ class TabManager: ObservableObject {
         }
 
         startAgentPIDSweepTimer()
-        startWorkspaceGitMetadataPollTimer()
-        startSelectedWorkspaceGitMetadataPollTimer()
         startWorkspaceGHPRMetadataRefreshTimer()
         updateWorkspacePullRequestPollTimer()
         updateWorkspaceGitMetadataFallbackTimer()
@@ -1394,8 +1390,6 @@ class TabManager: ObservableObject {
     deinit {
         workspaceCycleCooldownTask?.cancel()
         agentPIDSweepTimer?.cancel()
-        workspaceGitMetadataPollTimer?.cancel()
-        selectedWorkspaceGitMetadataPollTimer?.cancel()
         workspaceGHPRMetadataRefreshTimer?.cancel()
         workspacePullRequestPollTimer?.cancel()
         workspaceGitMetadataFallbackTimer?.cancel()
@@ -1419,42 +1413,6 @@ class TabManager: ObservableObject {
         }
         timer.resume()
         agentPIDSweepTimer = timer
-    }
-
-    /// Periodically refreshes git/PR metadata for tracked workspace branches so
-    /// remote GitHub state changes (e.g. PR open -> merged) reach sidebar state
-    /// even when the local branch/directory does not change.
-    private func startWorkspaceGitMetadataPollTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-        let interval = Self.backgroundPollInterval
-        timer.schedule(deadline: .now() + interval, repeating: interval)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.refreshTrackedWorkspaceGitMetadata()
-            }
-        }
-        timer.resume()
-        workspaceGitMetadataPollTimer = timer
-    }
-
-    /// Refresh the selected workspace more aggressively so branch checkouts and
-    /// newly created PRs show up in the sidebar without waiting for the slower
-    /// background sweep across every tracked workspace.
-    private func startSelectedWorkspaceGitMetadataPollTimer() {
-        let timer = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
-        let interval = Self.selectedPollInterval
-        timer.schedule(deadline: .now() + interval, repeating: interval)
-        timer.setEventHandler { [weak self] in
-            guard let self else { return }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                self.refreshSelectedWorkspaceGitMetadata()
-            }
-        }
-        timer.resume()
-        selectedWorkspaceGitMetadataPollTimer = timer
     }
 
     private func startWorkspaceGHPRMetadataRefreshTimer() {
@@ -6383,6 +6341,7 @@ class TabManager: ObservableObject {
             return
         }
         let current = tab.panelGitBranches[surfaceId]
+        let normalizedBranch = Self.normalizedBranchName(branch) ?? branch
         let nextIsDirty = isDirty ?? (current?.branch == normalizedBranch ? current?.isDirty ?? false : false)
         guard current?.branch != normalizedBranch || current?.isDirty != nextIsDirty else { return }
         tab.updatePanelGitBranch(panelId: surfaceId, branch: normalizedBranch, isDirty: nextIsDirty)

@@ -204,6 +204,7 @@ struct TerminalNotificationPolicyRequest: Sendable {
         title: String,
         subtitle: String,
         body: String,
+        source: TerminalNotificationSource,
         cwd: String?,
         isAppFocused: Bool,
         isFocusedPanel: Bool
@@ -214,6 +215,7 @@ struct TerminalNotificationPolicyRequest: Sendable {
         self.title = title
         self.subtitle = subtitle
         self.body = body
+        self.source = source
         self.cwd = cwd
         self.isAppFocused = isAppFocused
         self.isFocusedPanel = isFocusedPanel
