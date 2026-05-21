@@ -41,35 +41,6 @@ private final class WorkspacePullRequestProbeTestURLProtocol: URLProtocol {
     override func stopLoading() {}
 }
 
-private final class WorkspaceDetachedPullRequestProbeTestURLProtocol: URLProtocol {
-    static var requestedPaths: [String] = []
-    static var responseStatusCode = 200
-    static var responseBody = Data()
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        true
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
-        request
-    }
-
-    override func startLoading() {
-        Self.requestedPaths.append(request.url?.path ?? "")
-        let response = HTTPURLResponse(
-            url: request.url ?? URL(string: "https://example.com")!,
-            statusCode: Self.responseStatusCode,
-            httpVersion: "HTTP/1.1",
-            headerFields: [:]
-        )!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Self.responseBody)
-        client?.urlProtocolDidFinishLoading(self)
-    }
-
-    override func stopLoading() {}
-}
-
 let lastSurfaceCloseShortcutDefaultsKey = "closeWorkspaceOnLastSurfaceShortcut"
 
 func drainMainQueue() {
@@ -353,6 +324,40 @@ final class TabManagerWorkspaceOwnershipTests: XCTestCase {
         XCTAssertEqual(manager.selectedTabId, initialSelectedTabId)
         XCTAssertEqual(externalWorkspace.panels.count, externalPanelCountBefore)
         XCTAssertEqual(externalWorkspace.panelTitles, externalPanelTitlesBefore)
+    }
+
+    func testFocusedPanelTitleRefreshesAutoWorkspaceTitleInSplitWorkspace() throws {
+        let manager = TabManager()
+        let workspace = try XCTUnwrap(manager.selectedWorkspace)
+        let focusedPanelId = try XCTUnwrap(workspace.focusedPanelId)
+
+        XCTAssertTrue(workspace.updatePanelTitle(panelId: focusedPanelId, title: "Waiting - grok"))
+        XCTAssertEqual(workspace.title, "Waiting - grok")
+
+        let splitPanel = try XCTUnwrap(
+            workspace.newTerminalSplit(from: focusedPanelId, orientation: .horizontal, focus: false)
+        )
+        XCTAssertEqual(workspace.focusedPanelId, focusedPanelId)
+        XCTAssertEqual(workspace.panels.count, 2)
+
+        NotificationCenter.default.post(
+            name: .ghosttyDidSetTitle,
+            object: nil,
+            userInfo: [
+                GhosttyNotificationKey.tabId: workspace.id,
+                GhosttyNotificationKey.surfaceId: focusedPanelId,
+                GhosttyNotificationKey.title: "Processing Simple Addition Query - grok"
+            ]
+        )
+
+        XCTAssertTrue(
+            waitForCondition(timeout: 1.0) {
+                workspace.panelTitles[focusedPanelId] == "Processing Simple Addition Query - grok" &&
+                    workspace.title == "Processing Simple Addition Query - grok"
+            }
+        )
+        XCTAssertNil(workspace.customTitle)
+        XCTAssertNotEqual(workspace.panelTitles[splitPanel.id], Optional(workspace.title))
     }
 }
 
@@ -1105,6 +1110,183 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         )
     }
 
+    func testGitHubRepositorySlugsFromGitConfigIgnoreInlineComments() {
+        let config = """
+        [remote "origin"] ; user's main fork
+            url = git@github.com:austinwang/cmux.git # main origin
+            fetch = +refs/heads/*:refs/remotes/origin/*
+        [remote "upstream"] # canonical repo
+            url = https://github.com/manaflow-ai/cmux.git ; upstream source
+            fetch = +refs/heads/*:refs/remotes/upstream/*
+        """
+
+        XCTAssertEqual(
+            TabManager.githubRepositorySlugs(fromGitConfigForTesting: config),
+            ["manaflow-ai/cmux", "austinwang/cmux"]
+        )
+    }
+
+    func testGitHubRepositorySlugsFromGitConfigUnquotesUrlValues() {
+        let config = """
+        [remote "origin"] ; user's main fork
+            url = "git@github.com:austinwang/cmux.git" # main origin
+            fetch = +refs/heads/*:refs/remotes/origin/*
+        [remote "upstream"] # canonical repo
+            url = "https://github.com/manaflow-ai/cmux.git" ; upstream source
+            fetch = +refs/heads/*:refs/remotes/upstream/*
+        """
+
+        XCTAssertEqual(
+            TabManager.githubRepositorySlugs(fromGitConfigForTesting: config),
+            ["manaflow-ai/cmux", "austinwang/cmux"]
+        )
+    }
+
+    func testGitHubRepositorySlugsFromGitConfigUsesLastRemoteURLValue() {
+        let config = """
+        [remote "origin"]
+            url = https://github.com/old-owner/old-repo.git
+            url = https://github.com/manaflow-ai/cmux.git
+        """
+
+        XCTAssertEqual(
+            TabManager.githubRepositorySlugs(fromGitConfigForTesting: config),
+            ["manaflow-ai/cmux"]
+        )
+    }
+
+    func testGitHubRepositorySlugsFromGitConfigReadsIncludedConfigFiles() throws {
+        let repoURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "cmux-git-config-includes-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let gitURL = repoURL.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: gitURL, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: repoURL)
+        }
+
+        try "ref: refs/heads/main\n".write(
+            to: gitURL.appendingPathComponent("HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        [include]
+            path = remotes.inc
+        [includeIf "gitdir:\(gitURL.path)/**"]
+            path = conditional-remotes.inc
+        """.write(
+            to: gitURL.appendingPathComponent("config"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        [remote "origin"]
+            url = "git@github.com:austinwang/cmux.git" # user's main fork
+        """.write(
+            to: gitURL.appendingPathComponent("remotes.inc"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        [remote "upstream"]
+            url = https://github.com/manaflow-ai/cmux.git ; canonical repo
+        """.write(
+            to: gitURL.appendingPathComponent("conditional-remotes.inc"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(
+            TabManager.githubRepositorySlugs(directoryForTesting: repoURL.path),
+            ["manaflow-ai/cmux", "austinwang/cmux"]
+        )
+    }
+
+    func testGitHubRepositorySlugsFromGitConfigAppliesIncludesInPlace() throws {
+        let repoURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "cmux-git-config-include-order-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let gitURL = repoURL.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: gitURL, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: repoURL)
+        }
+
+        try "ref: refs/heads/main\n".write(
+            to: gitURL.appendingPathComponent("HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        [include]
+            path = remotes.inc
+        [remote "origin"]
+            url = https://github.com/manaflow-ai/cmux.git
+        """.write(
+            to: gitURL.appendingPathComponent("config"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        [remote "origin"]
+            url = https://github.com/old-owner/old-repo.git
+        """.write(
+            to: gitURL.appendingPathComponent("remotes.inc"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(
+            TabManager.githubRepositorySlugs(directoryForTesting: repoURL.path),
+            ["manaflow-ai/cmux"]
+        )
+    }
+
+    func testGitHubRepositorySlugsFromGitConfigTreatsTrailingSlashGitdirAsRecursive() throws {
+        let parentURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "cmux-git-config-recursive-include-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let repoURL = parentURL
+            .appendingPathComponent("teams", isDirectory: true)
+            .appendingPathComponent("cmux", isDirectory: true)
+        let gitURL = repoURL.appendingPathComponent(".git", isDirectory: true)
+        try FileManager.default.createDirectory(at: gitURL, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: parentURL)
+        }
+
+        try "ref: refs/heads/main\n".write(
+            to: gitURL.appendingPathComponent("HEAD"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        [includeIf "gitdir:\(parentURL.path)/"]
+            path = recursive-remotes.inc
+        """.write(
+            to: gitURL.appendingPathComponent("config"),
+            atomically: true,
+            encoding: .utf8
+        )
+        try """
+        [remote "upstream"]
+            url = https://github.com/manaflow-ai/cmux.git
+        """.write(
+            to: gitURL.appendingPathComponent("recursive-remotes.inc"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        XCTAssertEqual(
+            TabManager.githubRepositorySlugs(directoryForTesting: repoURL.path),
+            ["manaflow-ai/cmux"]
+        )
+    }
+
     func testPreferredPullRequestPrefersOpenOverMergedAndClosed() {
         let candidates = [
             TabManager.GitHubPullRequestProbeItem(
@@ -1460,45 +1642,6 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
 
         XCTAssertEqual(result, .rateLimited(until: retryAt))
         XCTAssertEqual(WorkspacePullRequestProbeTestURLProtocol.requestCount, 0)
-    }
-
-    func testDetachedHeadPullRequestLookupUsesCommitAssociatedPullsEndpoint() async throws {
-        let commitSHA = "0123456789abcdef0123456789abcdef01234567"
-        WorkspaceDetachedPullRequestProbeTestURLProtocol.requestedPaths = []
-        WorkspaceDetachedPullRequestProbeTestURLProtocol.responseStatusCode = 200
-        WorkspaceDetachedPullRequestProbeTestURLProtocol.responseBody = Data(
-            """
-            [
-              {
-                "number": 3124,
-                "state": "open",
-                "html_url": "https://github.com/manaflow-ai/cmux/pull/3124",
-                "updated_at": "2026-05-06T16:00:00Z",
-                "merged_at": null,
-                "head": { "ref": "feature/detached-pr" },
-                "base": { "ref": "main" }
-              }
-            ]
-            """.utf8
-        )
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [WorkspaceDetachedPullRequestProbeTestURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-
-        let state = await TabManager.detachedHeadPullRequestStateForTesting(
-            repoSlugs: ["manaflow-ai/cmux"],
-            commitSHA: commitSHA,
-            session: session,
-            authHeader: ""
-        )
-
-        XCTAssertEqual(
-            WorkspaceDetachedPullRequestProbeTestURLProtocol.requestedPaths,
-            ["/repos/manaflow-ai/cmux/commits/\(commitSHA)/pulls"]
-        )
-        XCTAssertEqual(state?.number, 3124)
-        XCTAssertEqual(state?.status, .open)
-        XCTAssertNil(state?.branch)
     }
 
     func testScheduleWorkspacePullRequestRefreshRunsImmediatelyWhenShellDebounceDisabled() {

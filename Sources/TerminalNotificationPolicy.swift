@@ -188,6 +188,7 @@ struct TerminalNotificationPolicyEnvelope: Codable, Sendable, Equatable {
 struct TerminalNotificationPolicyRequest: Sendable {
     let tabId: UUID
     let surfaceId: UUID?
+    let panelId: UUID?
     let title: String
     let subtitle: String
     let body: String
@@ -195,6 +196,28 @@ struct TerminalNotificationPolicyRequest: Sendable {
     let cwd: String?
     let isAppFocused: Bool
     let isFocusedPanel: Bool
+
+    init(
+        tabId: UUID,
+        surfaceId: UUID?,
+        panelId: UUID? = nil,
+        title: String,
+        subtitle: String,
+        body: String,
+        cwd: String?,
+        isAppFocused: Bool,
+        isFocusedPanel: Bool
+    ) {
+        self.tabId = tabId
+        self.surfaceId = surfaceId
+        self.panelId = panelId
+        self.title = title
+        self.subtitle = subtitle
+        self.body = body
+        self.cwd = cwd
+        self.isAppFocused = isAppFocused
+        self.isFocusedPanel = isFocusedPanel
+    }
 }
 
 struct TerminalNotificationPolicyFailure: Error, Sendable, Hashable {

@@ -26,6 +26,62 @@ export interface VersionMedia {
 }
 
 export const changelogMedia: Record<string, VersionMedia> = {
+  "0.64.7": {
+    title:
+      "Grok Build CLI, Browser Memory & Background Preload, Conversation Forks",
+    features: [
+      {
+        title: "Grok Build CLI Integration",
+        description:
+          "Grok Build joins the supported coding-agent lineup with notifications, task manager attribution, and session restore, the same way Claude, Codex, and Gemini already work in cmux.",
+      },
+      {
+        title: "Browser Memory Reclaim and Background Preload",
+        description:
+          "Hidden browser webviews can now discard their renderer process to release memory and reappear instantly when you switch back. CLI-created browser panes preload offscreen so the page is ready the moment the workspace becomes visible. Thanks @lidge-jun for the community contributions.",
+      },
+      {
+        title: "Agent Conversation Forks",
+        description:
+          "New socket commands let you fork an agent conversation off its current turn, so you can branch into a what-if without losing the original thread.",
+      },
+      {
+        title: "Crash Diagnostics from Notifications",
+        description:
+          "When cmux logs a crash, the notification now opens directly into the crash diagnostics view so you can inspect the breadcrumb trail without digging through state.",
+      },
+      {
+        title: "Bug Fixes",
+        description:
+          "Fixes for browser deep-link popups (slack://, discord://, zoom://), Cmd-click reload duplicating browser tabs, omnibar arrow key focus races, light-theme foreground rendering with conditional themes, Cmd-hover bounds for spaced file paths, markdown viewer image rendering, surface tab bar action button clipping, task manager attribution, SSH pane sibling kills, background workspace PTY startup, browser IME candidate windows for Japanese / Zhuyin, ripgrep resolution on Nix installs, and Claude sidebar resume config dir overrides.",
+      },
+    ],
+  },
+  "0.64.6": {
+    title: "SSH Typing Restored, Command Palette Settings Toggles",
+    features: [
+      {
+        title: "SSH Typing Restored",
+        description:
+          "Fixes a critical regression in 0.64.5 where cmux ssh sessions would connect and render the remote prompt but drop every keystroke. The backgrounded ssh inside the startup wrapper now inherits the wrapper's stdin via <&0, so typing reaches the remote shell again. Thanks @kays0x for the community fix.",
+      },
+      {
+        title: "Command Palette Settings Toggles",
+        description:
+          "Boolean Settings rows are now reachable from the command palette, including iMessage Mode. Toggle features without opening Settings.",
+      },
+      {
+        title: "Sidebar Reorder Stays in View",
+        description:
+          "Reordering a selected workspace now keeps it visible — the sidebar scrolls along so the selected item never disappears off-screen after a move.",
+      },
+      {
+        title: "Cloud VM Error Guidance",
+        description:
+          "cmux vm errors now include actionable next steps: sign-in instructions when not authenticated, suggested fixes for unknown flags, and usage examples for missing arguments.",
+      },
+    ],
+  },
   "0.64.5": {
     title: "Codex Teams, Menubar Global Search, Markdown Viewer, Feed by Default",
     features: [
