@@ -10122,7 +10122,3 @@ enum BrowserFirstResponderNotificationUserInfoKey {
 }
 
 extension TabManager: CMUXLeaderModeOwner {}
-
-enum BrowserFirstResponderNotificationUserInfoKey {
-    static let pointerInitiated = "pointerInitiated"
-}

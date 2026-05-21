@@ -682,12 +682,14 @@ struct SortAssistantThreadView: View {
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
         } else {
             Text(markdown)
                 .font(.system(size: 10))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
         }
     }
