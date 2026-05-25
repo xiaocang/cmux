@@ -5580,6 +5580,8 @@ struct SettingsView: View {
     private var fileDropDefaultBehavior = FileDropBehaviorSettings.defaultBehavior.rawValue
     @AppStorage(AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey)
     private var autoResumeAgentSessions = AgentSessionAutoResumeSettings.defaultAutoResumeAgentSessions
+    @AppStorage(LiveShellSettings.key)
+    private var terminalShellBackendRaw = LiveShellSettings.defaultBackend.rawValue
     @AppStorage(WorkspaceAutoReorderSettings.key) private var workspaceAutoReorder = WorkspaceAutoReorderSettings.defaultValue
     @AppStorage(IMessageModeSettings.key) private var iMessageMode = IMessageModeSettings.defaultValue
     @AppStorage(SidebarWorkspaceDetailSettings.hideAllDetailsKey)
@@ -5785,6 +5787,31 @@ struct SettingsView: View {
                 AgentSessionAutoResumeSettings.notifyDidChange()
             }
         )
+    }
+
+    private var selectedTerminalShellBackend: LiveShellBackend {
+        LiveShellBackend(rawValue: terminalShellBackendRaw) ?? LiveShellSettings.defaultBackend
+    }
+
+    private var terminalShellBackendSubtitle: String {
+        switch selectedTerminalShellBackend {
+        case .direct:
+            return String(
+                localized: "settings.terminal.shellBackend.subtitle.direct",
+                defaultValue: "New terminal panes spawn the shell directly under cmux. Existing behavior."
+            )
+        case .livesh:
+            if LiveShellSettings.resolvedLiveshExecutable() != nil {
+                return String(
+                    localized: "settings.terminal.shellBackend.subtitle.livesh",
+                    defaultValue: "Wrap new shells in livesh so the PTY survives cmux quitting and can be reattached."
+                )
+            }
+            return String(
+                localized: "settings.terminal.shellBackend.subtitle.liveshMissing",
+                defaultValue: "livesh binary not found. Install it to ~/.local/bin/livesh or set terminal.liveshExecutablePath. Until then, new shells fall back to direct."
+            )
+        }
     }
 
     private var selectedSidebarActiveTabIndicatorStyle: SidebarActiveTabIndicatorStyle {
@@ -7149,6 +7176,24 @@ struct SettingsView: View {
                                     String(localized: "settings.terminal.agentAutoResume", defaultValue: "Resume Agent Sessions on Reopen")
                                 )
                         }
+
+                        SettingsCardDivider()
+
+                        SettingsPickerRow(
+                            configurationReview: .json("terminal.shellBackend"),
+                            String(localized: "settings.terminal.shellBackend", defaultValue: "Shell Backend"),
+                            subtitle: terminalShellBackendSubtitle,
+                            controlWidth: pickerColumnWidth,
+                            selection: $terminalShellBackendRaw
+                        ) {
+                            ForEach(LiveShellBackend.allCases) { backend in
+                                Text(backend.displayName).tag(backend.rawValue)
+                            }
+                        }
+                        .settingsSearchAnchor(
+                            SettingsSearchIndex.settingID(for: .terminal, idSuffix: "shell-backend")
+                        )
+                        .accessibilityIdentifier("SettingsTerminalShellBackendPicker")
                     }
 
                     SurfaceResumeApprovalSettingsCard()
@@ -8699,6 +8744,9 @@ struct SettingsView: View {
         if previousAutoResumeAgentSessions != autoResumeAgentSessions {
             AgentSessionAutoResumeSettings.notifyDidChange()
         }
+        terminalShellBackendRaw = LiveShellSettings.defaultBackend.rawValue
+        defaults.removeObject(forKey: LiveShellSettings.liveshExecutableKey)
+        defaults.removeObject(forKey: LiveShellSettings.liveshctlExecutableKey)
         workspaceAutoReorder = WorkspaceAutoReorderSettings.defaultValue
         iMessageMode = IMessageModeSettings.defaultValue
         sidebarHideAllDetails = SidebarWorkspaceDetailSettings.defaultHideAllDetails

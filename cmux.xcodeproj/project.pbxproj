@@ -139,6 +139,11 @@
 		988C6A036BA56EA5759A95A0 /* SidebarWorkspaceSnapshotRefreshPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = D50D9BCE46701FBA91C2EFB6 /* SidebarWorkspaceSnapshotRefreshPolicy.swift */; };
 		D35450010000000000000001 /* SidebarWorkspaceRowHoverTracker.swift in Sources */ = {isa = PBXBuildFile; fileRef = D35450020000000000000002 /* SidebarWorkspaceRowHoverTracker.swift */; };
 		A11EAB000000000000000000 /* AppearanceSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11EAB000000000000000001 /* AppearanceSettings.swift */; };
+		D1A9E5510000000000000A01 /* LiveShellSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A9E5510000000000000A02 /* LiveShellSettings.swift */; };
+		D1A9E5520000000000000A01 /* LiveShellControl.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A9E5520000000000000A02 /* LiveShellControl.swift */; };
+		D1A9E5530000000000000A01 /* LiveShellCommandPaletteActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A9E5530000000000000A02 /* LiveShellCommandPaletteActions.swift */; };
+		D1A9E5540000000000000A01 /* LiveShellChildExitHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A9E5540000000000000A02 /* LiveShellChildExitHandler.swift */; };
+		D1A9E5550000000000000A01 /* LiveShellResumeParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A9E5550000000000000A02 /* LiveShellResumeParser.swift */; };
 		A5001001 /* cmuxApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A5001011 /* cmuxApp.swift */; };
 		C0DE50100000000000000001 /* CMUXPluginSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE50100000000000000002 /* CMUXPluginSystem.swift */; };
 		C0DE50200000000000000001 /* CMUXEnhancementSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE50200000000000000002 /* CMUXEnhancementSystem.swift */; };
@@ -680,6 +685,11 @@
 		B37A0000000000000000000E /* RightSidebarRemoteCommand.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RightSidebarRemoteCommand.swift; sourceTree = "<group>"; };
 		B37A00000000000000000006 /* MainWindowFocusTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainWindowFocusTypes.swift; sourceTree = "<group>"; };
 		A11EAB000000000000000001 /* AppearanceSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceSettings.swift; sourceTree = "<group>"; };
+		D1A9E5510000000000000A02 /* LiveShellSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveShellSettings.swift; sourceTree = "<group>"; };
+		D1A9E5520000000000000A02 /* LiveShellControl.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveShellControl.swift; sourceTree = "<group>"; };
+		D1A9E5530000000000000A02 /* LiveShellCommandPaletteActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveShellCommandPaletteActions.swift; sourceTree = "<group>"; };
+		D1A9E5540000000000000A02 /* LiveShellChildExitHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveShellChildExitHandler.swift; sourceTree = "<group>"; };
+		D1A9E5550000000000000A02 /* LiveShellResumeParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveShellResumeParser.swift; sourceTree = "<group>"; };
 		A11EAC000000000000000001 /* GhosttyTerminalAppearance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GhosttyTerminalAppearance.swift; sourceTree = "<group>"; };
 		A11EAD000000000000000001 /* WorkspaceAppearanceResolution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceAppearanceResolution.swift; sourceTree = "<group>"; };
 		A11EAE000000000000000001 /* WorkspaceAppearanceConfigResolutionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceAppearanceConfigResolutionTests.swift; sourceTree = "<group>"; };
@@ -1263,6 +1273,11 @@
 				3023B1003023B1003023B100 /* ConfigSource.swift */,
 				3023B1013023B1013023B101 /* ConfigSettingsView.swift */,
 				A11EAB000000000000000001 /* AppearanceSettings.swift */,
+				D1A9E5510000000000000A02 /* LiveShellSettings.swift */,
+				D1A9E5520000000000000A02 /* LiveShellControl.swift */,
+				D1A9E5530000000000000A02 /* LiveShellCommandPaletteActions.swift */,
+				D1A9E5540000000000000A02 /* LiveShellChildExitHandler.swift */,
+				D1A9E5550000000000000A02 /* LiveShellResumeParser.swift */,
 				A11EAC000000000000000001 /* GhosttyTerminalAppearance.swift */,
 				A11EAD000000000000000001 /* WorkspaceAppearanceResolution.swift */,
 				A5001011 /* cmuxApp.swift */,
@@ -2054,6 +2069,11 @@
 				3023A1003023A1003023A100 /* ConfigSource.swift in Sources */,
 				3023A1013023A1013023A101 /* ConfigSettingsView.swift in Sources */,
 				A11EAB000000000000000000 /* AppearanceSettings.swift in Sources */,
+				D1A9E5510000000000000A01 /* LiveShellSettings.swift in Sources */,
+				D1A9E5520000000000000A01 /* LiveShellControl.swift in Sources */,
+				D1A9E5530000000000000A01 /* LiveShellCommandPaletteActions.swift in Sources */,
+				D1A9E5540000000000000A01 /* LiveShellChildExitHandler.swift in Sources */,
+				D1A9E5550000000000000A01 /* LiveShellResumeParser.swift in Sources */,
 				A11EAC000000000000000000 /* GhosttyTerminalAppearance.swift in Sources */,
 				A11EAD000000000000000000 /* WorkspaceAppearanceResolution.swift in Sources */,
 				A5001001 /* cmuxApp.swift in Sources */,

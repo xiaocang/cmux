@@ -81,6 +81,9 @@ extension CmuxSettingsFileStore {
                 "terminal": [
                     "showScrollBar": TerminalScrollBarSettings.defaultShowScrollBar,
                     "autoResumeAgentSessions": AgentSessionAutoResumeSettings.defaultAutoResumeAgentSessions,
+                    "shellBackend": LiveShellSettings.defaultBackend.rawValue,
+                    "liveshExecutablePath": "",
+                    "liveshctlExecutablePath": "",
                 ],
             ],
             [

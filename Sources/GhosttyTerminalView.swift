@@ -4058,6 +4058,11 @@ class GhosttyApp {
                 increments: ["probeShowChildExitedCount": 1]
             )
 #endif
+            // Snapshot the exit code from the action union before the union is invalidated.
+            // Use truncatingIfNeeded since Ghostty's exit_code is a uint32_t; we only compare
+            // against the low-byte POSIX exit codes (66, 69), so the upper bits are irrelevant
+            // and a checked Int32() init would trap on values like 0xFFFFFFFF.
+            let exitCode = Int32(truncatingIfNeeded: action.action.child_exited.exit_code)
             // Keep host-close async to avoid re-entrant close/deinit while Ghostty is still
             // dispatching this action callback.
             DispatchQueue.main.async {
@@ -4067,7 +4072,17 @@ class GhosttyApp {
                    let manager = app.tabManagerFor(tabId: callbackTabId) ?? app.tabManager,
                    let workspace = manager.tabs.first(where: { $0.id == callbackTabId }),
                    workspace.panels[callbackSurfaceId] != nil {
-                    manager.closePanelAfterChildExited(tabId: callbackTabId, surfaceId: callbackSurfaceId)
+                    // If the child was a livesh bridge and exited with a livesh-specific code,
+                    // surface the reason to the user before the pane disappears. Otherwise fall
+                    // through to the normal child-exit close path.
+                    let liveShellHandled = LiveShellChildExitHandler.handleIfRelevant(
+                        workspace: workspace,
+                        panelId: callbackSurfaceId,
+                        exitCode: exitCode
+                    )
+                    if !liveShellHandled {
+                        manager.closePanelAfterChildExited(tabId: callbackTabId, surfaceId: callbackSurfaceId)
+                    }
                 }
             }
             // Always report handled so Ghostty doesn't print the fallback prompt.
@@ -5836,6 +5851,16 @@ final class TerminalSurface: Identifiable, ObservableObject {
         let resolvedCommand: String? = {
             if let initialCommand, !initialCommand.isEmpty {
                 return initialCommand
+            }
+            if let baseCommand = baseConfig.command, !baseCommand.isEmpty {
+                return baseCommand
+            }
+            // Fall back to livesh when the user opted in via terminal.shellBackend.
+            // Skipped if a base command (e.g. Ghostty's `command =` config) is already set
+            // so we don't double-wrap a shell that's already wrapped.
+            if LiveShellSettings.current() == .livesh,
+               let liveshPath = LiveShellSettings.resolvedLiveshExecutable() {
+                return liveshPath
             }
             return baseConfig.command
         }()
