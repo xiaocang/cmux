@@ -573,6 +573,21 @@ def test_live_socket_injects_supported_hooks_without_unlocking_bypass(failures: 
             f"{hook_name} hook should have async:true, got {tool_hooks}",
             failures,
         )
+    subagent_stop_hooks = hooks.get("SubagentStop", [{}])[0].get("hooks", [{}])
+    expect(
+        any(
+            h.get("command") == '"${CMUX_CLAUDE_HOOK_CMUX_BIN:-cmux}" hooks feed --source claude'
+            and h.get("async") is True
+            for h in subagent_stop_hooks
+        ),
+        f"SubagentStop hook should call hooks feed asynchronously, got {subagent_stop_hooks}",
+        failures,
+    )
+    expect(
+        not any("hooks claude stop" in h.get("command", "") for h in subagent_stop_hooks),
+        f"SubagentStop hook should not call the visible stop hook, got {subagent_stop_hooks}",
+        failures,
+    )
     # SessionEnd should have a short timeout (session is exiting)
     session_end_hooks = hooks.get("SessionEnd", [{}])[0].get("hooks", [{}])
     expect(

@@ -507,6 +507,11 @@ private struct ClaudeHookSessionRecord: Codable {
     var lastEmittedNotificationFingerprint: String?
     var lastEmittedNotificationAt: TimeInterval?
     var runtimeStatus: AgentHookRuntimeStatus?
+    var activePromptDepth: Int?
+    var activePromptTurnId: String?
+    var activePromptTurnIds: [String]?
+    var lastPromptTurnId: String?
+    var terminalPromptTurnIds: [String]?
     var startedAt: TimeInterval
     var updatedAt: TimeInterval
 }
@@ -565,6 +570,7 @@ private struct ClaudeHookSessionStoreFile: Codable {
 private final class ClaudeHookSessionStore {
     private static let defaultStatePath = "~/.cmuxterm/claude-hook-sessions.json"
     private static let maxStateAgeSeconds: TimeInterval = 60 * 60 * 24 * 7
+    private static let maxRememberedTerminalPromptTurnIds = 32
 
     private let statePath: String
     private let fileManager: FileManager
@@ -595,6 +601,241 @@ private final class ClaudeHookSessionStore {
         guard !normalized.isEmpty else { return nil }
         return try withLockedState { state in
             state.sessions[normalized]
+        }
+    }
+
+    @discardableResult
+    func recordPromptSubmit(
+        sessionId: String,
+        workspaceId: String,
+        surfaceId: String,
+        cwd: String?,
+        transcriptPath: String? = nil,
+        turnId: String? = nil,
+        previousActivePromptTurnIsTerminal: Bool = false,
+        terminalActivePromptTurnIds: Set<String> = [],
+        pid: Int?,
+        launchCommand: AgentHookLaunchCommandRecord?,
+        runtimeStatus: AgentHookRuntimeStatus? = nil,
+        updateRuntimeStatus: Bool = false
+    ) throws -> Bool {
+        let normalized = normalizeSessionId(sessionId)
+        guard !normalized.isEmpty else { return false }
+        return try withLockedState { state in
+            let now = Date().timeIntervalSince1970
+            var record = makeSessionRecord(
+                state: state,
+                sessionId: normalized,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                now: now
+            )
+            update(
+                &record,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                cwd: cwd,
+                transcriptPath: transcriptPath,
+                pid: pid,
+                launchCommand: launchCommand,
+                isRestorable: nil,
+                lastSubtitle: nil,
+                lastBody: nil,
+                lastNotificationStatus: nil,
+                updateLastNotificationStatus: false,
+                runtimeStatus: runtimeStatus,
+                updateRuntimeStatus: updateRuntimeStatus,
+                now: now
+            )
+            let normalizedTurnId = normalizeOptional(turnId)
+            if let normalizedTurnId {
+                markPromptTurnActive(normalizedTurnId, on: &record)
+                var turnStack = activePromptTurnStack(from: record)
+                let legacyDepth = max(0, record.activePromptDepth ?? 0)
+                if turnStack.isEmpty, legacyDepth > 0 {
+                    record.activePromptDepth = legacyDepth + 1
+                    record.activePromptTurnId = nil
+                    record.activePromptTurnIds = nil
+                    record.lastPromptTurnId = normalizedTurnId
+                    state.sessions[normalized] = record
+                    return true
+                } else if let activeTurnId = turnStack.last,
+                          activeTurnId != normalizedTurnId {
+                    var removedTurnCount = 0
+                    var removedTerminalTurnIds: [String] = []
+                    if previousActivePromptTurnIsTerminal {
+                        removedTerminalTurnIds.append(turnStack.removeLast())
+                        removedTurnCount += 1
+                        while let activeTurnId = turnStack.last,
+                              terminalActivePromptTurnIds.contains(activeTurnId) {
+                            removedTerminalTurnIds.append(turnStack.removeLast())
+                            removedTurnCount += 1
+                        }
+                    }
+                    let totalDepth = max(0, max(legacyDepth, turnStack.count + removedTurnCount) - removedTurnCount) + 1
+                    turnStack.append(normalizedTurnId)
+                    setActivePromptTurnStack(turnStack, totalDepth: totalDepth, on: &record)
+                    markPromptTurnsTerminal(removedTerminalTurnIds, on: &record)
+                    record.lastPromptTurnId = normalizedTurnId
+                    state.sessions[normalized] = record
+                    return totalDepth > 1
+                }
+                let totalDepth = max(legacyDepth, turnStack.count) + 1
+                turnStack.append(normalizedTurnId)
+                setActivePromptTurnStack(turnStack, totalDepth: totalDepth, on: &record)
+                record.lastPromptTurnId = normalizedTurnId
+                state.sessions[normalized] = record
+                return totalDepth > 1
+            }
+            let existingTurnStackDepth = activePromptTurnStack(from: record).count
+            record.activePromptDepth = max(max(0, record.activePromptDepth ?? 0), existingTurnStackDepth) + 1
+            state.sessions[normalized] = record
+            return (record.activePromptDepth ?? 0) > 1
+        }
+    }
+
+    @discardableResult
+    func recordPromptStop(
+        sessionId: String,
+        workspaceId: String,
+        surfaceId: String,
+        cwd: String?,
+        transcriptPath: String? = nil,
+        turnId: String? = nil,
+        terminalActivePromptTurnIds: Set<String> = [],
+        pid: Int?,
+        launchCommand: AgentHookLaunchCommandRecord?,
+        lastSubtitle: String?,
+        lastBody: String?,
+        lastNotificationStatus: AgentHookNotificationStatus? = nil,
+        updateLastNotificationStatus: Bool = false,
+        runtimeStatus: AgentHookRuntimeStatus? = nil,
+        updateRuntimeStatus: Bool = false
+    ) throws -> Bool {
+        let normalized = normalizeSessionId(sessionId)
+        guard !normalized.isEmpty else { return false }
+        return try withLockedState { state in
+            let now = Date().timeIntervalSince1970
+            var record = makeSessionRecord(
+                state: state,
+                sessionId: normalized,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                now: now
+            )
+            let depthBeforeStop = max(0, record.activePromptDepth ?? 0)
+            update(
+                &record,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                cwd: cwd,
+                transcriptPath: transcriptPath,
+                pid: pid,
+                launchCommand: launchCommand,
+                isRestorable: nil,
+                lastSubtitle: lastSubtitle,
+                lastBody: lastBody,
+                lastNotificationStatus: lastNotificationStatus,
+                updateLastNotificationStatus: updateLastNotificationStatus,
+                runtimeStatus: runtimeStatus,
+                updateRuntimeStatus: updateRuntimeStatus,
+                now: now
+            )
+            let depthAfterStop = max(0, depthBeforeStop - 1)
+            let normalizedTurnId = normalizeOptional(turnId)
+            if let normalizedTurnId {
+                var turnStack = activePromptTurnStack(from: record)
+                var totalDepthBeforeStop = max(depthBeforeStop, turnStack.count)
+                let terminalTurnIdsToPrune = terminalActivePromptTurnIds.subtracting([normalizedTurnId])
+                if !terminalTurnIdsToPrune.isEmpty {
+                    var removedTerminalTurnIds: [String] = []
+                    turnStack.removeAll { activeTurnId in
+                        if terminalTurnIdsToPrune.contains(activeTurnId) {
+                            removedTerminalTurnIds.append(activeTurnId)
+                            return true
+                        }
+                        return false
+                    }
+                    if !removedTerminalTurnIds.isEmpty {
+                        totalDepthBeforeStop = max(0, totalDepthBeforeStop - removedTerminalTurnIds.count)
+                        setActivePromptTurnStack(turnStack, totalDepth: totalDepthBeforeStop, on: &record)
+                        markPromptTurnsTerminal(removedTerminalTurnIds, on: &record)
+                    }
+                }
+                if let lastTurnId = turnStack.last {
+                    if lastTurnId == normalizedTurnId {
+                        let nested = totalDepthBeforeStop > 1
+                        turnStack.removeLast()
+                        setActivePromptTurnStack(
+                            turnStack,
+                            totalDepth: max(0, totalDepthBeforeStop - 1),
+                            on: &record
+                        )
+                        markPromptTurnTerminal(normalizedTurnId, on: &record)
+                        state.sessions[normalized] = record
+                        return nested
+                    }
+                    if let staleIndex = turnStack.lastIndex(of: normalizedTurnId) {
+                        turnStack.remove(at: staleIndex)
+                        setActivePromptTurnStack(
+                            turnStack,
+                            totalDepth: max(0, totalDepthBeforeStop - 1),
+                            on: &record
+                        )
+                        markPromptTurnTerminal(normalizedTurnId, on: &record)
+                    } else if depthBeforeStop > turnStack.count {
+                        setActivePromptTurnStack(
+                            turnStack,
+                            totalDepth: max(0, totalDepthBeforeStop - 1),
+                            on: &record
+                        )
+                        markPromptTurnTerminal(normalizedTurnId, on: &record)
+                    }
+                    state.sessions[normalized] = record
+                    return true
+                }
+                if totalDepthBeforeStop == 0, terminalPromptTurnSet(from: record).contains(normalizedTurnId) {
+                    state.sessions[normalized] = record
+                    return true
+                }
+                markPromptTurnTerminal(normalizedTurnId, on: &record)
+                if totalDepthBeforeStop == 0 {
+                    state.sessions[normalized] = record
+                    return false
+                }
+                let depthAfterTurnStop = max(0, totalDepthBeforeStop - 1)
+                if depthAfterTurnStop == 0 {
+                    record.activePromptDepth = nil
+                } else {
+                    record.activePromptDepth = depthAfterTurnStop
+                }
+                record.activePromptTurnId = nil
+                record.activePromptTurnIds = nil
+                state.sessions[normalized] = record
+                return totalDepthBeforeStop > 1
+            }
+            if depthAfterStop == 0 {
+                record.activePromptDepth = nil
+                record.activePromptTurnId = nil
+                record.activePromptTurnIds = nil
+            } else {
+                let turnStack = activePromptTurnStack(from: record)
+                if !turnStack.isEmpty {
+                    setActivePromptTurnStack(
+                        Array(turnStack.prefix(depthAfterStop)),
+                        totalDepth: depthAfterStop,
+                        on: &record
+                    )
+                } else {
+                    record.activePromptDepth = depthAfterStop
+                }
+                if let normalizedTurnId, turnStack.isEmpty {
+                    record.activePromptTurnId = normalizedTurnId
+                    record.activePromptTurnIds = Array(repeating: normalizedTurnId, count: depthAfterStop)
+                }
+            }
+            state.sessions[normalized] = record
+            return depthBeforeStop > 1
         }
     }
 
@@ -636,43 +877,31 @@ private final class ClaudeHookSessionStore {
                 lastEmittedNotificationFingerprint: nil,
                 lastEmittedNotificationAt: nil,
                 runtimeStatus: nil,
+                activePromptDepth: nil,
+                activePromptTurnId: nil,
+                activePromptTurnIds: nil,
+                lastPromptTurnId: nil,
+                terminalPromptTurnIds: nil,
                 startedAt: now,
                 updatedAt: now
             )
-            record.workspaceId = workspaceId
-            if !surfaceId.isEmpty {
-                record.surfaceId = surfaceId
-            }
-            if let cwd = normalizeOptional(cwd) {
-                record.cwd = cwd
-            }
-            if let transcriptPath = normalizeOptional(transcriptPath) {
-                record.transcriptPath = transcriptPath
-            }
-            if let pid {
-                record.pid = pid
-            }
-            if let launchCommand, !launchCommand.arguments.isEmpty {
-                record.launchCommand = launchCommand
-            }
-            if let isRestorable {
-                // Preserve sticky true: a later isRestorable=false must not clear
-                // record.isRestorable=true from a transcript-backed event.
-                record.isRestorable = isRestorable || record.isRestorable == true
-            }
-            if let subtitle = normalizeOptional(lastSubtitle) {
-                record.lastSubtitle = subtitle
-            }
-            if let body = normalizeOptional(lastBody) {
-                record.lastBody = body
-            }
-            if updateLastNotificationStatus {
-                record.lastNotificationStatus = lastNotificationStatus
-            }
-            if updateRuntimeStatus {
-                record.runtimeStatus = runtimeStatus
-            }
-            record.updatedAt = now
+            update(
+                &record,
+                workspaceId: workspaceId,
+                surfaceId: surfaceId,
+                cwd: cwd,
+                transcriptPath: transcriptPath,
+                pid: pid,
+                launchCommand: launchCommand,
+                isRestorable: isRestorable,
+                lastSubtitle: lastSubtitle,
+                lastBody: lastBody,
+                lastNotificationStatus: lastNotificationStatus,
+                updateLastNotificationStatus: updateLastNotificationStatus,
+                runtimeStatus: runtimeStatus,
+                updateRuntimeStatus: updateRuntimeStatus,
+                now: now
+            )
             state.sessions[normalized] = record
             if markActive, let normalizedWorkspace = normalizeOptional(workspaceId) {
                 state.activeSessionsByWorkspace[normalizedWorkspace] = ClaudeHookActiveSessionRecord(
@@ -683,6 +912,149 @@ private final class ClaudeHookSessionStore {
                 )
             }
         }
+    }
+
+    private func makeSessionRecord(
+        state: ClaudeHookSessionStoreFile,
+        sessionId: String,
+        workspaceId: String,
+        surfaceId: String,
+        now: TimeInterval
+    ) -> ClaudeHookSessionRecord {
+        state.sessions[sessionId] ?? ClaudeHookSessionRecord(
+            sessionId: sessionId,
+            workspaceId: workspaceId,
+            surfaceId: surfaceId,
+            cwd: nil,
+            transcriptPath: nil,
+            pid: nil,
+            launchCommand: nil,
+            isRestorable: nil,
+            lastSubtitle: nil,
+            lastBody: nil,
+            lastNotificationStatus: nil,
+            lastEmittedNotificationFingerprint: nil,
+            lastEmittedNotificationAt: nil,
+            runtimeStatus: nil,
+            activePromptDepth: nil,
+            activePromptTurnId: nil,
+            activePromptTurnIds: nil,
+            lastPromptTurnId: nil,
+            terminalPromptTurnIds: nil,
+            startedAt: now,
+            updatedAt: now
+        )
+    }
+
+    private func activePromptTurnStack(from record: ClaudeHookSessionRecord) -> [String] {
+        if let activePromptTurnIds = record.activePromptTurnIds {
+            let normalized = activePromptTurnIds.compactMap { normalizeOptional($0) }
+            if !normalized.isEmpty {
+                return normalized
+            }
+        }
+        if let activePromptTurnId = normalizeOptional(record.activePromptTurnId) {
+            return [activePromptTurnId]
+        }
+        return []
+    }
+
+    private func setActivePromptTurnStack(_ stack: [String], totalDepth: Int? = nil, on record: inout ClaudeHookSessionRecord) {
+        let normalizedStack = stack.compactMap { normalizeOptional($0) }
+        let resolvedDepth = max(max(0, totalDepth ?? normalizedStack.count), normalizedStack.count)
+        if resolvedDepth == 0 {
+            record.activePromptDepth = nil
+            record.activePromptTurnId = nil
+            record.activePromptTurnIds = nil
+        } else {
+            record.activePromptDepth = resolvedDepth
+            record.activePromptTurnId = normalizedStack.last
+            record.activePromptTurnIds = normalizedStack.isEmpty ? nil : normalizedStack
+        }
+    }
+
+    private func terminalPromptTurnStack(from record: ClaudeHookSessionRecord) -> [String] {
+        record.terminalPromptTurnIds?.compactMap { normalizeOptional($0) } ?? []
+    }
+
+    private func terminalPromptTurnSet(from record: ClaudeHookSessionRecord) -> Set<String> {
+        Set(terminalPromptTurnStack(from: record))
+    }
+
+    private func markPromptTurnActive(_ turnId: String, on record: inout ClaudeHookSessionRecord) {
+        var terminalTurnIds = terminalPromptTurnStack(from: record)
+        terminalTurnIds.removeAll { $0 == turnId }
+        record.terminalPromptTurnIds = terminalTurnIds.isEmpty ? nil : terminalTurnIds
+    }
+
+    private func markPromptTurnsTerminal(_ turnIds: [String], on record: inout ClaudeHookSessionRecord) {
+        for turnId in turnIds {
+            markPromptTurnTerminal(turnId, on: &record)
+        }
+    }
+
+    private func markPromptTurnTerminal(_ turnId: String, on record: inout ClaudeHookSessionRecord) {
+        guard let normalizedTurnId = normalizeOptional(turnId) else { return }
+        var terminalTurnIds = terminalPromptTurnStack(from: record)
+        terminalTurnIds.removeAll { $0 == normalizedTurnId }
+        terminalTurnIds.append(normalizedTurnId)
+        if terminalTurnIds.count > Self.maxRememberedTerminalPromptTurnIds {
+            terminalTurnIds.removeFirst(terminalTurnIds.count - Self.maxRememberedTerminalPromptTurnIds)
+        }
+        record.terminalPromptTurnIds = terminalTurnIds.isEmpty ? nil : terminalTurnIds
+    }
+
+    private func update(
+        _ record: inout ClaudeHookSessionRecord,
+        workspaceId: String,
+        surfaceId: String,
+        cwd: String?,
+        transcriptPath: String?,
+        pid: Int?,
+        launchCommand: AgentHookLaunchCommandRecord?,
+        isRestorable: Bool?,
+        lastSubtitle: String?,
+        lastBody: String?,
+        lastNotificationStatus: AgentHookNotificationStatus?,
+        updateLastNotificationStatus: Bool,
+        runtimeStatus: AgentHookRuntimeStatus?,
+        updateRuntimeStatus: Bool,
+        now: TimeInterval
+    ) {
+        record.workspaceId = workspaceId
+        if !surfaceId.isEmpty {
+            record.surfaceId = surfaceId
+        }
+        if let cwd = normalizeOptional(cwd) {
+            record.cwd = cwd
+        }
+        if let transcriptPath = normalizeOptional(transcriptPath) {
+            record.transcriptPath = transcriptPath
+        }
+        if let pid {
+            record.pid = pid
+        }
+        if let launchCommand, !launchCommand.arguments.isEmpty {
+            record.launchCommand = launchCommand
+        }
+        if let isRestorable {
+            // Preserve sticky true: a later isRestorable=false must not clear
+            // record.isRestorable=true from a transcript-backed event.
+            record.isRestorable = isRestorable || record.isRestorable == true
+        }
+        if let subtitle = normalizeOptional(lastSubtitle) {
+            record.lastSubtitle = subtitle
+        }
+        if let body = normalizeOptional(lastBody) {
+            record.lastBody = body
+        }
+        if updateLastNotificationStatus {
+            record.lastNotificationStatus = lastNotificationStatus
+        }
+        if updateRuntimeStatus {
+            record.runtimeStatus = runtimeStatus
+        }
+        record.updatedAt = now
     }
 
     func clearNotificationEmission(sessionId: String) throws {
@@ -736,7 +1108,8 @@ private final class ClaudeHookSessionStore {
         workspaceId: String,
         surfaceId: String?,
         excludingSessionId: String?,
-        onlyNewerThanExcludedSession: Bool = false
+        onlyNewerThanExcludedSession: Bool = false,
+        requireLiveProcess: Bool = false
     ) throws -> Bool {
         guard let normalizedWorkspace = normalizeOptional(workspaceId) else {
             return false
@@ -745,21 +1118,46 @@ private final class ClaudeHookSessionStore {
         let excluded = normalizeOptional(excludingSessionId)
         return try withLockedState { state in
             let excludedUpdatedAt = excluded.flatMap { state.sessions[$0]?.updatedAt }
-            return state.sessions.values.contains { record in
+            var foundRunningSession = false
+            let now = Date().timeIntervalSince1970
+
+            for sessionId in Array(state.sessions.keys) {
+                guard var record = state.sessions[sessionId] else { continue }
                 guard normalizeOptional(record.workspaceId) == normalizedWorkspace,
                       record.sessionId != excluded,
                       record.runtimeStatus == .running else {
-                    return false
+                    continue
                 }
                 if let normalizedSurface, normalizeOptional(record.surfaceId) != normalizedSurface {
-                    return false
+                    continue
                 }
                 if onlyNewerThanExcludedSession, let excludedUpdatedAt {
-                    return record.updatedAt > excludedUpdatedAt
+                    guard record.updatedAt > excludedUpdatedAt else {
+                        continue
+                    }
                 }
-                return true
+
+                if requireLiveProcess, !Self.processExists(record.pid) {
+                    record.runtimeStatus = nil
+                    record.updatedAt = now
+                    state.sessions[sessionId] = record
+                    continue
+                }
+
+                foundRunningSession = true
+                break
             }
+
+            return foundRunningSession
         }
+    }
+
+    private static func processExists(_ pid: Int?) -> Bool {
+        guard let pid, pid > 0 else { return false }
+        if kill(pid_t(pid), 0) == 0 {
+            return true
+        }
+        return errno == EPERM
     }
 
     /// Returns true when an event belongs to the workspace's active Claude session.
@@ -1192,6 +1590,18 @@ private let agentHookWrapperProcessNames: Set<String> = [
     "zsh",
     "env"
 ]
+
+private enum HookAgentProcessKind {
+    case codex
+    case claude
+}
+
+private let suppressSubagentNotificationsDefaultsKey = "suppressSubagentNotifications"
+private let suppressSubagentNotificationsEnvironmentKey = "CMUX_SUPPRESS_SUBAGENT_NOTIFICATIONS"
+private let managedSubagentEnvironmentKey = "CMUX_AGENT_MANAGED_SUBAGENT"
+private let codexTeamsThreadEnvironmentKey = "CMUX_CODEX_TEAMS_THREAD_ID"
+private let codexTeamsParentThreadEnvironmentKey = "CMUX_CODEX_TEAMS_PARENT_THREAD_ID"
+private let codexTeamsDepthEnvironmentKey = "CMUX_CODEX_TEAMS_DEPTH"
 
 enum CLIIDFormat: String {
     case refs
@@ -2435,7 +2845,7 @@ struct CMUXCLI {
         "--dx", "--dy", "--email", "--event", "--expires", "--focus",
         "--function", "--id", "--image", "--index", "--key", "--kind",
         "--layout", "--lines", "--load-state", "--max-depth", "--name", "--os",
-        "--out", "--pane", "--panel", "--path", "--profile", "--property",
+        "--order", "--out", "--pane", "--panel", "--path", "--profile", "--property",
         "--provider", "--relay-port", "--script", "--selector", "--session",
         "--shell", "--source", "--subtitle", "--surface", "--tab", "--target-pane",
         "--text", "--timeout", "--timeout-ms", "--title", "--transcript",
@@ -3503,6 +3913,9 @@ struct CMUXCLI {
         case "reorder-workspace":
             try runReorderWorkspace(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
 
+        case "reorder-workspaces":
+            try runReorderWorkspaces(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
+
         case "workspace-action":
             try runWorkspaceAction(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat, windowOverride: windowId)
         case "tab-action":
@@ -3552,6 +3965,14 @@ struct CMUXCLI {
                 idFormat: idFormat,
                 windowOverride: windowId
             )
+        case "ssh-pty-attach":
+            try runSSHPTYAttach(commandArgs: commandArgs, client: client)
+        case "ssh-session-list":
+            try runSSHSessionList(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
+        case "ssh-session-attach":
+            try runSSHSessionAttach(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
+        case "ssh-session-cleanup":
+            try runSSHSessionCleanup(commandArgs: commandArgs, client: client, jsonOutput: jsonOutput, idFormat: idFormat)
         case "ssh-session-end":
             try runSSHSessionEnd(commandArgs: commandArgs, client: client)
         case "vm-pty-attach":
@@ -6763,6 +7184,15 @@ struct CMUXCLI {
         return String(describing: value)
     }
 
+    private func trimmedDebugString(_ value: Any?) -> String? {
+        guard let string = debugString(value)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+              !string.isEmpty else {
+            return nil
+        }
+        return string
+    }
+
     private func debugBool(_ value: Any?) -> Bool? {
         if let bool = value as? Bool {
             return bool
@@ -6939,10 +7369,95 @@ struct CMUXCLI {
         if let windowHandle {
             params["window_id"] = windowHandle
         }
+        let dryRun = hasFlag(commandArgs, name: "--dry-run")
+        if dryRun {
+            params["dry_run"] = true
+        }
 
         let payload = try client.sendV2(method: "workspace.reorder", params: params)
-        let summary = "OK workspace=\(formatHandle(payload, kind: "workspace", idFormat: idFormat) ?? "unknown") window=\(formatHandle(payload, kind: "window", idFormat: idFormat) ?? "unknown") index=\(payload["index"] ?? "?")"
+        let summary = dryRun
+            ? reorderResultLines(payload, idFormat: idFormat, dryRun: true).joined(separator: "\n")
+            : "OK workspace=\(formatHandle(payload, kind: "workspace", idFormat: idFormat) ?? "unknown") window=\(formatHandle(payload, kind: "window", idFormat: idFormat) ?? "unknown") index=\(payload["index"] ?? "?")"
         printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: summary)
+    }
+
+    private func runReorderWorkspaces(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat
+    ) throws {
+        guard let orderRaw = optionValue(commandArgs, name: "--order") else {
+            throw CLIError(message: String(
+                localized: "cli.reorderWorkspaces.error.missingOrder",
+                defaultValue: "reorder-workspaces requires --order <id|ref|index>,<id|ref|index>,..."
+            ))
+        }
+
+        let rawRefs = orderRaw
+            .split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard !rawRefs.isEmpty else {
+            throw CLIError(message: String(
+                localized: "cli.reorderWorkspaces.error.emptyOrder",
+                defaultValue: "reorder-workspaces requires at least one workspace in --order"
+            ))
+        }
+        guard !rawRefs.contains(where: \.isEmpty) else {
+            throw CLIError(message: String(
+                localized: "cli.reorderWorkspaces.error.emptyOrderItem",
+                defaultValue: "reorder-workspaces --order cannot contain empty workspace refs"
+            ))
+        }
+
+        let windowRaw = optionValue(commandArgs, name: "--window")
+        let windowHandle = try normalizeWindowHandle(windowRaw, client: client)
+        let workspaceHandles = try rawRefs.map { rawRef in
+            guard let workspaceHandle = try normalizeWorkspaceHandle(rawRef, client: client, windowHandle: windowHandle) else {
+                let messageFormat = String(
+                    localized: "cli.reorderWorkspaces.error.workspaceNotFound",
+                    defaultValue: "Workspace not found: %@"
+                )
+                throw CLIError(message: String(format: messageFormat, rawRef))
+            }
+            return workspaceHandle
+        }
+
+        var params: [String: Any] = ["workspace_ids": workspaceHandles]
+        if let windowHandle {
+            params["window_id"] = windowHandle
+        }
+        let dryRun = hasFlag(commandArgs, name: "--dry-run")
+        if dryRun {
+            params["dry_run"] = true
+        }
+
+        let payload = try client.sendV2(method: "workspace.reorder_many", params: params)
+        let summary = reorderResultLines(payload, idFormat: idFormat, dryRun: dryRun).joined(separator: "\n")
+        printV2Payload(payload, jsonOutput: jsonOutput, idFormat: idFormat, fallbackText: summary)
+    }
+
+    private func reorderResultLines(
+        _ payload: [String: Any],
+        idFormat: CLIIDFormat,
+        dryRun: Bool
+    ) -> [String] {
+        let planItems = payload["plan"] as? [[String: Any]] ?? [payload]
+        let lineFormat = dryRun
+            ? String(
+                localized: "cli.reorderWorkspaces.result.planLine",
+                defaultValue: "OK plan workspace=%@ window=%@ index=%@"
+            )
+            : String(
+                localized: "cli.reorderWorkspaces.result.appliedLine",
+                defaultValue: "OK workspace=%@ window=%@ index=%@"
+            )
+        return planItems.map { item in
+            let workspace = formatHandle(item, kind: "workspace", idFormat: idFormat) ?? "unknown"
+            let window = formatHandle(item, kind: "window", idFormat: idFormat) ?? "unknown"
+            let index = item["to_index"] ?? item["index"] ?? "?"
+            return String(format: lineFormat, workspace, window, String(describing: index))
+        }
     }
 
     private func runWorkspaceAction(
@@ -7395,7 +7910,14 @@ struct CMUXCLI {
             deferredRemoteReconnectCommandScript,
             sshConnectionTimingCommandScript,
         ])
-        let configuredForegroundAuthToken = deferredRemoteReconnectCommandScript == nil ? nil : deferredRemoteReconnectToken
+        let configuredForegroundAuthToken = deferredRemoteReconnectCommandScript == nil
+            ? nil
+            : deferredRemoteReconnectToken
+        let usesPersistentSSHPTY =
+            !sshOptions.skipDaemonBootstrap &&
+            sshOptions.extraArguments.isEmpty &&
+            remoteTerminalBootstrapScript?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false &&
+            deferredRemoteReconnectCommandScript != nil
         let startupInitialSSHCommand = buildSSHCommandText(
             sshOptions,
             localCommandScript: combinedLocalCommandScript
@@ -7405,8 +7927,8 @@ struct CMUXCLI {
             remoteBootstrapScript: remoteTerminalBootstrapScript,
             localCommandScript: combinedLocalCommandScript
         )
-        let initialSSHStartupCommand: String
-        let remoteTerminalSSHStartupCommand: String
+        var initialSSHStartupCommand: String
+        var remoteTerminalSSHStartupCommand: String
         if let remoteTerminalBootstrapScript, !remoteTerminalBootstrapScript.isEmpty {
             initialSSHStartupCommand = try buildBootstrapSSHStartupCommand(
                 options: sshOptions,
@@ -7438,6 +7960,17 @@ struct CMUXCLI {
                 controlPathPreflightShellFunction: controlPathPreflightShellFunction
             )
         }
+        if usesPersistentSSHPTY,
+           let remoteTerminalBootstrapScript {
+            let ptyStartupCommand = buildReusableForegroundAuthThenSSHPTYAttachStartupCommand(
+                options: sshOptions,
+                remoteShellCommand: remoteTerminalBootstrapScript,
+                localCommandScript: combinedLocalCommandScript,
+                controlPathPreflightShellFunction: controlPathPreflightShellFunction
+            )
+            initialSSHStartupCommand = ptyStartupCommand
+            remoteTerminalSSHStartupCommand = ptyStartupCommand
+        }
         let reusableTerminalStartupCommand: String
         if let vmIDForSplitAttach,
            sshOptions.skipDaemonBootstrap {
@@ -7468,6 +8001,26 @@ struct CMUXCLI {
         let workspaceCreate = try client.sendV2(method: "workspace.create", params: workspaceCreateParams)
         guard let workspaceId = workspaceCreate["workspace_id"] as? String, !workspaceId.isEmpty else {
             throw CLIError(message: "workspace.create did not return workspace_id")
+        }
+        let rawWorkspaceInitialSurfaceId = (workspaceCreate["surface_id"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var workspaceInitialSurfaceId = rawWorkspaceInitialSurfaceId?.isEmpty == false
+            ? rawWorkspaceInitialSurfaceId
+            : nil
+        if usesPersistentSSHPTY && workspaceInitialSurfaceId == nil {
+            do {
+                workspaceInitialSurfaceId = try resolveSurfaceId(nil, workspaceId: workspaceId, client: client)
+            } catch {
+                do {
+                    _ = try client.sendV2(method: "workspace.close", params: ["workspace_id": workspaceId])
+                } catch {
+                    let warning = "Warning: failed to rollback workspace \(workspaceId): \(error)\n"
+                    FileHandle.standardError.write(Data(warning.utf8))
+                }
+                throw CLIError(
+                    message: "cmux could not resolve the initial terminal surface for persistent SSH PTY startup"
+                )
+            }
         }
         let workspaceWindowId = (workspaceCreate["window_id"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -7515,6 +8068,9 @@ struct CMUXCLI {
             configureParams["terminal_startup_command"] = reusableTerminalStartupCommand
             if sshOptions.skipDaemonBootstrap {
                 configureParams["skip_daemon_bootstrap"] = true
+            }
+            if usesPersistentSSHPTY {
+                configureParams["preserve_after_terminal_exit"] = true
             }
 
             cliDebugLog(
@@ -7580,6 +8136,9 @@ struct CMUXCLI {
             "GHOSTTY_SHELL_FEATURES": shellFeaturesValue,
         ]
         payload["remote_relay_port"] = sshOptions.remoteRelayPort
+        if usesPersistentSSHPTY, let workspaceInitialSurfaceId {
+            payload["ssh_pty_session_id"] = "ssh-\(workspaceId)-\(workspaceInitialSurfaceId)"
+        }
         logSSHTiming("complete", extra: "workspace=\(String(workspaceId.prefix(8)))")
         if jsonOutput {
             print(jsonString(formatIDs(payload, mode: idFormat)))
@@ -8330,14 +8889,16 @@ struct CMUXCLI {
         shellFeatures: String,
         remoteRelayPort: Int,
         isShellSnippet: Bool = false,
-        controlPathPreflightShellFunction: String? = nil
+        controlPathPreflightShellFunction: String? = nil,
+        retryPTYAttachStatus: Bool = false
     ) throws -> String {
         let script = buildSSHStartupScriptBody(
             sshCommand: sshCommand,
             shellFeatures: shellFeatures,
             remoteRelayPort: remoteRelayPort,
             isShellSnippet: isShellSnippet,
-            controlPathPreflightShellFunction: controlPathPreflightShellFunction
+            controlPathPreflightShellFunction: controlPathPreflightShellFunction,
+            retryPTYAttachStatus: retryPTYAttachStatus
         )
         return try writeSSHStartupScript(script, remoteRelayPort: remoteRelayPort)
     }
@@ -8347,14 +8908,16 @@ struct CMUXCLI {
         shellFeatures: String,
         remoteRelayPort: Int,
         isShellSnippet: Bool = false,
-        controlPathPreflightShellFunction: String? = nil
+        controlPathPreflightShellFunction: String? = nil,
+        retryPTYAttachStatus: Bool = false
     ) -> String {
         let script = buildSSHStartupScriptBody(
             sshCommand: sshCommand,
             shellFeatures: shellFeatures,
             remoteRelayPort: remoteRelayPort,
             isShellSnippet: isShellSnippet,
-            controlPathPreflightShellFunction: controlPathPreflightShellFunction
+            controlPathPreflightShellFunction: controlPathPreflightShellFunction,
+            retryPTYAttachStatus: retryPTYAttachStatus
         )
         return reusableShellStartupCommand(
             scriptBody: script,
@@ -8362,12 +8925,82 @@ struct CMUXCLI {
         )
     }
 
+    private func buildReusableSSHPTYAttachStartupCommand(
+        remoteShellCommand: String,
+        remoteRelayPort: Int
+    ) -> String {
+        let attachScript = buildSSHPTYAttachScriptBody(
+            remoteShellCommand: remoteShellCommand
+        )
+        return buildReusableSSHStartupCommand(
+            sshCommand: attachScript,
+            shellFeatures: "",
+            remoteRelayPort: remoteRelayPort,
+            isShellSnippet: true,
+            retryPTYAttachStatus: true
+        )
+    }
+
+    private func buildReusableForegroundAuthThenSSHPTYAttachStartupCommand(
+        options: SSHCommandOptions,
+        remoteShellCommand: String,
+        localCommandScript: String?,
+        controlPathPreflightShellFunction: String?
+    ) -> String {
+        var authArguments = baseSSHArguments(options, localCommandScript: localCommandScript)
+        authArguments += ["-T", options.destination, "true"]
+        let authCommand = authArguments.map(shellQuote).joined(separator: " ")
+        let attachScript = buildSSHPTYAttachScriptBody(
+            remoteShellCommand: remoteShellCommand
+        )
+        let scriptBody = [
+            "command \(authCommand) <&0",
+            "cmux_auth_status=$?",
+            "if [ \"$cmux_auth_status\" -ne 0 ]; then exit \"$cmux_auth_status\"; fi",
+            attachScript,
+        ]
+            .joined(separator: "\n")
+        return buildReusableSSHStartupCommand(
+            sshCommand: scriptBody,
+            shellFeatures: "",
+            remoteRelayPort: options.remoteRelayPort,
+            isShellSnippet: true,
+            controlPathPreflightShellFunction: controlPathPreflightShellFunction,
+            retryPTYAttachStatus: true
+        )
+    }
+
+    private func buildSSHPTYAttachScriptBody(
+        remoteShellCommand: String
+    ) -> String {
+        let executablePath = resolvedExecutableURL()?.path ?? (args.first ?? "cmux")
+        let commandB64 = Data(remoteShellCommand.utf8).base64EncodedString()
+        let attachCommand = [
+            shellQuote(executablePath),
+            "ssh-pty-attach",
+            "--wait",
+            "--workspace", "\"$cmux_ssh_pty_workspace_id\"",
+            "--session-id", "\"$cmux_ssh_pty_session_id\"",
+            "--attachment-id", "\"$cmux_ssh_pty_surface_id\"",
+            "--command-b64", shellQuote(commandB64),
+        ].joined(separator: " ")
+        return [
+            "cmux_ssh_pty_workspace_id=\"${CMUX_WORKSPACE_ID:-}\"",
+            "cmux_ssh_pty_surface_id=\"${CMUX_SURFACE_ID:-}\"",
+            "if [ -z \"$cmux_ssh_pty_workspace_id\" ]; then printf '%s\\n' '[cmux] required workspace context missing for SSH PTY attach.' >&2; exit 1; fi",
+            "if [ -z \"$cmux_ssh_pty_surface_id\" ]; then printf '%s\\n' '[cmux] required terminal context missing for SSH PTY attach.' >&2; exit 1; fi",
+            "cmux_ssh_pty_session_id=\"ssh-$cmux_ssh_pty_workspace_id-$cmux_ssh_pty_surface_id\"",
+            "exec \(attachCommand)",
+        ].joined(separator: "\n")
+    }
+
     private func buildSSHStartupScriptBody(
         sshCommand: String,
         shellFeatures: String,
         remoteRelayPort: Int,
         isShellSnippet: Bool,
-        controlPathPreflightShellFunction: String?
+        controlPathPreflightShellFunction: String?,
+        retryPTYAttachStatus: Bool
     ) -> String {
         let trimmedFeatures = shellFeatures.trimmingCharacters(in: .whitespacesAndNewlines)
         let shellFeaturesBootstrap: String = trimmedFeatures.isEmpty
@@ -8423,6 +9056,7 @@ struct CMUXCLI {
         } else {
             scriptLines.append("  command \(sshCommand) <&0 &")
         }
+        let retryableStatusPattern = retryPTYAttachStatus ? "254|255" : "255"
         scriptLines += [
             "  CMUX_SSH_CHILD_PID=$!",
             "  if [ -n \"${CMUX_SSH_PENDING_SIGNAL:-}\" ]; then cmux_ssh_signal_exit \"$CMUX_SSH_PENDING_SIGNAL\"; fi",
@@ -8430,7 +9064,7 @@ struct CMUXCLI {
             "  cmux_ssh_status=$?",
             "  CMUX_SSH_CHILD_PID=",
             "  if [ \"$cmux_ssh_status\" -eq 0 ]; then break; fi",
-            "  if [ \"$cmux_ssh_status\" -ne 255 ]; then break; fi",
+            "  case \"$cmux_ssh_status\" in \(retryableStatusPattern)) ;; *) break ;; esac",
             "  if [ \"$cmux_ssh_retry\" -ge \"$cmux_ssh_reconnect_limit\" ]; then break; fi",
             "  cmux_ssh_retry=$((cmux_ssh_retry + 1))",
             "  cmux_ssh_note '\\n\\033[33m[cmux] ssh exited with status %s; reconnecting (attempt %s/%s).\\033[0m\\n\\033[2m[cmux] close this pane or press Ctrl-C to stop reconnecting.\\033[0m\\n' \"$cmux_ssh_status\" \"$cmux_ssh_retry\" \"$cmux_ssh_reconnect_limit\"",
@@ -9262,6 +9896,877 @@ struct CMUXCLI {
         }
     }
 
+    private func runSSHSessionList(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat
+    ) throws {
+        let (workspaceOpt, rem0) = parseOption(commandArgs, name: "--workspace")
+        let allWorkspaces = rem0.contains("--all-workspaces")
+        let remaining = rem0.filter { $0 != "--all-workspaces" }
+        if let unknown = remaining.first(where: { Self.isFlagToken($0) }) {
+            throw CLIError(message: "ssh-session-list: unknown flag '\(unknown)'. Known flags: --workspace <workspace>, --all-workspaces")
+        }
+        guard remaining.isEmpty else {
+            throw CLIError(message: "Usage: cmux ssh-session-list [--workspace <workspace> | --all-workspaces]")
+        }
+        if allWorkspaces, workspaceOpt != nil {
+            throw CLIError(message: "ssh-session-list: --all-workspaces cannot be combined with --workspace")
+        }
+
+        let params = try sshSessionTargetParams(
+            commandName: "ssh-session-list",
+            workspaceOpt: workspaceOpt,
+            allWorkspaces: allWorkspaces,
+            client: client
+        )
+
+        let response = try client.sendV2(method: "workspace.remote.pty_sessions", params: params)
+        let sessions = response["sessions"] as? [[String: Any]] ?? []
+        let errors = response["errors"] as? [[String: Any]] ?? []
+        if jsonOutput {
+            print(jsonString(formatIDs(response, mode: idFormat)))
+            if !errors.isEmpty {
+                throw CLIError(message: sshSessionListFailureMessage(errors))
+            }
+            return
+        }
+
+        if sessions.isEmpty, errors.isEmpty {
+            print("No persisted SSH PTY sessions")
+            return
+        }
+        for session in sessions {
+            let sessionID = (session["session_id"] as? String) ?? "unknown"
+            let workspaceLabel = debugString(session["workspace_ref"])
+                ?? (debugString(session["workspace_id"])?.prefix(8).description)
+                ?? "workspace:?"
+            let workspaceTitle = debugString(session["workspace_title"]) ?? ""
+            let effectiveCols = debugString(session["effective_cols"]) ?? "?"
+            let effectiveRows = debugString(session["effective_rows"]) ?? "?"
+            let scrollbackBytes = debugString(session["scrollback_bytes"]) ?? "0"
+            let attachments = session["attachments"] as? [[String: Any]] ?? []
+            let workspacePrefix = allWorkspaces
+                ? "\(workspaceLabel)\(workspaceTitle.isEmpty ? "" : " \(workspaceTitle)") "
+                : ""
+            print("\(workspacePrefix)\(sessionID) attachments=\(attachments.count) size=\(effectiveCols)x\(effectiveRows) scrollback_bytes=\(scrollbackBytes)")
+        }
+        if !errors.isEmpty {
+            throw CLIError(message: sshSessionListFailureMessage(errors))
+        }
+    }
+
+    private func sshSessionListFailureMessage(_ errors: [[String: Any]]) -> String {
+        let count = errors.count
+        let summary = "ssh-session-list failed for \(count) remote workspace\(count == 1 ? "" : "s")"
+        let details = errors.map { error in
+            let workspace = debugString(error["workspace_ref"])
+                ?? debugString(error["workspace_id"])
+                ?? "workspace:?"
+            let message = userFacingRemotePTYErrorMessage(error["error"])
+            return "- \(workspace): \(message)"
+        }
+        return ([summary] + details).joined(separator: "\n")
+    }
+
+    private func runSSHSessionCleanup(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat
+    ) throws {
+        let (workspaceOpt, rem0) = parseOption(commandArgs, name: "--workspace")
+        let (sessionIDOpt, rem1) = parseOption(rem0, name: "--session-id")
+        let closeAll = rem1.contains("--all")
+        let allWorkspaces = rem1.contains("--all-workspaces")
+        let remaining = rem1.filter { $0 != "--all" && $0 != "--all-workspaces" }
+        if let unknown = remaining.first(where: { Self.isFlagToken($0) }) {
+            throw CLIError(message: "ssh-session-cleanup: unknown flag '\(unknown)'. Known flags: --workspace <workspace>, --session-id <id>, --all, --all-workspaces")
+        }
+        guard remaining.isEmpty else {
+            throw CLIError(message: "Usage: cmux ssh-session-cleanup [--workspace <workspace> | --all-workspaces] (--session-id <id> | --all)")
+        }
+        if closeAll == (sessionIDOpt != nil) {
+            throw CLIError(message: "ssh-session-cleanup requires exactly one of --session-id <id> or --all")
+        }
+        if allWorkspaces, workspaceOpt != nil {
+            throw CLIError(message: "ssh-session-cleanup: --all-workspaces cannot be combined with --workspace")
+        }
+
+        let baseParams = try sshSessionTargetParams(
+            commandName: "ssh-session-cleanup",
+            workspaceOpt: workspaceOpt,
+            allWorkspaces: allWorkspaces,
+            client: client
+        )
+
+        var closed: [String] = []
+        var closedSet = Set<String>()
+        let recordClosedSession: (String, String?) -> Void = { sessionID, workspaceID in
+            let workspaceKey = workspaceID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let dedupeKey = "\(workspaceKey.count):\(workspaceKey)\u{0}\(sessionID)"
+            if closedSet.insert(dedupeKey).inserted {
+                closed.append(sessionID)
+            }
+        }
+        var errors: [[String: Any]] = []
+        if closeAll {
+            let listResponse = try client.sendV2(method: "workspace.remote.pty_sessions", params: baseParams)
+            errors.append(contentsOf: sshSessionCleanupListErrors(listResponse["errors"] as? [[String: Any]] ?? []))
+            let sessions = listResponse["sessions"] as? [[String: Any]] ?? []
+            for session in sessions {
+                guard let sessionID = trimmedDebugString(session["session_id"]) else {
+                    errors.append(sshSessionCleanupMissingSessionIDError(session: session))
+                    continue
+                }
+                guard let workspaceID = trimmedDebugString(session["workspace_id"])
+                    ?? trimmedDebugString(baseParams["workspace_id"]) else {
+                    errors.append(sshSessionCleanupMissingWorkspaceError(sessionID: sessionID, session: session))
+                    continue
+                }
+                let params: [String: Any] = [
+                    "workspace_id": workspaceID,
+                    "session_id": sessionID,
+                ]
+                do {
+                    _ = try client.sendV2(method: "workspace.remote.pty_close", params: params)
+                    recordClosedSession(sessionID, workspaceID)
+                } catch {
+                    errors.append([
+                        "session_id": sessionID,
+                        "workspace_id": params["workspace_id"] ?? NSNull(),
+                        "error": self.userFacingRemotePTYErrorMessage(error),
+                    ])
+                }
+            }
+        } else if let sessionID = sessionIDOpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !sessionID.isEmpty {
+            if allWorkspaces {
+                let listResponse = try client.sendV2(method: "workspace.remote.pty_sessions", params: baseParams)
+                errors.append(contentsOf: sshSessionCleanupListErrors(
+                    listResponse["errors"] as? [[String: Any]] ?? [],
+                    sessionID: sessionID
+                ))
+                let sessions = (listResponse["sessions"] as? [[String: Any]] ?? []).filter {
+                    trimmedDebugString($0["session_id"]) == sessionID
+                }
+                if sessions.isEmpty {
+                    errors.append([
+                        "session_id": sessionID,
+                        "workspace_id": NSNull(),
+                        "error": "persistent SSH PTY session is no longer running",
+                    ])
+                }
+                for session in sessions {
+                    guard let workspaceID = trimmedDebugString(session["workspace_id"]) else {
+                        errors.append(sshSessionCleanupMissingWorkspaceError(sessionID: sessionID, session: session))
+                        continue
+                    }
+                    do {
+                        _ = try client.sendV2(method: "workspace.remote.pty_close", params: [
+                            "workspace_id": workspaceID,
+                            "session_id": sessionID,
+                        ])
+                        recordClosedSession(sessionID, workspaceID)
+                    } catch {
+                        errors.append([
+                            "session_id": sessionID,
+                            "workspace_id": workspaceID,
+                            "error": self.userFacingRemotePTYErrorMessage(error),
+                        ])
+                    }
+                }
+            } else {
+                var params = baseParams
+                params["session_id"] = sessionID
+                _ = try client.sendV2(method: "workspace.remote.pty_close", params: params)
+                recordClosedSession(sessionID, trimmedDebugString(params["workspace_id"]))
+            }
+        } else {
+            throw CLIError(message: "ssh-session-cleanup: --session-id requires a value")
+        }
+
+        let payload: [String: Any] = [
+            "closed": closed,
+            "count": closed.count,
+            "errors": errors,
+        ]
+        if jsonOutput {
+            print(jsonString(formatIDs(payload, mode: idFormat)))
+            if !errors.isEmpty {
+                throw CLIError(message: sshSessionCleanupFailureMessage(errors))
+            }
+        } else if !errors.isEmpty {
+            if !closed.isEmpty {
+                print("Closed \(closed.count) persisted SSH PTY session\(closed.count == 1 ? "" : "s")")
+            }
+            throw CLIError(message: sshSessionCleanupFailureMessage(errors))
+        } else if closed.isEmpty {
+            print("No persisted SSH PTY sessions closed")
+        } else {
+            print("Closed \(closed.count) persisted SSH PTY session\(closed.count == 1 ? "" : "s")")
+        }
+    }
+
+    private func sshSessionCleanupMissingWorkspaceError(sessionID: String, session: [String: Any]) -> [String: Any] {
+        var error: [String: Any] = [
+            "session_id": sessionID,
+            "workspace_id": NSNull(),
+            "error": "missing workspace_id in SSH PTY session list response",
+        ]
+        if let workspaceRef = trimmedDebugString(session["workspace_ref"]) {
+            error["workspace_ref"] = workspaceRef
+        }
+        return error
+    }
+
+    private func sshSessionCleanupMissingSessionIDError(session: [String: Any]) -> [String: Any] {
+        var error: [String: Any] = [
+            "session_id": "unknown",
+            "workspace_id": trimmedDebugString(session["workspace_id"]) ?? NSNull(),
+            "error": "missing session_id in SSH PTY session list response",
+        ]
+        if let workspaceRef = trimmedDebugString(session["workspace_ref"]) {
+            error["workspace_ref"] = workspaceRef
+        }
+        return error
+    }
+
+    private func sshSessionCleanupListErrors(_ listErrors: [[String: Any]], sessionID: String? = nil) -> [[String: Any]] {
+        listErrors.map { error in
+            let workspaceValue: Any
+            if let workspace = debugString(error["workspace_ref"]) ?? debugString(error["workspace_id"]) {
+                workspaceValue = workspace
+            } else {
+                workspaceValue = NSNull()
+            }
+            let payload: [String: Any] = [
+                "session_id": sessionID ?? debugString(error["session_id"]) ?? "workspace-query",
+                "workspace_id": workspaceValue,
+                "error": userFacingRemotePTYErrorMessage(error["error"]),
+            ]
+            return payload
+        }
+    }
+
+    private func sshSessionCleanupFailureMessage(_ errors: [[String: Any]]) -> String {
+        let count = errors.count
+        let summary = "ssh-session-cleanup failed for \(count) persisted SSH PTY session\(count == 1 ? "" : "s")"
+        let details = errors.map { error in
+            let sessionID = debugString(error["session_id"]) ?? "unknown"
+            let workspaceID = (debugString(error["workspace_ref"]) ?? debugString(error["workspace_id"]))
+                .map { " workspace=\($0)" } ?? ""
+            let message = userFacingRemotePTYErrorMessage(error["error"])
+            return "- \(sessionID)\(workspaceID): \(message)"
+        }
+        return ([summary] + details).joined(separator: "\n")
+    }
+
+    private func runSSHSessionAttach(
+        commandArgs: [String],
+        client: SocketClient,
+        jsonOutput: Bool,
+        idFormat: CLIIDFormat
+    ) throws {
+        let (workspaceOpt, rem0) = parseOption(commandArgs, name: "--workspace")
+        let (sessionIDOpt, rem1) = parseOption(rem0, name: "--session-id")
+        let (paneOpt, rem2) = parseOption(rem1, name: "--pane")
+        let (surfaceOpt, rem3) = parseOption(rem2, name: "--surface")
+        let (splitOpt, rem4) = parseOption(rem3, name: "--split")
+        let (focusOpt, remaining) = parseOption(rem4, name: "--focus")
+        if let unknown = remaining.first(where: { Self.isFlagToken($0) }) {
+            throw CLIError(message: "ssh-session-attach: unknown flag '\(unknown)'. Known flags: --workspace <workspace>, --session-id <id>, --pane <pane>, --surface <surface>, --split <direction>, --focus <true|false>")
+        }
+        guard remaining.isEmpty else {
+            throw CLIError(message: "Usage: cmux ssh-session-attach --session-id <id> [--workspace <workspace>] [--pane <pane> | --split <left|right|up|down> [--surface <surface>]]")
+        }
+        guard let sessionID = sessionIDOpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionID.isEmpty else {
+            throw CLIError(message: "ssh-session-attach requires --session-id <id>")
+        }
+        if paneOpt != nil, splitOpt != nil {
+            throw CLIError(message: "ssh-session-attach: --pane cannot be combined with --split")
+        }
+
+        let workspaceRaw = workspaceOpt ?? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"]
+        let workspaceID = try normalizeWorkspaceHandle(workspaceRaw, client: client)
+        let initialCommand = sshSessionAttachStartupCommand(sessionID: sessionID)
+        var params: [String: Any] = [
+            "initial_command": initialCommand,
+            "remote_pty_session_id": sessionID,
+        ]
+        if let workspaceID {
+            params["workspace_id"] = workspaceID
+        }
+        try applyFocusOption(focusOpt, defaultValue: true, to: &params)
+
+        let payload: [String: Any]
+        if let split = splitOpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !split.isEmpty {
+            params["direction"] = split
+            let surfaceID = try normalizeSurfaceHandle(
+                surfaceOpt ?? ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"],
+                client: client,
+                workspaceHandle: workspaceID
+            )
+            if let surfaceID {
+                params["surface_id"] = surfaceID
+            }
+            payload = try client.sendV2(method: "surface.split", params: params)
+        } else {
+            let paneID = try normalizePaneHandle(paneOpt, client: client, workspaceHandle: workspaceID)
+            if let paneID {
+                params["pane_id"] = paneID
+            }
+            payload = try client.sendV2(method: "surface.create", params: params)
+        }
+
+        var output = payload
+        output["session_id"] = sessionID
+        printV2Payload(
+            output,
+            jsonOutput: jsonOutput,
+            idFormat: idFormat,
+            fallbackText: v2OKSummary(output, idFormat: idFormat, kinds: ["surface", "pane", "workspace"])
+        )
+    }
+
+    private func sshSessionAttachStartupCommand(sessionID: String) -> String {
+        let quotedSessionID = shellQuote(sessionID)
+        let currentExecutable = shellQuote(resolvedExecutableURL()?.path ?? (args.first ?? "cmux"))
+        let attachCommand = "\"$cmux_ssh_attach_cli\" --socket \"$CMUX_SOCKET_PATH\" ssh-pty-attach --wait --require-existing --workspace \"$CMUX_WORKSPACE_ID\" --session-id \(quotedSessionID) --attachment-id \"${CMUX_SURFACE_ID:-}\""
+        return ([
+            "cmux_ssh_attach_cli=\"${CMUX_BUNDLED_CLI_PATH:-}\"",
+            "if [ -z \"$cmux_ssh_attach_cli\" ] || [ ! -x \"$cmux_ssh_attach_cli\" ]; then cmux_ssh_attach_cli=\(currentExecutable); fi",
+            "if [ -z \"$cmux_ssh_attach_cli\" ] || [ ! -x \"$cmux_ssh_attach_cli\" ]; then cmux_ssh_attach_cli=\"$(command -v cmux 2>/dev/null || true)\"; fi",
+            "if [ -z \"$cmux_ssh_attach_cli\" ]; then printf '%s\\n' '[cmux] bundled CLI not found for SSH PTY attach.' >&2; exit 127; fi",
+            "if [ -z \"${CMUX_SOCKET_PATH:-}\" ]; then printf '%s\\n' '[cmux] required configuration missing for SSH PTY attach.' >&2; exit 1; fi",
+            "if [ -z \"${CMUX_WORKSPACE_ID:-}\" ]; then printf '%s\\n' '[cmux] required workspace context missing for SSH PTY attach.' >&2; exit 1; fi",
+        ] + sshPTYAttachRetryLoopLines(command: attachCommand)).joined(separator: "\n")
+    }
+
+    private func sshPTYAttachRetryLoopLines(command: String) -> [String] {
+        [
+            "cmux_ssh_attach_reconnect_limit=\"${CMUX_SSH_RECONNECT_LIMIT:-20}\"",
+            "case \"$cmux_ssh_attach_reconnect_limit\" in ''|*[!0-9]*) cmux_ssh_attach_reconnect_limit=20 ;; esac",
+            "cmux_ssh_attach_reconnect_delay=\"${CMUX_SSH_RECONNECT_DELAY_SECONDS:-2}\"",
+            "case \"$cmux_ssh_attach_reconnect_delay\" in ''|*[!0-9]*) cmux_ssh_attach_reconnect_delay=2 ;; esac",
+            "cmux_ssh_attach_retry=0",
+            "while :; do",
+            "  \(command)",
+            "  cmux_ssh_attach_status=$?",
+            "  case \"$cmux_ssh_attach_status\" in 254|255) ;; *) exit \"$cmux_ssh_attach_status\" ;; esac",
+            "  if [ \"$cmux_ssh_attach_retry\" -ge \"$cmux_ssh_attach_reconnect_limit\" ]; then exit \"$cmux_ssh_attach_status\"; fi",
+            "  cmux_ssh_attach_retry=$((cmux_ssh_attach_retry + 1))",
+            "  if [ -t 2 ]; then printf '\\n\\033[33m[cmux] remote PTY bridge closed; reattaching (attempt %s/%s).\\033[0m\\n' \"$cmux_ssh_attach_retry\" \"$cmux_ssh_attach_reconnect_limit\" >&2 || true; fi",
+            "  if [ \"$cmux_ssh_attach_reconnect_delay\" -gt 0 ]; then sleep \"$cmux_ssh_attach_reconnect_delay\"; fi",
+            "done",
+        ]
+    }
+
+    private func sshSessionTargetParams(
+        commandName: String,
+        workspaceOpt: String?,
+        allWorkspaces: Bool,
+        client: SocketClient
+    ) throws -> [String: Any] {
+        if allWorkspaces {
+            return ["all_workspaces": true]
+        }
+        let workspaceRaw = workspaceOpt ?? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"]
+        guard let workspaceRaw,
+              !workspaceRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return [:]
+        }
+        guard let workspaceId = try normalizeWorkspaceHandle(workspaceRaw, client: client) else {
+            throw CLIError(message: "\(commandName): workspace not found")
+        }
+        return ["workspace_id": workspaceId]
+    }
+
+    private func runSSHPTYAttach(commandArgs: [String], client: SocketClient) throws {
+        let (workspaceOpt, rem0) = parseOption(commandArgs, name: "--workspace")
+        let (sessionIDOpt, rem1) = parseOption(rem0, name: "--session-id")
+        let (attachmentIDOpt, rem2) = parseOption(rem1, name: "--attachment-id")
+        let (commandB64Opt, rem3) = parseOption(rem2, name: "--command-b64")
+        let waitForReady = rem3.contains("--wait")
+        let requireExisting = rem3.contains("--require-existing")
+        let remaining = rem3.filter { $0 != "--wait" && $0 != "--require-existing" }
+        if let unknown = remaining.first(where: { Self.isFlagToken($0) }) {
+            throw CLIError(message: "ssh-pty-attach: unknown flag '\(unknown)'")
+        }
+        guard remaining.isEmpty else {
+            throw CLIError(message: "Usage: cmux ssh-pty-attach --workspace <workspace> --session-id <id> [--attachment-id <id>] [--command-b64 <base64>] [--require-existing]")
+        }
+        let workspaceRaw = workspaceOpt ?? ProcessInfo.processInfo.environment["CMUX_WORKSPACE_ID"]
+        guard let workspaceRaw,
+              let workspaceId = try normalizeWorkspaceHandle(workspaceRaw, client: client),
+              !workspaceId.isEmpty else {
+            throw CLIError(message: "ssh-pty-attach requires --workspace or CMUX_WORKSPACE_ID")
+        }
+        guard let sessionID = sessionIDOpt?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sessionID.isEmpty else {
+            throw CLIError(message: "ssh-pty-attach requires --session-id <id>")
+        }
+        let environmentSurfaceID = Self.normalizedEnvValue(ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"])
+        let explicitAttachmentID = Self.normalizedEnvValue(attachmentIDOpt)
+        let surfaceID = environmentSurfaceID ?? (explicitAttachmentID.flatMap { UUID(uuidString: $0) == nil ? nil : $0 })
+        let attachmentID = explicitAttachmentID ?? environmentSurfaceID ?? UUID().uuidString.lowercased()
+        let command: String? = try commandB64Opt.flatMap { encoded in
+            guard let data = Data(base64Encoded: encoded),
+                  var decoded = String(data: data, encoding: .utf8) else {
+                throw CLIError(message: "ssh-pty-attach: --command-b64 must be valid UTF-8 base64")
+            }
+            decoded = decoded
+                .replacingOccurrences(of: "__CMUX_WORKSPACE_ID__", with: workspaceId)
+                .replacingOccurrences(
+                    of: "__CMUX_SURFACE_ID__",
+                    with: ProcessInfo.processInfo.environment["CMUX_SURFACE_ID"] ?? ""
+                )
+            return decoded
+        }
+        var bridgeReachedReady = false
+        var attachFinished = false
+        var attachmentToken = ""
+        defer {
+            if !attachFinished {
+                cleanupFailedSSHPTYAttach(
+                    client: client,
+                    workspaceId: workspaceId,
+                    surfaceID: surfaceID,
+                    sessionID: sessionID,
+                    attachmentID: attachmentID,
+                    attachmentToken: attachmentToken,
+                    clearLocalSurface: !bridgeReachedReady
+                )
+            }
+        }
+
+        let bridge: [String: Any]
+        do {
+            var bridgeParams = sshPTYBridgeParams(
+                workspaceId: workspaceId,
+                surfaceID: surfaceID,
+                sessionID: sessionID,
+                attachmentID: attachmentID,
+                command: command,
+                requireExisting: requireExisting
+            )
+            if waitForReady {
+                bridgeParams["wait_for_ready"] = true
+            }
+            bridge = try client.sendV2(
+                method: "workspace.remote.pty_bridge",
+                params: bridgeParams,
+                responseTimeout: waitForReady ? 185 : nil
+            )
+        } catch {
+            throw CLIError(message: "ssh-pty-attach: \(userFacingRemotePTYErrorMessage(error))")
+        }
+        var connectedFD: Int32?
+        let controlSocketLock = NSLock()
+        do {
+            let host = (bridge["host"] as? String) ?? "127.0.0.1"
+            guard let port = cliStrictInt(bridge["port"]), port > 0, port <= 65535 else {
+                throw CLIError(message: "ssh-pty-attach: bridge did not return a valid port")
+            }
+            guard let token = bridge["token"] as? String, !token.isEmpty else {
+                throw CLIError(message: "ssh-pty-attach: bridge did not return a token")
+            }
+
+            connectedFD = try connectLoopbackTCP(host: host, port: port)
+            let fd = connectedFD!
+            let size = currentCLITerminalSize()
+            var handshakeData = try JSONSerialization.data(withJSONObject: [
+                "token": token,
+                "cols": size.cols,
+                "rows": size.rows,
+                "client_pid": Int(getpid()),
+            ], options: [])
+            handshakeData.append(0x0A)
+            try writeAll(fd: fd, data: handshakeData)
+            attachmentToken = try readSSHPTYBridgeReady(fd: fd)
+            bridgeReachedReady = true
+        } catch {
+            if let connectedFD {
+                Darwin.close(connectedFD)
+            }
+            throw error
+        }
+        let fd = connectedFD!
+        defer { Darwin.close(fd) }
+
+        let rawMode = TerminalRawMode()
+        defer { rawMode?.restore() }
+        let resizeSource = startSSHPTYResizeSource(
+            client: client,
+            workspaceId: workspaceId,
+            surfaceID: surfaceID,
+            sessionID: sessionID,
+            attachmentID: attachmentID,
+            attachmentToken: attachmentToken,
+            socketLock: controlSocketLock
+        )
+        defer { resizeSource.cancel() }
+
+        DispatchQueue.global(qos: .userInteractive).async {
+            var buffer = [UInt8](repeating: 0, count: 8192)
+            while true {
+                let count = Darwin.read(STDIN_FILENO, &buffer, buffer.count)
+                if count > 0 {
+                    do {
+                        try self.writeAll(fd: fd, data: Data(buffer.prefix(count)))
+                    } catch {
+                        _ = shutdown(fd, SHUT_WR)
+                        return
+                    }
+                } else if count == 0 {
+                    _ = shutdown(fd, SHUT_WR)
+                    return
+                } else if errno != EINTR {
+                    _ = shutdown(fd, SHUT_WR)
+                    return
+                }
+            }
+        }
+
+        var outputBuffer = [UInt8](repeating: 0, count: 32768)
+        while true {
+            let count = Darwin.read(fd, &outputBuffer, outputBuffer.count)
+            if count > 0 {
+                FileHandle.standardOutput.write(Data(outputBuffer.prefix(count)))
+            } else if count == 0 {
+                resizeSource.cancel()
+                try handleSSHPTYBridgeEOF(
+                    client: client,
+                    workspaceId: workspaceId,
+                    surfaceID: surfaceID,
+                    sessionID: sessionID,
+                    attachmentID: attachmentID,
+                    socketLock: controlSocketLock
+                )
+                attachFinished = true
+                return
+            } else if errno != EINTR {
+                if sshPTYBridgeReadErrorIsEOF(errno) {
+                    resizeSource.cancel()
+                    try handleSSHPTYBridgeEOF(
+                        client: client,
+                        workspaceId: workspaceId,
+                        surfaceID: surfaceID,
+                        sessionID: sessionID,
+                        attachmentID: attachmentID,
+                        socketLock: controlSocketLock
+                    )
+                    attachFinished = true
+                    return
+                }
+                throw CLIError(message: "ssh-pty-attach: bridge read failed")
+            }
+        }
+    }
+
+    private func cleanupFailedSSHPTYAttach(
+        client: SocketClient,
+        workspaceId: String,
+        surfaceID: String?,
+        sessionID: String,
+        attachmentID: String,
+        attachmentToken: String,
+        clearLocalSurface: Bool
+    ) {
+        let normalizedAttachmentToken = attachmentToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedAttachmentToken.isEmpty {
+            var detachParams: [String: Any] = [
+                "workspace_id": workspaceId,
+                "session_id": sessionID,
+                "attachment_id": attachmentID,
+                "attachment_token": normalizedAttachmentToken,
+            ]
+            if let surfaceID {
+                detachParams["surface_id"] = surfaceID
+                detachParams["allow_moved_surface"] = true
+            }
+            _ = try? client.sendV2(method: "workspace.remote.pty_detach", params: detachParams)
+        }
+        guard clearLocalSurface else { return }
+        guard let surfaceID else { return }
+        _ = try? client.sendV2(method: "workspace.remote.pty_attach_end", params: [
+            "workspace_id": workspaceId,
+            "surface_id": surfaceID,
+            "session_id": sessionID,
+        ])
+    }
+
+    private func sshPTYBridgeReadErrorIsEOF(_ errnoValue: Int32) -> Bool {
+        switch errnoValue {
+        case ECONNRESET, ECONNABORTED, ENOTCONN:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func handleSSHPTYBridgeEOF(
+        client: SocketClient,
+        workspaceId: String,
+        surfaceID: String?,
+        sessionID: String,
+        attachmentID: String,
+        socketLock: NSLock
+    ) throws {
+        socketLock.lock()
+        defer { socketLock.unlock() }
+
+        let response: [String: Any]
+        do {
+            var params: [String: Any] = [
+                "workspace_id": workspaceId,
+            ]
+            if let surfaceID {
+                params["surface_id"] = surfaceID
+                params["session_id"] = sessionID
+                params["allow_moved_surface"] = true
+            }
+            response = try client.sendV2(method: "workspace.remote.pty_sessions", params: params)
+        } catch {
+            throw CLIError(
+                message: "ssh-pty-attach: bridge closed before remote PTY exit could be confirmed: \(userFacingRemotePTYErrorMessage(error))",
+                exitCode: 255
+            )
+        }
+
+        let errors = response["errors"] as? [[String: Any]] ?? []
+        if !errors.isEmpty {
+            throw CLIError(
+                message: "ssh-pty-attach: bridge closed before remote PTY exit could be confirmed\n\(sshSessionListFailureMessage(errors))",
+                exitCode: 255
+            )
+        }
+
+        let sessions = response["sessions"] as? [[String: Any]] ?? []
+        let sessionStillRunning = sessions.contains {
+            (($0["session_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "") == sessionID
+        }
+        if sessionStillRunning {
+            throw CLIError(
+                message: "ssh-pty-attach: bridge closed while remote PTY session is still running",
+                exitCode: 254
+            )
+        }
+
+        guard let surfaceID else {
+            return
+        }
+
+        do {
+            _ = try client.sendV2(method: "workspace.remote.pty_attach_end", params: [
+                "workspace_id": workspaceId,
+                "surface_id": surfaceID,
+                "session_id": sessionID,
+            ])
+        } catch {
+            throw CLIError(
+                message: "ssh-pty-attach: remote PTY exited but local session cleanup failed: \(userFacingRemotePTYErrorMessage(error))",
+                exitCode: 255
+            )
+        }
+    }
+
+    private func sshPTYBridgeParams(
+        workspaceId: String,
+        surfaceID: String?,
+        sessionID: String,
+        attachmentID: String,
+        command: String?,
+        requireExisting: Bool
+    ) -> [String: Any] {
+        var params: [String: Any] = [
+            "workspace_id": workspaceId,
+            "session_id": sessionID,
+            "attachment_id": attachmentID,
+            "command": command ?? "",
+            "require_existing": requireExisting,
+        ]
+        if let surfaceID {
+            params["surface_id"] = surfaceID
+            params["allow_moved_surface"] = true
+        }
+        return params
+    }
+
+    private func userFacingRemotePTYErrorMessage(_ value: Any?) -> String {
+        if let error = value as? Error {
+            return userFacingRemotePTYErrorMessage(String(describing: error))
+        }
+        return userFacingRemotePTYErrorMessage(debugString(value) ?? "unknown error")
+    }
+
+    private func userFacingRemotePTYErrorMessage(_ message: String) -> String {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "remote PTY operation failed" }
+        let lowered = trimmed.lowercased()
+        if lowered.contains("missing required capability") ||
+            lowered.contains("pty.session") ||
+            lowered.contains("method_not_found") {
+            return "remote daemon does not support persistent SSH PTY sessions; reconnect the remote workspace to update cmux"
+        }
+        if lowered.contains("pty_session_not_found") ||
+            (lowered.contains("persistent ssh pty session") && lowered.contains("not running")) ||
+            (lowered.contains("persistent pty session") && lowered.contains("not running")) {
+            return "persistent SSH PTY session is no longer running"
+        }
+        if lowered.contains("pty_input_queue_full") || lowered.contains("pty input queue is full") {
+            return "remote PTY input is temporarily backed up"
+        }
+        if lowered.contains("remote connection is not active") {
+            return "remote connection is not active"
+        }
+        if lowered.contains("remote daemon is not ready") || lowered.contains("remote daemon tunnel is not ready") {
+            return "remote daemon is not ready"
+        }
+        if lowered.contains("missing workspace_id in ssh pty session list response") {
+            return "missing workspace_id in SSH PTY session list response"
+        }
+        if lowered.contains("missing session_id in ssh pty session list response") {
+            return "missing session_id in SSH PTY session list response"
+        }
+        if lowered.contains("timed out") || lowered.contains("timeout") {
+            return "remote daemon did not respond in time"
+        }
+        return "remote PTY operation failed"
+    }
+
+    private func readSSHPTYBridgeReady(fd: Int32) throws -> String {
+        let maxStatusBytes = 4096
+        var line = Data()
+        var byte = [UInt8](repeating: 0, count: 1)
+        while line.count < maxStatusBytes {
+            let count = Darwin.read(fd, &byte, 1)
+            if count > 0 {
+                if byte[0] == 0x0A {
+                    if let carriageIndex = line.lastIndex(of: 0x0D),
+                       carriageIndex == line.index(before: line.endIndex) {
+                        line.remove(at: carriageIndex)
+                    }
+                    guard let payload = try? JSONSerialization.jsonObject(with: line, options: []) as? [String: Any],
+                          let type = payload["type"] as? String else {
+                        throw CLIError(message: "ssh-pty-attach: invalid bridge status")
+                    }
+                    switch type {
+                    case "ready":
+                        return ((payload["attachment_token"] as? String)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines)) ?? ""
+                    case "error":
+                        let message = ((payload["message"] as? String)?
+                            .trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 }
+                            ?? "remote PTY attach failed"
+                        throw CLIError(message: "ssh-pty-attach: \(message)")
+                    default:
+                        throw CLIError(message: "ssh-pty-attach: invalid bridge status")
+                    }
+                }
+                line.append(byte[0])
+            } else if count == 0 {
+                throw CLIError(message: "ssh-pty-attach: bridge closed before ready")
+            } else if errno != EINTR {
+                throw CLIError(message: "ssh-pty-attach: bridge read failed")
+            }
+        }
+        throw CLIError(message: "ssh-pty-attach: bridge status exceeded \(maxStatusBytes) bytes")
+    }
+
+    private func startSSHPTYResizeSource(
+        client: SocketClient,
+        workspaceId: String,
+        surfaceID: String?,
+        sessionID: String,
+        attachmentID: String,
+        attachmentToken: String,
+        socketLock: NSLock
+    ) -> DispatchSourceSignal {
+        signal(SIGWINCH, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(
+            signal: SIGWINCH,
+            queue: DispatchQueue(label: "com.cmux.ssh-pty.resize")
+        )
+        source.setEventHandler {
+            let size = self.currentCLITerminalSize()
+            socketLock.lock()
+            defer { socketLock.unlock() }
+            var params: [String: Any] = [
+                "workspace_id": workspaceId,
+                "session_id": sessionID,
+                "attachment_id": attachmentID,
+                "attachment_token": attachmentToken,
+                "cols": size.cols,
+                "rows": size.rows,
+            ]
+            if let surfaceID {
+                params["surface_id"] = surfaceID
+                params["allow_moved_surface"] = true
+            }
+            _ = try? client.sendV2(method: "workspace.remote.pty_resize", params: params)
+        }
+        source.resume()
+        return source
+    }
+
+    private func connectLoopbackTCP(host: String, port: Int) throws -> Int32 {
+        guard host == "127.0.0.1" || host == "localhost" else {
+            throw CLIError(message: "ssh-pty-attach: bridge host must be loopback")
+        }
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else {
+            throw CLIError(message: "ssh-pty-attach: failed to create bridge socket")
+        }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(UInt16(port).bigEndian)
+        addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let result = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard result == 0 else {
+            Darwin.close(fd)
+            throw CLIError(message: "ssh-pty-attach: failed to connect to bridge")
+        }
+        return fd
+    }
+
+    private func cliStrictInt(_ value: Any?) -> Int? {
+        if let int = value as? Int { return int }
+        if let number = value as? NSNumber {
+            let double = number.doubleValue
+            guard double.rounded(.towardZero) == double else { return nil }
+            return number.intValue
+        }
+        return nil
+    }
+
+    private func writeAll(fd: Int32, data: Data) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.bindMemory(to: UInt8.self).baseAddress else { return }
+            var remaining = rawBuffer.count
+            var cursor = base
+            while remaining > 0 {
+                let written = Darwin.write(fd, cursor, remaining)
+                if written > 0 {
+                    remaining -= written
+                    cursor = cursor.advanced(by: written)
+                } else if written < 0 && errno == EINTR {
+                    continue
+                } else {
+                    throw CLIError(message: "ssh-pty-attach: bridge write failed")
+                }
+            }
+        }
+    }
+
     private func runSSHSessionEnd(commandArgs: [String], client: SocketClient) throws {
         guard let relayPortRaw = optionValue(commandArgs, name: "--relay-port"),
               let relayPort = Int(relayPortRaw),
@@ -9472,9 +10977,7 @@ struct CMUXCLI {
     ) -> String? {
         guard shouldDeferRemoteReconnect(in: options) else { return nil }
         let preferredCLIPath = localCLIPath?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let escapedForegroundAuthToken = foregroundAuthToken
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"")
+        let quotedForegroundAuthToken = shellQuote(foregroundAuthToken)
         return [
             preferredCLIPath.map { "cmux_reconnect_cli=\(shellQuote($0));" } ?? "cmux_reconnect_cli=\"\";",
             "cmux_reconnect_socket=\"${CMUX_SOCKET_PATH:-${CMUX_SOCKET:-}}\";",
@@ -9484,9 +10987,10 @@ struct CMUXCLI {
             "if [ -z \"$cmux_reconnect_socket\" ]; then printf '%s\\n' 'cmux: deferred SSH reconnect skipped, local cmux socket not found' >&2;",
             "elif [ -z \"$cmux_reconnect_cli\" ] || [ ! -x \"$cmux_reconnect_cli\" ]; then printf '%s\\n' 'cmux: deferred SSH reconnect skipped, local cmux CLI not found' >&2;",
             "else",
-            "cmux_reconnect_payload=\"{\\\"workspace_id\\\":\\\"$CMUX_WORKSPACE_ID\\\",\\\"foreground_auth_token\\\":\\\"\(escapedForegroundAuthToken)\\\"}\";",
+            "cmux_reconnect_token=\(quotedForegroundAuthToken);",
+            "cmux_reconnect_payload=\"{\\\"workspace_id\\\":\\\"$CMUX_WORKSPACE_ID\\\",\\\"foreground_auth_token\\\":\\\"$cmux_reconnect_token\\\"}\";",
             "\"$cmux_reconnect_cli\" --socket \"$cmux_reconnect_socket\" rpc workspace.remote.foreground_auth_ready \"$cmux_reconnect_payload\" >/dev/null 2>&1 || true;",
-            "unset cmux_reconnect_payload;",
+            "unset cmux_reconnect_payload cmux_reconnect_token;",
             "fi;",
             "fi;",
             "unset cmux_reconnect_socket cmux_reconnect_cli;",
@@ -9509,6 +11013,10 @@ struct CMUXCLI {
     }
 
     private func shouldDeferRemoteReconnect(in options: [String]) -> Bool {
+        sshOptionsSupportReusableForegroundAuth(options)
+    }
+
+    internal func sshOptionsSupportReusableForegroundAuth(_ options: [String]) -> Bool {
         guard !hasSSHOptionKey(options, key: "LocalCommand"),
               !hasSSHOptionKey(options, key: "PermitLocalCommand") else {
             return false
@@ -9523,13 +11031,21 @@ struct CMUXCLI {
 
         let controlMaster = sshOptionValue(named: "ControlMaster", in: options)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased() ?? "auto"
-        switch controlMaster {
-        case "no", "false", "off":
+        if sshOptionValueIsDisabled(controlMaster) {
             return false
-        default:
-            return true
         }
+
+        let controlPersist = sshOptionValue(named: "ControlPersist", in: options)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !sshOptionValueIsDisabled(controlPersist, zeroIsDisabled: false)
+    }
+
+    private func sshOptionValueIsDisabled(_ rawValue: String?, zeroIsDisabled: Bool = true) -> Bool {
+        let normalized = rawValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard let normalized else { return false }
+        return ["no", "false", "off"].contains(normalized) || (zeroIsDisabled && normalized == "0")
     }
 
     private func defaultSSHControlPathTemplate(remoteRelayPort: Int? = nil) -> String {
@@ -11979,11 +13495,31 @@ struct CMUXCLI {
               --after-workspace <id|ref|index>
                                          Alias for --after
               --window <id|ref|index>      Window context
+              --dry-run                    Print the resolved final index without applying
 
             Example:
               cmux reorder-workspace --workspace workspace:2 --index 0
               cmux reorder-workspace --workspace workspace:3 --after workspace:1
+              cmux reorder-workspace --workspace workspace:2 --index 0 --dry-run
             """
+        case "reorder-workspaces":
+            return String(localized: "cli.help.reorderWorkspaces", defaultValue: """
+            Usage: cmux reorder-workspaces --order <id|ref|index>,<id|ref|index>,... [flags]
+
+            Reorder workspaces within a window as one atomic batch. The comma-separated
+            order is the final leading order inside the pinned and unpinned groups;
+            unmentioned workspaces keep their relative order after listed peers in the
+            same group.
+
+            Flags:
+              --order <refs>                Comma-separated workspace refs to place first
+              --window <id|ref|index>       Window context
+              --dry-run                     Print the resolved final indexes without applying
+
+            Example:
+              cmux reorder-workspaces --order workspace:1,workspace:11,workspace:31
+              cmux reorder-workspaces --order workspace:11,workspace:1 --dry-run
+            """)
         case "workspace-action":
             return """
             Usage: cmux workspace-action --action <name> [flags]
@@ -12136,6 +13672,56 @@ struct CMUXCLI {
               cmux ssh dev@my-host
               cmux ssh dev@my-host --name "gpu-box" --port 2222 --identity ~/.ssh/id_ed25519
               cmux ssh dev@my-host --ssh-option UserKnownHostsFile=/dev/null --ssh-option StrictHostKeyChecking=no
+            """
+        case "ssh-session-list":
+            return """
+            Usage: cmux ssh-session-list [--workspace <id|ref|index> | --all-workspaces]
+
+            List persisted cmux ssh PTY sessions for a remote workspace.
+
+            Flags:
+              --workspace <id|ref|index>  Target workspace (default: $CMUX_WORKSPACE_ID)
+              --all-workspaces            List sessions in every active remote workspace
+
+            Example:
+              cmux ssh-session-list
+              cmux ssh-session-list --workspace workspace:2
+              cmux ssh-session-list --all-workspaces
+            """
+        case "ssh-session-attach":
+            return """
+            Usage: cmux ssh-session-attach --session-id <id> [flags]
+
+            Open a terminal surface attached to a persisted cmux ssh PTY session.
+
+            Flags:
+              --workspace <id|ref|index>  Target workspace (default: $CMUX_WORKSPACE_ID/current)
+              --session-id <id>           Persisted SSH PTY session ID
+              --pane <id|ref|index>       Target pane for a new surface
+              --split <left|right|up|down> Create a new split instead of a surface
+              --surface <id|ref|index>    Source surface for --split
+              --focus <true|false>        Focus the attached surface (default: true)
+
+            Example:
+              cmux ssh-session-attach --session-id ssh-abc
+              cmux ssh-session-attach --workspace workspace:2 --session-id ssh-abc --split right
+            """
+        case "ssh-session-cleanup":
+            return """
+            Usage: cmux ssh-session-cleanup [--workspace <id|ref|index> | --all-workspaces] (--session-id <id> | --all)
+
+            Close persisted cmux ssh PTY sessions for a remote workspace.
+
+            Flags:
+              --workspace <id|ref|index>  Target workspace (default: $CMUX_WORKSPACE_ID)
+              --all-workspaces            Target every active remote workspace
+              --session-id <id>           Close one PTY session
+              --all                       Close every persisted PTY session in the target scope
+
+            Example:
+              cmux ssh-session-cleanup --session-id ssh-abc
+              cmux ssh-session-cleanup --workspace workspace:2 --all
+              cmux ssh-session-cleanup --all-workspaces --all
             """
         case "remote-daemon-status":
             return """
@@ -16556,6 +18142,8 @@ struct CMUXCLI {
                 codexExecutable: codexExecutable,
                 appServerURL: appServerURL,
                 threadId: thread.id,
+                parentThreadId: spawn.parentThreadId,
+                depth: depth,
                 launchPath: launchPath
             )
             guard let startupScript = CMUXCLI.codexTeamsStartupScript(commandText: commandText, cwd: thread.cwd) else {
@@ -16570,7 +18158,13 @@ struct CMUXCLI {
                 "direction": direction,
                 "focus": false,
                 "initial_command": startupScript,
-                "tmux_start_command": commandText
+                "tmux_start_command": commandText,
+                "startup_environment": [
+                    managedSubagentEnvironmentKey: "1",
+                    codexTeamsThreadEnvironmentKey: thread.id,
+                    codexTeamsParentThreadEnvironmentKey: spawn.parentThreadId,
+                    codexTeamsDepthEnvironmentKey: String(max(1, depth))
+                ]
             ]
             if let cwd = thread.cwd?.trimmingCharacters(in: .whitespacesAndNewlines),
                !cwd.isEmpty {
@@ -16685,6 +18279,8 @@ struct CMUXCLI {
         codexExecutable: String,
         appServerURL: String,
         threadId: String,
+        parentThreadId: String,
+        depth: Int,
         launchPath: String?
     ) -> String {
         var parts = ["env"]
@@ -16694,6 +18290,10 @@ struct CMUXCLI {
         }
         parts += [
             "CMUX_CODEX_TEAMS_APP_SERVER_URL=\(appServerURL)",
+            "\(managedSubagentEnvironmentKey)=1",
+            "\(codexTeamsThreadEnvironmentKey)=\(threadId)",
+            "\(codexTeamsParentThreadEnvironmentKey)=\(parentThreadId)",
+            "\(codexTeamsDepthEnvironmentKey)=\(max(1, depth))",
             codexExecutable,
             "resume",
             "--remote",
@@ -19343,15 +20943,11 @@ struct CMUXCLI {
                 client: client
             )
             sendClaudeFeedTelemetry(workspaceId: workspaceId)
-            let claudePid: Int? = {
-                guard let raw = ProcessInfo.processInfo.environment["CMUX_CLAUDE_PID"]?
-                    .trimmingCharacters(in: .whitespacesAndNewlines),
-                    let pid = Int(raw),
-                    pid > 0 else {
-                    return nil
-                }
-                return pid
-            }()
+            let claudePid = claudeAgentPID(from: ProcessInfo.processInfo.environment)
+            let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(
+                currentAgentPID: claudePid,
+                env: ProcessInfo.processInfo.environment
+            )
             let launchCommand = agentLaunchCommandFromEnvironment(
                 ProcessInfo.processInfo.environment,
                 fallbackPID: claudePid,
@@ -19413,13 +21009,13 @@ struct CMUXCLI {
                     workspaceId: workspaceId,
                     telemetry: telemetry
                 )
-            if shouldRegisterPID, let claudePid {
+            if shouldRegisterPID, let claudePid, !suppressVisibleMutations {
                 _ = try? sendV1Command(
                     "set_agent_pid claude_code \(claudePid) --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
                     client: client
                 )
             }
-            if isClearSessionStart {
+            if isClearSessionStart, !suppressVisibleMutations {
                 _ = try? sendV1Command("clear_notifications --tab=\(workspaceId)", client: client)
                 try setClaudeStatus(
                     client: client,
@@ -19450,6 +21046,11 @@ struct CMUXCLI {
                     workspaceId: workspaceId,
                     client: client
                 )
+                let claudePid = mappedSession?.pid ?? claudeAgentPID(from: ProcessInfo.processInfo.environment)
+                let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(
+                    currentAgentPID: claudePid,
+                    env: ProcessInfo.processInfo.environment
+                )
                 sendClaudeFeedTelemetry(workspaceId: workspaceId)
 
                 guard shouldApplyClaudeHookVisibleMutation(
@@ -19459,6 +21060,12 @@ struct CMUXCLI {
                     telemetry: telemetry
                 ) else {
                     telemetry.breadcrumb("claude-hook.stop.stale")
+                    print("OK")
+                    return
+                }
+
+                guard !suppressVisibleMutations else {
+                    telemetry.breadcrumb("claude-hook.stop.nested-suppressed")
                     print("OK")
                     return
                 }
@@ -19545,6 +21152,11 @@ struct CMUXCLI {
                 workspaceId: workspaceId,
                 surfaceId: surfaceId
             )
+            let claudePid = mappedSession?.pid ?? claudeAgentPID(from: ProcessInfo.processInfo.environment)
+            let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(
+                currentAgentPID: claudePid,
+                env: ProcessInfo.processInfo.environment
+            )
             sendClaudeFeedTelemetry(workspaceId: workspaceId)
             let shouldApplyPromptSubmit =
                 shouldApplyClaudeHookVisibleMutation(
@@ -19561,6 +21173,11 @@ struct CMUXCLI {
                 )
             guard shouldApplyPromptSubmit else {
                 telemetry.breadcrumb("claude-hook.prompt-submit.stale")
+                print("OK")
+                return
+            }
+            guard !suppressVisibleMutations else {
+                telemetry.breadcrumb("claude-hook.prompt-submit.nested-suppressed")
                 print("OK")
                 return
             }
@@ -19607,6 +21224,11 @@ struct CMUXCLI {
                 fallback: workspaceArg,
                 client: client
             )
+            let claudePid = mappedSession?.pid ?? claudeAgentPID(from: ProcessInfo.processInfo.environment)
+            let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(
+                currentAgentPID: claudePid,
+                env: ProcessInfo.processInfo.environment
+            )
             sendClaudeFeedTelemetry(workspaceId: workspaceId)
             guard shouldApplyClaudeHookVisibleMutation(
                 sessionStore: sessionStore,
@@ -19615,6 +21237,11 @@ struct CMUXCLI {
                 telemetry: telemetry
             ) else {
                 telemetry.breadcrumb("claude-hook.notification.stale")
+                print("OK")
+                return
+            }
+            guard !suppressVisibleMutations else {
+                telemetry.breadcrumb("claude-hook.notification.nested-suppressed")
                 print("OK")
                 return
             }
@@ -19712,7 +21339,12 @@ struct CMUXCLI {
                     workspaceId: workspaceId,
                     telemetry: telemetry
                 )
-                if shouldClearVisibleState {
+                let claudePid = consumedSession.pid ?? claudeAgentPID(from: ProcessInfo.processInfo.environment)
+                let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(
+                    currentAgentPID: claudePid,
+                    env: ProcessInfo.processInfo.environment
+                )
+                if shouldClearVisibleState, !suppressVisibleMutations {
                     _ = try? sendV1Command(
                         "clear_agent_pid claude_code --tab=\(workspaceId)\(socketPanelOption(consumedSession.surfaceId)) --clear-status",
                         client: client
@@ -19754,7 +21386,11 @@ struct CMUXCLI {
                 client: client
             )
             sendClaudeFeedTelemetry(workspaceId: workspaceId)
-            let claudePid = mappedSession?.pid
+            let claudePid = mappedSession?.pid ?? claudeAgentPID(from: ProcessInfo.processInfo.environment)
+            let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(
+                currentAgentPID: claudePid,
+                env: ProcessInfo.processInfo.environment
+            )
             guard shouldApplyClaudeHookVisibleMutation(
                 sessionStore: sessionStore,
                 parsedInput: parsedInput,
@@ -19762,6 +21398,11 @@ struct CMUXCLI {
                 telemetry: telemetry
             ) else {
                 telemetry.breadcrumb("claude-hook.pre-tool-use.stale")
+                print("OK")
+                return
+            }
+            guard !suppressVisibleMutations else {
+                telemetry.breadcrumb("claude-hook.pre-tool-use.nested-suppressed")
                 print("OK")
                 return
             }
@@ -20842,6 +22483,11 @@ struct CMUXCLI {
         let question: String?
     }
 
+    private struct CodexTranscriptSubagentSignals {
+        var isSubagentSession = false
+        var hasSubagentNotificationRelay = false
+    }
+
     private enum CodexTranscriptFailureReadResult {
         case unavailable
         case pending
@@ -21043,6 +22689,55 @@ struct CMUXCLI {
         return .healthy
     }
 
+    private func codexTranscriptTerminalTurnIds(path: String, turnIds: Set<String>) -> Set<String> {
+        let expectedTurnIds = Set(turnIds.compactMap { normalizedHookValue($0) })
+        guard !expectedTurnIds.isEmpty,
+              let content = readTextFileTail(path: path, maxBytes: 512 * 1024) else {
+            return []
+        }
+
+        var terminalTurnIds = Set<String>()
+        var currentTurnId: String?
+        for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let data = trimmed.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+                  let objectType = object["type"] as? String else {
+                continue
+            }
+
+            if objectType == "turn_context",
+               let payload = object["payload"] as? [String: Any] {
+                currentTurnId = firstString(in: payload, keys: ["turn_id", "turnId"])
+                continue
+            }
+
+            guard objectType == "event_msg",
+                  let payload = object["payload"] as? [String: Any],
+                  let eventType = payload["type"] as? String else {
+                continue
+            }
+
+            if eventType == "task_started" {
+                currentTurnId = firstString(in: payload, keys: ["turn_id", "turnId"])
+                continue
+            }
+
+            switch eventType {
+            case "task_complete", "turn_complete", "turn_aborted":
+                let payloadTurnId = firstString(in: payload, keys: ["turn_id", "turnId"]) ?? currentTurnId
+                if let payloadTurnId, expectedTurnIds.contains(payloadTurnId) {
+                    terminalTurnIds.insert(payloadTurnId)
+                }
+            default:
+                break
+            }
+        }
+
+        return terminalTurnIds
+    }
+
     private func readCodexTranscriptUserInput(
         path: String,
         turnId: String?,
@@ -21125,6 +22820,120 @@ struct CMUXCLI {
         }
 
         return candidate
+    }
+
+    private func readCodexTranscriptSubagentSignals(
+        path: String,
+        turnId: String?
+    ) -> CodexTranscriptSubagentSignals {
+        guard let content = readTextFileTail(path: path, maxBytes: 512 * 1024) else {
+            return CodexTranscriptSubagentSignals()
+        }
+
+        let normalizedTurnId = normalizedHookValue(turnId)
+        var signals = CodexTranscriptSubagentSignals()
+        var currentTurnId: String?
+        var currentTurnRelevant = normalizedTurnId == nil
+
+        for line in content.split(separator: "\n", omittingEmptySubsequences: true) {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  let data = trimmed.data(using: .utf8),
+                  let object = try? JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+                  let objectType = object["type"] as? String else {
+                continue
+            }
+
+            if objectType == "session_meta",
+               let payload = object["payload"] as? [String: Any],
+               codexTranscriptSessionMetaIsSubagent(payload) {
+                signals.isSubagentSession = true
+            }
+
+            if objectType == "turn_context",
+               let payload = object["payload"] as? [String: Any] {
+                let payloadTurnId = firstString(in: payload, keys: ["turn_id", "turnId"])
+                currentTurnId = payloadTurnId
+                currentTurnRelevant = normalizedTurnId.map { $0 == payloadTurnId } ?? true
+                continue
+            }
+
+            if objectType == "event_msg",
+               let payload = object["payload"] as? [String: Any],
+               let eventType = payload["type"] as? String {
+                switch eventType {
+                case "task_started":
+                    let payloadTurnId = firstString(in: payload, keys: ["turn_id", "turnId"])
+                    currentTurnId = payloadTurnId
+                    currentTurnRelevant = normalizedTurnId.map { $0 == payloadTurnId } ?? true
+                case "task_complete", "turn_complete":
+                    let payloadTurnId = firstString(in: payload, keys: ["turn_id", "turnId"])
+                    if let payloadTurnId {
+                        currentTurnId = payloadTurnId
+                    }
+                    if let normalizedTurnId {
+                        if payloadTurnId == normalizedTurnId || (payloadTurnId == nil && currentTurnRelevant) {
+                            currentTurnRelevant = false
+                        }
+                    } else {
+                        currentTurnRelevant = false
+                    }
+                default:
+                    break
+                }
+                continue
+            }
+
+            guard currentTurnRelevant || currentTurnId == nil else {
+                continue
+            }
+            guard codexTranscriptLineHasSubagentNotification(object) else {
+                continue
+            }
+            signals.hasSubagentNotificationRelay = true
+        }
+
+        return signals
+    }
+
+    private func codexTranscriptSessionMetaIsSubagent(_ payload: [String: Any]) -> Bool {
+        if firstString(in: payload, keys: ["thread_source", "threadSource"])?.lowercased() == "subagent" {
+            return true
+        }
+        if let source = payload["source"] as? [String: Any],
+           source["subagent"] != nil {
+            return true
+        }
+        return false
+    }
+
+    private func codexTranscriptLineHasSubagentNotification(_ object: [String: Any]) -> Bool {
+        guard (object["type"] as? String) == "response_item",
+              let payload = object["payload"] as? [String: Any],
+              (payload["type"] as? String) == "message",
+              (payload["role"] as? String) == "user" else {
+            return false
+        }
+        return codexTranscriptMessageText(payload)
+            .map { $0.contains("<subagent_notification>") }
+            ?? false
+    }
+
+    private func codexTranscriptMessageText(_ payload: [String: Any]) -> String? {
+        if let content = payload["content"] as? String {
+            let normalized = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            return normalized.isEmpty ? nil : normalized
+        }
+        guard let content = payload["content"] as? [[String: Any]] else {
+            return nil
+        }
+        let parts = content.compactMap { block -> String? in
+            let text = (block["text"] as? String) ?? (block["input_text"] as? String)
+            let normalized = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return normalized?.isEmpty == false ? normalized : nil
+        }
+        let joined = parts.joined(separator: "\n")
+        return joined.isEmpty ? nil : joined
     }
 
     private func codexUserInputEventCandidate(
@@ -22412,6 +24221,167 @@ struct CMUXCLI {
         }
 
         return candidate > 1 ? Int(candidate) : nil
+    }
+
+    private func claudeAgentPID(from env: [String: String]) -> Int? {
+        guard let raw = env["CMUX_CLAUDE_PID"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            let pid = Int(raw),
+            pid > 0 else {
+            return nil
+        }
+        return pid
+    }
+
+    private func shouldSuppressNestedAgentVisibleMutations(
+        currentAgentPID: Int?,
+        nestedPromptEvent: Bool = false,
+        transcriptSubagentSession: Bool = false,
+        env: [String: String]
+    ) -> Bool {
+        if let override = normalizedHookValue(env["CMUX_AGENT_HOOK_SUPPRESS_VISIBLE_MUTATIONS"])?.lowercased(),
+           Self.parseHookBoolean(override) == true {
+            return true
+        }
+
+        guard subagentNotificationSuppressionEnabled(env: env) else {
+            return false
+        }
+
+        if nestedPromptEvent {
+            return true
+        }
+
+        if managedSubagentVisibleMutationSuppressionRequested(env: env) {
+            return true
+        }
+
+        if transcriptSubagentSession {
+            return true
+        }
+
+        guard let currentAgentPID, currentAgentPID > 1 else {
+            return false
+        }
+
+        var candidate = pid_t(currentAgentPID)
+        var agentProcessCount = 0
+        var remainingAncestors = 32
+        while candidate > 1, remainingAncestors > 0 {
+            if nativeAgentProcessKind(for: candidate) != nil {
+                agentProcessCount += 1
+                if agentProcessCount >= 2 {
+                    return true
+                }
+            }
+            let next = parentPID(of: candidate)
+            guard next > 1, next != candidate else {
+                break
+            }
+            candidate = next
+            remainingAncestors -= 1
+        }
+        return false
+    }
+
+    private func managedSubagentVisibleMutationSuppressionRequested(env: [String: String]) -> Bool {
+        guard let raw = normalizedHookValue(env[managedSubagentEnvironmentKey]),
+              let parsed = Self.parseHookBoolean(raw) else {
+            return false
+        }
+        return parsed
+    }
+
+    private func subagentNotificationSuppressionEnabled(env: [String: String]) -> Bool {
+        if let raw = normalizedHookValue(env[suppressSubagentNotificationsEnvironmentKey]),
+           let parsed = Self.parseHookBoolean(raw) {
+            return parsed
+        }
+        for defaults in appDefaultsCandidates(env: env) {
+            if defaults.object(forKey: suppressSubagentNotificationsDefaultsKey) != nil {
+                return defaults.bool(forKey: suppressSubagentNotificationsDefaultsKey)
+            }
+        }
+        return true
+    }
+
+    private func appDefaultsCandidates(env: [String: String]) -> [UserDefaults] {
+        var candidates: [UserDefaults] = []
+        if let bundleId = normalizedHookValue(env["CMUX_BUNDLE_ID"]),
+           let defaults = UserDefaults(suiteName: bundleId) {
+            candidates.append(defaults)
+        }
+        candidates.append(.standard)
+        return candidates
+    }
+
+    private static func parseHookBoolean(_ rawValue: String) -> Bool? {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on", "enabled":
+            return true
+        case "0", "false", "no", "off", "disabled":
+            return false
+        default:
+            return nil
+        }
+    }
+
+    private func nativeAgentProcessKind(for pid: pid_t) -> HookAgentProcessKind? {
+        let name = processName(for: pid)
+        if let kind = Self.nativeAgentProcessKind(processName: name, arguments: []) {
+            return kind
+        }
+
+        let nameBase = Self.agentProcessBasename(name)
+        if let nameBase, nameBase != "node", nameBase != "bun" {
+            return nil
+        }
+
+        return Self.nativeAgentProcessKind(
+            processName: name,
+            arguments: processArguments(for: pid) ?? []
+        )
+    }
+
+    private static func nativeAgentProcessKind(
+        processName: String?,
+        arguments: [String]
+    ) -> HookAgentProcessKind? {
+        let nameBase = agentProcessBasename(processName)
+        let executableBase = agentProcessBasename(arguments.first)
+
+        // Codex's npm/bun launcher leaves a node process above the native
+        // Codex binary. That wrapper is part of the same launch, not a
+        // parent agent, so only native Codex executables count. Claude Code
+        // can run as a node script, so keep that as an agent process.
+        if nameBase == "node" || nameBase == "bun" || executableBase == "node" || executableBase == "bun" {
+            if arguments.dropFirst().contains(where: { argument in
+                let lowered = argument.lowercased()
+                return agentProcessBasename(argument) == "claude"
+                    || lowered.contains("/.claude/")
+                    || lowered.contains("/claude/versions/")
+            }) {
+                return .claude
+            }
+            return nil
+        }
+
+        let executable = arguments.first?.lowercased() ?? ""
+        if nameBase == "codex" || executableBase == "codex" || executable.contains("/codex/codex") {
+            return .codex
+        }
+        if nameBase == "claude" || executableBase == "claude" || executable.contains("/claude/versions/") {
+            return .claude
+        }
+        return nil
+    }
+
+    private static func agentProcessBasename(_ value: String?) -> String? {
+        guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty else {
+            return nil
+        }
+        return URL(fileURLWithPath: value).lastPathComponent.lowercased()
     }
 
     private func parentPID(of pid: pid_t) -> pid_t {
@@ -25223,16 +27193,16 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                 return nil
             }
         }
-        func hasNewerRunningSession(workspaceId: String, surfaceId: String) -> Bool {
+        func hasOtherRunningSession(workspaceId: String) -> Bool {
             (try? store.hasRunningSession(
                 workspaceId: workspaceId,
-                surfaceId: surfaceId,
+                surfaceId: nil,
                 excludingSessionId: sessionId,
-                onlyNewerThanExcludedSession: true
+                requireLiveProcess: true
             )) == true
         }
-        func setIdleStatusUnlessNewerSessionIsRunning(workspaceId: String, surfaceId: String) {
-            if hasNewerRunningSession(workspaceId: workspaceId, surfaceId: surfaceId) {
+        func setIdleStatusUnlessAnotherSessionIsRunning(workspaceId: String, surfaceId: String) {
+            if hasOtherRunningSession(workspaceId: workspaceId) {
 #if DEBUG
                 agentHookDebugLog(
                     "agentHook.status.keepRunning agent=\(def.name) session=\(agentHookDebugShort(sessionId)) workspace=\(agentHookDebugShort(workspaceId)) surface=\(agentHookDebugShort(surfaceId))",
@@ -25376,6 +27346,7 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
             let surfaceId = target.surfaceId
             sendAgentFeedTelemetry(workspaceId: workspaceId)
             let pid = inferredPID
+            let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(currentAgentPID: pid, env: env)
             let launchCommand = agentLaunchCommandFromEnvironment(
                 env,
                 fallbackPID: pid,
@@ -25391,22 +27362,26 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                     transcriptPath: input.transcriptPath ?? mapped?.transcriptPath,
                     pid: pid,
                     launchCommand: launchCommand,
-                    runtimeStatus: .running,
-                    updateRuntimeStatus: true
+                    runtimeStatus: suppressVisibleMutations ? nil : .running,
+                    updateRuntimeStatus: !suppressVisibleMutations
                 )
-                try? store.clearNotificationEmission(sessionId: sessionId)
-                publishAgentSurfaceResumeBinding(
-                    client: client,
-                    workspaceId: workspaceId,
-                    surfaceId: surfaceId,
-                    kind: def.name,
-                    displayName: def.displayName,
-                    sessionId: sessionId,
-                    cwd: hookCwd ?? mapped?.cwd,
-                    launchCommand: launchCommand
-                )
+                if suppressVisibleMutations {
+                    telemetry.breadcrumb("\(def.name)-hook.session-start.nested-suppressed")
+                } else {
+                    try? store.clearNotificationEmission(sessionId: sessionId)
+                    publishAgentSurfaceResumeBinding(
+                        client: client,
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        kind: def.name,
+                        displayName: def.displayName,
+                        sessionId: sessionId,
+                        cwd: hookCwd ?? mapped?.cwd,
+                        launchCommand: launchCommand
+                    )
+                }
             }
-            if let pid {
+            if let pid, !suppressVisibleMutations {
                 _ = try? sendV1Command(
                     "set_agent_pid \(pidKey) \(pid) --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
                     client: client
@@ -25430,7 +27405,51 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                 fallbackKind: def.name,
                 cwd: hookCwd ?? mapped?.cwd
             )
+            let transcriptPathForStore = input.transcriptPath ?? mapped?.transcriptPath
+            let activePromptTurnStack = mapped?.activePromptTurnIds?
+                .compactMap({ normalizedHookValue($0) }) ?? []
+            let activePromptTurnId = activePromptTurnStack.last ?? normalizedHookValue(mapped?.activePromptTurnId)
+            let terminalActivePromptTurnIds: Set<String>
+            let previousActivePromptTurnIsTerminal: Bool
+            if def.name == "codex",
+               let incomingTurnId = normalizedHookValue(input.turnId),
+               let activeTurnId = activePromptTurnId,
+               activeTurnId != incomingTurnId,
+               let transcriptPath = normalizedHookValue(transcriptPathForStore)
+                   ?? findCodexTranscriptPath(sessionId: sessionId, env: env) {
+                let activeTurnIds = activePromptTurnStack.isEmpty ? [activeTurnId] : activePromptTurnStack
+                terminalActivePromptTurnIds = codexTranscriptTerminalTurnIds(
+                    path: transcriptPath,
+                    turnIds: Set(activeTurnIds)
+                )
+                previousActivePromptTurnIsTerminal = terminalActivePromptTurnIds.contains(activeTurnId)
+            } else {
+                terminalActivePromptTurnIds = []
+                previousActivePromptTurnIsTerminal = false
+            }
+            let nestedPromptSubmit: Bool
             if !sessionId.isEmpty {
+                nestedPromptSubmit = (try? store.recordPromptSubmit(
+                    sessionId: sessionId,
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId,
+                    cwd: hookCwd ?? mapped?.cwd,
+                    transcriptPath: transcriptPathForStore,
+                    turnId: input.turnId,
+                    previousActivePromptTurnIsTerminal: previousActivePromptTurnIsTerminal,
+                    terminalActivePromptTurnIds: terminalActivePromptTurnIds,
+                    pid: pid,
+                    launchCommand: launchCommand
+                )) ?? false
+            } else {
+                nestedPromptSubmit = false
+            }
+            let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(
+                currentAgentPID: pid,
+                nestedPromptEvent: nestedPromptSubmit,
+                env: env
+            )
+            if !sessionId.isEmpty, !suppressVisibleMutations {
                 try? store.upsert(
                     sessionId: sessionId,
                     workspaceId: workspaceId,
@@ -25454,22 +27473,26 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                     launchCommand: launchCommand ?? mapped?.launchCommand
                 )
             }
-            if let pid {
+            if let pid, !suppressVisibleMutations {
                 _ = try? sendV1Command(
                     "set_agent_pid \(pidKey) \(pid) --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
                     client: client
                 )
             }
-            _ = try? sendV1Command(
-                "clear_notifications --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
-                client: client
-            )
-            let runningStatus = String(localized: "agent.generic.status.running", defaultValue: "Running")
-            _ = try sendV1Command(
-                "set_status \(def.statusKey) \(runningStatus) --icon=bolt.fill --color=#4C8DFF --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
-                client: client
-            )
-            if def.name == "codex", !sessionId.isEmpty {
+            if !suppressVisibleMutations {
+                _ = try? sendV1Command(
+                    "clear_notifications --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
+                    client: client
+                )
+                let runningStatus = String(localized: "agent.generic.status.running", defaultValue: "Running")
+                _ = try sendV1Command(
+                    "set_status \(def.statusKey) \(runningStatus) --icon=bolt.fill --color=#4C8DFF --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
+                    client: client
+                )
+            } else {
+                telemetry.breadcrumb("\(def.name)-hook.prompt-submit.nested-suppressed")
+            }
+            if def.name == "codex", !sessionId.isEmpty, !suppressVisibleMutations {
                 let leasePath = createCodexMonitorLease(
                     sessionId: sessionId,
                     turnId: input.turnId,
@@ -25521,10 +27544,22 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
             sendAgentFeedTelemetry(workspaceId: workspaceId)
             let pid = mapped?.pid ?? inferredPID
             let codexFailure: CodexHookFailureSummary?
+            let codexSubagentSignals: CodexTranscriptSubagentSignals
             if def.name == "codex" {
                 codexFailure = summarizeCodexHookFailure(parsedInput: input, sessionId: sessionId, env: env)
+                if subagentNotificationSuppressionEnabled(env: env),
+                   let transcriptPath = normalizedHookValue(input.transcriptPath)
+                    ?? findCodexTranscriptPath(sessionId: sessionId, env: env) {
+                    codexSubagentSignals = readCodexTranscriptSubagentSignals(
+                        path: transcriptPath,
+                        turnId: input.turnId
+                    )
+                } else {
+                    codexSubagentSignals = CodexTranscriptSubagentSignals()
+                }
             } else {
                 codexFailure = nil
+                codexSubagentSignals = CodexTranscriptSubagentSignals()
             }
             let antigravityFailure: AgentHookNotificationSummary? = {
                 guard def.name == "antigravity", let rawObject = input.rawObject else { return nil }
@@ -25583,14 +27618,63 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                 )
             let antigravityHasActiveBackgroundWork = hasActiveAntigravityBackgroundWork()
             let stopNotificationStatus: AgentHookNotificationStatus = (codexFailure == nil && antigravityFailure == nil) ? .idle : .error
-
+            let launchCommand = agentLaunchCommandFromEnvironment(
+                env,
+                fallbackPID: pid,
+                fallbackKind: def.name,
+                cwd: cwd
+            )
+            let terminalActivePromptTurnIdsForStop: Set<String>
+            if def.name == "codex",
+               let incomingTurnId = normalizedHookValue(input.turnId) {
+                let activePromptTurnStack = mapped?.activePromptTurnIds?
+                    .compactMap({ normalizedHookValue($0) }) ?? []
+                let activePromptTurnId = activePromptTurnStack.last ?? normalizedHookValue(mapped?.activePromptTurnId)
+                let activeTurnIds = activePromptTurnStack.isEmpty
+                    ? activePromptTurnId.map { [$0] } ?? []
+                    : activePromptTurnStack
+                let activeTurnIdsToCheck = activeTurnIds.filter { $0 != incomingTurnId }
+                if !activeTurnIdsToCheck.isEmpty,
+                   let transcriptPath = normalizedHookValue(input.transcriptPath ?? mapped?.transcriptPath)
+                       ?? findCodexTranscriptPath(sessionId: sessionId, env: env) {
+                    terminalActivePromptTurnIdsForStop = codexTranscriptTerminalTurnIds(
+                        path: transcriptPath,
+                        turnIds: Set(activeTurnIdsToCheck)
+                    )
+                } else {
+                    terminalActivePromptTurnIdsForStop = []
+                }
+            } else {
+                terminalActivePromptTurnIdsForStop = []
+            }
+            let nestedPromptStop: Bool
             if !sessionId.isEmpty {
-                let launchCommand = agentLaunchCommandFromEnvironment(
-                    env,
-                    fallbackPID: pid,
-                    fallbackKind: def.name,
-                    cwd: cwd
-                )
+                nestedPromptStop = (try? store.recordPromptStop(
+                    sessionId: sessionId,
+                    workspaceId: workspaceId,
+                    surfaceId: surfaceId,
+                    cwd: cwd,
+                    transcriptPath: input.transcriptPath ?? mapped?.transcriptPath,
+                    turnId: input.turnId,
+                    terminalActivePromptTurnIds: terminalActivePromptTurnIdsForStop,
+                    pid: pid,
+                    launchCommand: launchCommand,
+                    lastSubtitle: nil,
+                    lastBody: nil
+                )) ?? false
+            } else {
+                nestedPromptStop = false
+            }
+            let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(
+                currentAgentPID: pid,
+                nestedPromptEvent: nestedPromptStop,
+                transcriptSubagentSession: codexSubagentSignals.isSubagentSession,
+                env: env
+            )
+            let suppressCompletionNotification = suppressVisibleMutations
+                || codexSubagentSignals.hasSubagentNotificationRelay
+
+            if !sessionId.isEmpty, !suppressVisibleMutations {
                 try? store.upsert(sessionId: sessionId, workspaceId: workspaceId, surfaceId: surfaceId, cwd: cwd,
                                   transcriptPath: input.transcriptPath ?? mapped?.transcriptPath,
                                   pid: pid,
@@ -25612,7 +27696,7 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                     launchCommand: launchCommand ?? mapped?.launchCommand
                 )
             }
-            if let pid {
+            if let pid, !suppressVisibleMutations {
                 _ = try? sendV1Command(
                     "set_agent_pid \(pidKey) \(pid) --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
                     client: client
@@ -25625,7 +27709,13 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
             let shouldPublishGrokStopFallbackNotification = def.name == "grok"
                 && stopNotificationStatus == .idle
                 && (grokAssistantMessage != nil || !hasGrokTranscriptContext)
-            let shouldPublishStopAlert = shouldPublishStopNotification || shouldPublishGrokStopFallbackNotification
+            let shouldPublishStopAlert = (shouldPublishStopNotification || shouldPublishGrokStopFallbackNotification)
+                && !suppressCompletionNotification
+            if suppressVisibleMutations {
+                telemetry.breadcrumb("\(def.name)-hook.stop.nested-suppressed")
+            } else if suppressCompletionNotification {
+                telemetry.breadcrumb("\(def.name)-hook.stop.subagent-notification-suppressed")
+            }
             if shouldPublishStopAlert, shouldSendNotification(fingerprint: notificationFingerprint) {
                 let payload = notificationPayload(title: def.displayName, subtitle: subtitle, body: body)
                 let notifyCommand = "notify_target_async \(workspaceId) \(surfaceId) \(payload)"
@@ -25664,28 +27754,30 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                 )
 #endif
             }
-            if let codexFailure {
-                _ = try? sendV1Command(
-                    "set_status \(def.statusKey) \(codexFailure.statusValue) --icon=exclamationmark.triangle.fill --color=#FF453A --priority=100 --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
-                    client: client
-                )
-            } else if antigravityFailure != nil {
-                let statusValue = String.localizedStringWithFormat(
-                    String(localized: "agent.generic.notification.status.error", defaultValue: "%@ error"),
-                    def.displayName
-                )
-                _ = try? sendV1Command(
-                    "set_status \(def.statusKey) \(statusValue) --icon=exclamationmark.triangle.fill --color=#FF453A --priority=100 --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
-                    client: client
-                )
-            } else if antigravityHasActiveBackgroundWork {
-                let runningStatus = String(localized: "agent.generic.status.running", defaultValue: "Running")
-                _ = try? sendV1Command(
-                    "set_status \(def.statusKey) \(runningStatus) --icon=bolt.fill --color=#4C8DFF --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
-                    client: client
-                )
-            } else {
-                setIdleStatusUnlessNewerSessionIsRunning(workspaceId: workspaceId, surfaceId: surfaceId)
+            if !suppressVisibleMutations {
+                if let codexFailure {
+                    _ = try? sendV1Command(
+                        "set_status \(def.statusKey) \(codexFailure.statusValue) --icon=exclamationmark.triangle.fill --color=#FF453A --priority=100 --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
+                        client: client
+                    )
+                } else if antigravityFailure != nil {
+                    let statusValue = String.localizedStringWithFormat(
+                        String(localized: "agent.generic.notification.status.error", defaultValue: "%@ error"),
+                        def.displayName
+                    )
+                    _ = try? sendV1Command(
+                        "set_status \(def.statusKey) \(statusValue) --icon=exclamationmark.triangle.fill --color=#FF453A --priority=100 --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
+                        client: client
+                    )
+                } else if antigravityHasActiveBackgroundWork {
+                    let runningStatus = String(localized: "agent.generic.status.running", defaultValue: "Running")
+                    _ = try? sendV1Command(
+                        "set_status \(def.statusKey) \(runningStatus) --icon=bolt.fill --color=#4C8DFF --tab=\(workspaceId)\(socketPanelOption(surfaceId))",
+                        client: client
+                    )
+                } else {
+                    setIdleStatusUnlessAnotherSessionIsRunning(workspaceId: workspaceId, surfaceId: surfaceId)
+                }
             }
 
         case .notification:
@@ -25783,21 +27875,42 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                     fallbackKind: def.name,
                     cwd: hookCwd ?? mapped?.cwd
                 )
-                try? store.upsert(
-                    sessionId: sessionId,
-                    workspaceId: workspaceId,
-                    surfaceId: surfaceId,
-                    cwd: notificationCwd,
-                    transcriptPath: input.transcriptPath ?? mapped?.transcriptPath,
-                    pid: pid,
-                    launchCommand: launchCommand,
-                    lastSubtitle: summary.subtitle,
-                    lastBody: summary.body,
-                    lastNotificationStatus: summary.status,
-                    updateLastNotificationStatus: true,
-                    runtimeStatus: runtimeStatus(for: summary.status),
-                    updateRuntimeStatus: summary.status != nil
-                )
+                // These agents use completion notifications as turn boundaries;
+                // keep the route but close nested prompt depth.
+                if (def.name == "grok" || def.name == "antigravity"),
+                   summary.status == .idle || summary.status == .error {
+                    _ = try? store.recordPromptStop(
+                        sessionId: sessionId,
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        cwd: notificationCwd,
+                        transcriptPath: input.transcriptPath ?? mapped?.transcriptPath,
+                        pid: pid,
+                        launchCommand: launchCommand,
+                        lastSubtitle: summary.subtitle,
+                        lastBody: summary.body,
+                        lastNotificationStatus: summary.status,
+                        updateLastNotificationStatus: true,
+                        runtimeStatus: runtimeStatus(for: summary.status),
+                        updateRuntimeStatus: true
+                    )
+                } else {
+                    try? store.upsert(
+                        sessionId: sessionId,
+                        workspaceId: workspaceId,
+                        surfaceId: surfaceId,
+                        cwd: notificationCwd,
+                        transcriptPath: input.transcriptPath ?? mapped?.transcriptPath,
+                        pid: pid,
+                        launchCommand: launchCommand,
+                        lastSubtitle: summary.subtitle,
+                        lastBody: summary.body,
+                        lastNotificationStatus: summary.status,
+                        updateLastNotificationStatus: true,
+                        runtimeStatus: runtimeStatus(for: summary.status),
+                        updateRuntimeStatus: summary.status != nil
+                    )
+                }
             }
 
             let notificationFingerprint = notificationDedupeFingerprint(status: summary.status)
@@ -25860,7 +27973,7 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                     client: client
                 )
             case .idle?:
-                setIdleStatusUnlessNewerSessionIsRunning(workspaceId: workspaceId, surfaceId: surfaceId)
+                setIdleStatusUnlessAnotherSessionIsRunning(workspaceId: workspaceId, surfaceId: surfaceId)
             case nil:
                 break
             }
@@ -25873,6 +27986,17 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
             if def.name == "grok" || def.name == "antigravity" {
                 if let mapped = sessionId.isEmpty ? nil : (try? store.lookup(sessionId: sessionId)) {
                     sendAgentFeedTelemetry(workspaceId: mapped.workspaceId)
+                    _ = try? store.recordPromptStop(
+                        sessionId: sessionId,
+                        workspaceId: mapped.workspaceId,
+                        surfaceId: mapped.surfaceId,
+                        cwd: hookCwd ?? mapped.cwd,
+                        transcriptPath: input.transcriptPath ?? mapped.transcriptPath,
+                        pid: mapped.pid,
+                        launchCommand: mapped.launchCommand,
+                        lastSubtitle: nil,
+                        lastBody: nil
+                    )
                 }
 #if DEBUG
                 agentHookDebugLog(
@@ -25883,18 +28007,23 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
 #endif
                 break
             }
-            if let mapped = try? store.consume(sessionId: sessionId, workspaceId: nil, surfaceId: nil) {
+            if let mapped = sessionId.isEmpty ? nil : (try? store.lookup(sessionId: sessionId)) {
                 sendAgentFeedTelemetry(workspaceId: mapped.workspaceId)
-                clearAgentSurfaceResumeBinding(
-                    client: client,
-                    workspaceId: mapped.workspaceId,
-                    surfaceId: mapped.surfaceId,
-                    sessionId: mapped.sessionId
-                )
-                _ = try? sendV1Command(
-                    "clear_agent_pid \(pidKey) --tab=\(mapped.workspaceId)\(socketPanelOption(mapped.surfaceId)) --clear-status",
-                    client: client
-                )
+                let suppressVisibleMutations = shouldSuppressNestedAgentVisibleMutations(currentAgentPID: mapped.pid, env: env)
+                if suppressVisibleMutations {
+                    telemetry.breadcrumb("\(def.name)-hook.session-end.nested-suppressed")
+                } else if let consumed = try? store.consume(sessionId: sessionId, workspaceId: nil, surfaceId: nil) {
+                    clearAgentSurfaceResumeBinding(
+                        client: client,
+                        workspaceId: consumed.workspaceId,
+                        surfaceId: consumed.surfaceId,
+                        sessionId: consumed.sessionId
+                    )
+                    _ = try? sendV1Command(
+                        "clear_agent_pid \(pidKey) --tab=\(consumed.workspaceId)\(socketPanelOption(consumed.surfaceId)) --clear-status",
+                        client: client
+                    )
+                }
             }
 
         case .noop:
@@ -28002,8 +30131,10 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
                 return ("SessionStart", false)
             case "SessionEnd":
                 return ("SessionEnd", false)
-            case "Stop", "SubagentStop":
+            case "Stop":
                 return ("Stop", false)
+            case "SubagentStop":
+                return ("SubagentStop", false)
             case "Notification":
                 return ("Notification", false)
             default:
@@ -28066,8 +30197,10 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
             return ("SessionStart", false)
         case "SessionEnd":
             return ("SessionEnd", false)
-        case "Stop", "SubagentStop":
+        case "Stop":
             return ("Stop", false)
+        case "SubagentStop":
+            return ("SubagentStop", false)
         case "Notification":
             return ("Notification", false)
         default:
@@ -29216,12 +31349,16 @@ export default function cmuxPiSessionExtension(pi: ExtensionAPI) {
           focus-window --window <id>
           close-window --window <id>
           move-workspace-to-window --workspace <id|ref> --window <id|ref>
-          reorder-workspace --workspace <id|ref|index> (--index <n> | --before <id|ref|index> | --after <id|ref|index>) [--window <id|ref|index>]
+          reorder-workspace --workspace <id|ref|index> (--index <n> | --before <id|ref|index> | --after <id|ref|index>) [--window <id|ref|index>] [--dry-run]
+          reorder-workspaces --order <id|ref|index>,<id|ref|index>,... [--window <id|ref|index>] [--dry-run]
           workspace-action --action <name> [--workspace <id|ref|index>] [--window <id|ref|index>] [--title <text>] [--color <name|#hex>] [--description <text>]
           move-tab-to-new-workspace [--tab <id|ref|index>] [--surface <id|ref|index>] [--workspace <id|ref|index>] [--window <id|ref|index>] [--title <text>] [--focus <true|false>]
           list-workspaces [--window <id|ref|index>]
           new-workspace [--name <title>] [--description <text>] [--cwd <path>] [--command <text>] [--layout <json>] [--window <id|ref|index>] [--focus <true|false>]
           ssh <destination> [--name <title>] [--port <n>] [--identity <path>] [--ssh-option <opt>] [--window <id|ref|index>] [--no-focus] [-- <remote-command-args>]
+          ssh-session-list [--workspace <id|ref|index> | --all-workspaces]
+          ssh-session-attach --session-id <id> [--workspace <id|ref|index>] [--pane <id|ref|index> | --split <left|right|up|down>]
+          ssh-session-cleanup [--workspace <id|ref|index> | --all-workspaces] (--session-id <id> | --all)
           remote-daemon-status [--os <darwin|linux>] [--arch <arm64|amd64>]
           new-split <left|right|up|down> [--workspace <id|ref|index>] [--surface <id|ref|index>] [--panel <id|ref|index>] [--window <id|ref|index>] [--focus <true|false>]
           list-panes [--workspace <id|ref|index>] [--window <id|ref|index>]

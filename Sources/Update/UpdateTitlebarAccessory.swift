@@ -492,6 +492,8 @@ struct TitlebarControlsView: View {
         let config = style.config
         let foregroundColor = Color(nsColor: titlebarControlForegroundNSColor(opacity: 0.78))
         controlsGroup(config: config, foregroundColor: foregroundColor)
+            .padding(.top, -1)
+            .padding(.bottom, 1)
             .padding(.leading, 4)
             .padding(.trailing, titlebarHintTrailingInset)
             .contentShape(Rectangle())
@@ -556,7 +558,10 @@ struct TitlebarControlsView: View {
                 cmuxDebugLog("titlebar.toggleSidebar")
                 #endif
                 onToggleSidebar()
-            }) {
+            },
+                rightClickAction: { anchorView, event in
+                    CmuxExtensionSidebarSelection.showMenu(anchorView: anchorView, event: event)
+                }) {
                 iconLabel(systemName: "sidebar.left", config: config, foregroundColor: foregroundColor)
             }
             .safeHelp(KeyboardShortcutSettings.Action.toggleSidebar.tooltip(String(localized: "titlebar.sidebar.tooltip", defaultValue: "Show or hide the sidebar")))
