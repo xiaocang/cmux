@@ -18,6 +18,8 @@ protocol BrowserHiddenWebViewDiscardManagerDelegate: AnyObject {
 
 @MainActor
 final class BrowserHiddenWebViewDiscardManager {
+    private static let retentionCoordinator = BrowserHiddenWebViewRetentionCoordinator()
+
     struct BlockerSnapshot {
         let isClosing: Bool
         let isVisibleInUI: Bool
@@ -49,7 +51,7 @@ final class BrowserHiddenWebViewDiscardManager {
     private(set) var restoredSessionShouldRenderWebView: Bool?
 
     var hasScheduledDiscard: Bool {
-        discardTimer != nil
+        discardTimer != nil || Self.retentionCoordinator.contains(self)
     }
 
     func blockers(for snapshot: BlockerSnapshot) -> [String] {
@@ -76,16 +78,23 @@ final class BrowserHiddenWebViewDiscardManager {
         discardTimer?.cancel()
         discardTimer = nil
 
-        guard let delegate else { return }
-        guard blockers(for: delegate.hiddenWebViewDiscardSnapshot).isEmpty else { return }
+        guard let delegate else {
+            Self.retentionCoordinator.remove(self)
+            return
+        }
+        guard blockers(for: delegate.hiddenWebViewDiscardSnapshot).isEmpty else {
+            Self.retentionCoordinator.remove(self)
+            return
+        }
 
         let observedWebViewInstanceID = delegate.hiddenWebViewDiscardWebViewInstanceID
         let generation = scheduleGeneration
         let hiddenAt = delegate.hiddenWebViewDiscardHiddenAt ?? Date()
         let elapsed = Date().timeIntervalSince(hiddenAt)
         let remaining = max(0, BrowserHiddenWebViewDiscardPolicy.hiddenDelay - elapsed)
+        Self.retentionCoordinator.retainIfEligible(self, reason: reason)
         if remaining <= 0 {
-            delegate.hiddenWebViewDiscardManagerDidRequestDiscard(self, reason: reason)
+            Self.retentionCoordinator.enforceLimit(reason: reason)
             return
         }
 
@@ -99,7 +108,7 @@ final class BrowserHiddenWebViewDiscardManager {
                 guard delegate.hiddenWebViewDiscardWebViewInstanceID == observedWebViewInstanceID else { return }
                 self.discardTimer?.cancel()
                 self.discardTimer = nil
-                delegate.hiddenWebViewDiscardManagerDidRequestDiscard(self, reason: reason)
+                Self.retentionCoordinator.enforceLimit(reason: reason)
             }
         }
         discardTimer = timer
@@ -110,6 +119,7 @@ final class BrowserHiddenWebViewDiscardManager {
         scheduleGeneration &+= 1
         discardTimer?.cancel()
         discardTimer = nil
+        Self.retentionCoordinator.remove(self)
     }
 
     func installPolicyObserver() {
@@ -133,6 +143,7 @@ final class BrowserHiddenWebViewDiscardManager {
     }
 
     func markDiscarded(reason: String, now: Date) {
+        cancel()
         isDiscardedForMemory = true
         discardedAt = now
         lastDiscardReason = reason
@@ -193,6 +204,160 @@ final class BrowserHiddenWebViewDiscardManager {
         if let policyObserver {
             NotificationCenter.default.removeObserver(policyObserver)
             self.policyObserver = nil
+        }
+    }
+
+#if DEBUG
+    static func debugResetRetentionCoordinatorForTesting() {
+        retentionCoordinator.reset()
+    }
+#endif
+}
+
+@MainActor
+private final class BrowserHiddenWebViewRetentionCoordinator {
+    private struct Entry {
+        weak var manager: BrowserHiddenWebViewDiscardManager?
+        let hiddenAt: Date
+        let sequence: UInt64
+        let webViewInstanceID: UUID
+        var lastReason: String
+    }
+
+    private var entriesByManagerId: [ObjectIdentifier: Entry] = [:]
+    private var nextSequence: UInt64 = 0
+
+    func contains(_ manager: BrowserHiddenWebViewDiscardManager) -> Bool {
+        pruneInvalidEntries()
+        return entriesByManagerId[ObjectIdentifier(manager)] != nil
+    }
+
+    func retainIfEligible(_ manager: BrowserHiddenWebViewDiscardManager, reason: String) {
+        pruneInvalidEntries()
+
+        guard BrowserHiddenWebViewDiscardPolicy.isEnabled,
+              let delegate = manager.delegate,
+              manager.blockers(for: delegate.hiddenWebViewDiscardSnapshot).isEmpty else {
+            remove(manager)
+            return
+        }
+
+        let managerId = ObjectIdentifier(manager)
+        let hiddenAt = delegate.hiddenWebViewDiscardHiddenAt ?? Date()
+        let webViewInstanceID = delegate.hiddenWebViewDiscardWebViewInstanceID
+
+        if var entry = entriesByManagerId[managerId],
+           entry.webViewInstanceID == webViewInstanceID {
+            entry.lastReason = reason
+            entriesByManagerId[managerId] = entry
+        } else {
+            nextSequence &+= 1
+            entriesByManagerId[managerId] = Entry(
+                manager: manager,
+                hiddenAt: hiddenAt,
+                sequence: nextSequence,
+                webViewInstanceID: webViewInstanceID,
+                lastReason: reason
+            )
+        }
+
+        enforceLimit(reason: reason)
+    }
+
+    func remove(_ manager: BrowserHiddenWebViewDiscardManager) {
+        entriesByManagerId.removeValue(forKey: ObjectIdentifier(manager))
+    }
+
+    func enforceLimit(reason: String) {
+        pruneInvalidEntries()
+
+        let retentionLimit = BrowserHiddenWebViewDiscardPolicy.hiddenWebViewRetentionLimit
+        guard BrowserHiddenWebViewDiscardPolicy.isEnabled, retentionLimit >= 0 else {
+            entriesByManagerId.removeAll()
+            return
+        }
+
+        let retainedEntries = sortedEntries()
+        let overflowCount = retainedEntries.count - retentionLimit
+        guard overflowCount > 0 else { return }
+
+        let now = Date()
+        let evictionCandidates = retainedEntries
+            .filter { isPastGracePeriod($0, now: now) }
+            .prefix(overflowCount)
+
+        for entry in evictionCandidates {
+            guard let manager = entry.manager,
+                  let delegate = manager.delegate else {
+                entriesByManagerId.removeValue(forKey: entry.id)
+                continue
+            }
+
+            guard delegate.hiddenWebViewDiscardWebViewInstanceID == entry.webViewInstanceID,
+                  manager.blockers(for: delegate.hiddenWebViewDiscardSnapshot).isEmpty,
+                  isPastGracePeriod(entry, now: now) else {
+                entriesByManagerId.removeValue(forKey: entry.id)
+                continue
+            }
+
+            entriesByManagerId.removeValue(forKey: entry.id)
+            delegate.hiddenWebViewDiscardManagerDidRequestDiscard(
+                manager,
+                reason: "lru_retention_limit.\(reason)"
+            )
+        }
+
+        pruneInvalidEntries()
+    }
+
+#if DEBUG
+    func reset() {
+        entriesByManagerId.removeAll()
+        nextSequence = 0
+    }
+#endif
+
+    private func pruneInvalidEntries() {
+        guard BrowserHiddenWebViewDiscardPolicy.isEnabled else {
+            entriesByManagerId.removeAll()
+            return
+        }
+
+        entriesByManagerId = entriesByManagerId.filter { _, entry in
+            guard let manager = entry.manager,
+                  let delegate = manager.delegate,
+                  delegate.hiddenWebViewDiscardWebViewInstanceID == entry.webViewInstanceID else {
+                return false
+            }
+            return manager.blockers(for: delegate.hiddenWebViewDiscardSnapshot).isEmpty
+        }
+    }
+
+    private func sortedEntries() -> [EntryWithID] {
+        entriesByManagerId
+            .map { EntryWithID(id: $0.key, entry: $0.value) }
+            .sorted { lhs, rhs in
+                if lhs.entry.hiddenAt != rhs.entry.hiddenAt {
+                    return lhs.entry.hiddenAt < rhs.entry.hiddenAt
+                }
+                return lhs.entry.sequence < rhs.entry.sequence
+            }
+    }
+
+    private func isPastGracePeriod(_ entry: EntryWithID, now: Date) -> Bool {
+        now.timeIntervalSince(entry.entry.hiddenAt) >= BrowserHiddenWebViewDiscardPolicy.hiddenDelay
+    }
+
+    private struct EntryWithID {
+        let id: ObjectIdentifier
+        let entry: Entry
+
+        var manager: BrowserHiddenWebViewDiscardManager? {
+            entry.manager
+        }
+
+        var webViewInstanceID: UUID {
+            entry.webViewInstanceID
         }
     }
 }

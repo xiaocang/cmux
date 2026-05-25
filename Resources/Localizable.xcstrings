@@ -82147,13 +82147,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Hidden browser tabs release page memory after the delay below, then restore when shown again."
+            "value": "Hidden browser tabs keep the most recent %lld pages live; older hidden tabs may release page memory after the delay below."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "非表示のブラウザタブは下の遅延後にページメモリを解放し、再表示時に復元します。"
+            "value": "非表示のブラウザタブは最新の%lldページをライブ状態で保持し、それより古い非表示タブは下の遅延後にページメモリを解放する場合があります。"
           }
         }
       }
@@ -82232,13 +82232,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "How long a browser tab must stay hidden before cmux frees its page memory. Active downloads, popups, developer tools, and fullscreen pages are skipped."
+            "value": "How long a hidden browser tab must wait before it can be evicted when the retention limit is exceeded. Active downloads, popups, developer tools, and fullscreen pages are skipped."
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "ブラウザタブが非表示になってから、cmux がページメモリを解放するまでの時間です。進行中のダウンロード、ポップアップ、開発者ツール、フルスクリーンページは対象外です。"
+            "value": "非表示のブラウザタブが、保持上限を超えたときに淘汰対象になるまでの待機時間です。進行中のダウンロード、ポップアップ、開発者ツール、フルスクリーンページは対象外です。"
           }
         }
       }
@@ -99209,13 +99209,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "browser.discardHiddenWebViews memory hidden tabs webview discard unload reclaim"
+            "value": "browser.discardHiddenWebViews memory hidden tabs webview discard unload reclaim lru retention limit"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "browser.discardHiddenWebViews memory hidden tabs webview discard unload reclaim メモリ 非表示 タブ 破棄 解放 復元 ブラウザ"
+            "value": "browser.discardHiddenWebViews memory hidden tabs webview discard unload reclaim lru retention limit メモリ 非表示 タブ 破棄 解放 復元 ブラウザ"
           }
         }
       }
@@ -99226,13 +99226,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "browser.hiddenWebViewDiscardDelaySeconds memory hidden tabs delay seconds discard unload"
+            "value": "browser.hiddenWebViewDiscardDelaySeconds memory hidden tabs delay seconds discard unload lru grace"
           }
         },
         "ja": {
           "stringUnit": {
             "state": "translated",
-            "value": "browser.hiddenWebViewDiscardDelaySeconds memory hidden tabs delay seconds discard unload メモリ 非表示 タブ 遅延 秒 破棄 解放"
+            "value": "browser.hiddenWebViewDiscardDelaySeconds memory hidden tabs delay seconds discard unload lru grace メモリ 非表示 タブ 遅延 秒 破棄 解放"
           }
         }
       }

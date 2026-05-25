@@ -1448,8 +1448,8 @@ final class BrowserPanelPopupContextTests: XCTestCase {
 
 @MainActor
 final class BrowserPanelWebViewLifecycleTests: XCTestCase {
-    private static var hasHiddenDiscardEnabledEnvironmentOverride: Bool {
-        ProcessInfo.processInfo.environment["CMUX_BROWSER_HIDDEN_WEBVIEW_DISCARD_ENABLED"] != nil
+    private static var hasHiddenDiscardDelayEnvironmentOverride: Bool {
+        ProcessInfo.processInfo.environment["CMUX_BROWSER_HIDDEN_WEBVIEW_DISCARD_DELAY_SECONDS"] != nil
     }
 
     private static var hiddenDiscardEnvironmentOverrideDisablesPolicy: Bool {
@@ -1508,6 +1508,71 @@ final class BrowserPanelWebViewLifecycleTests: XCTestCase {
         XCTAssertFalse(panel.webView.isLoading, "Timed out waiting for browser panel WebView to finish loading", file: file, line: line)
     }
 
+    private final class FakeHiddenWebViewDiscardDelegate: BrowserHiddenWebViewDiscardManagerDelegate {
+        var snapshot: BrowserHiddenWebViewDiscardManager.BlockerSnapshot
+        var hiddenAt: Date?
+        var webViewInstanceID = UUID()
+        var discardReasons: [String] = []
+
+        init(hiddenAt: Date?) {
+            self.hiddenAt = hiddenAt
+            self.snapshot = Self.defaultSnapshot()
+        }
+
+        var hiddenWebViewDiscardSnapshot: BrowserHiddenWebViewDiscardManager.BlockerSnapshot {
+            snapshot
+        }
+
+        var hiddenWebViewDiscardHiddenAt: Date? {
+            hiddenAt
+        }
+
+        var hiddenWebViewDiscardWebViewInstanceID: UUID {
+            webViewInstanceID
+        }
+
+        func hiddenWebViewDiscardManagerDidRequestDiscard(
+            _ manager: BrowserHiddenWebViewDiscardManager,
+            reason: String
+        ) {
+            discardReasons.append(reason)
+            manager.markDiscarded(reason: reason, now: Date())
+        }
+
+        func hiddenWebViewDiscardManagerPolicyDidChange(
+            _ manager: BrowserHiddenWebViewDiscardManager,
+            reason: String
+        ) {}
+
+        private static func defaultSnapshot() -> BrowserHiddenWebViewDiscardManager.BlockerSnapshot {
+            BrowserHiddenWebViewDiscardManager.BlockerSnapshot(
+                isClosing: false,
+                isVisibleInUI: false,
+                shouldRenderWebView: true,
+                hasPendingRemoteNavigation: false,
+                hasCurrentURL: true,
+                isLoading: false,
+                webViewIsLoading: false,
+                isDownloading: false,
+                activeDownloadCount: 0,
+                preferredDeveloperToolsVisible: false,
+                isDeveloperToolsVisible: false,
+                isElementFullscreenActive: false,
+                isReactGrabActive: false,
+                hasPopups: false
+            )
+        }
+    }
+
+    private func makeHiddenWebViewRetentionHarness(
+        hiddenAt: Date
+    ) -> (manager: BrowserHiddenWebViewDiscardManager, delegate: FakeHiddenWebViewDiscardDelegate) {
+        let manager = BrowserHiddenWebViewDiscardManager()
+        let delegate = FakeHiddenWebViewDiscardDelegate(hiddenAt: hiddenAt)
+        manager.delegate = delegate
+        return (manager, delegate)
+    }
+
     func testHiddenDiscardPolicyReadsUserDefaults() throws {
         let suiteName = "cmux.browserHiddenDiscardPolicyTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -1556,14 +1621,19 @@ final class BrowserPanelWebViewLifecycleTests: XCTestCase {
         }
     }
 
-    func testDefaultWorkspaceVisibilityHidePreservesWebViewIdentityPastDiscardDelay() throws {
+    func testWorkspaceVisibilityHidePreservesWebViewIdentityWhileUnderRetentionLimit() throws {
         try XCTSkipIf(
-            Self.hasHiddenDiscardEnabledEnvironmentOverride,
-            "Environment override makes the default hidden-discard policy unobservable."
+            Self.hiddenDiscardEnvironmentOverrideDisablesPolicy,
+            "Environment override disables Browser Memory Saver."
+        )
+        try XCTSkipIf(
+            Self.hasHiddenDiscardDelayEnvironmentOverride,
+            "Environment override makes the hidden-discard delay unobservable."
         )
 
-        try withHiddenWebViewDiscardDefaults(enabled: nil, delay: 0) {
-            XCTAssertFalse(BrowserHiddenWebViewDiscardPolicy.isEnabled)
+        try withHiddenWebViewDiscardDefaults(enabled: true, delay: 0) {
+            BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting()
+            defer { BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting() }
 
             let hiddenAt = Date().addingTimeInterval(-1)
             let panel = BrowserPanel(
@@ -1594,6 +1664,81 @@ final class BrowserPanelWebViewLifecycleTests: XCTestCase {
                 "Re-showing a workspace-hidden browser should rebind the same WKWebView instead of navigating a replacement"
             )
             XCTAssertEqual(panel.webViewLifecycleState, .liveVisible)
+        }
+    }
+
+    func testHiddenWebViewRetentionEvictsLeastRecentlyUsedOnlyAboveLimit() throws {
+        try XCTSkipIf(
+            Self.hiddenDiscardEnvironmentOverrideDisablesPolicy,
+            "Environment override disables Browser Memory Saver."
+        )
+        try XCTSkipIf(
+            Self.hasHiddenDiscardDelayEnvironmentOverride,
+            "Environment override makes the hidden-discard delay unobservable."
+        )
+
+        try withHiddenWebViewDiscardDefaults(enabled: true, delay: 0) {
+            BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting()
+            defer { BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting() }
+
+            let limit = BrowserHiddenWebViewDiscardPolicy.hiddenWebViewRetentionLimit
+            let baseHiddenAt = Date().addingTimeInterval(-Double(limit + 5))
+            let retained = (0..<limit).map { offset in
+                makeHiddenWebViewRetentionHarness(
+                    hiddenAt: baseHiddenAt.addingTimeInterval(Double(offset))
+                )
+            }
+
+            for item in retained {
+                item.manager.scheduleIfNeeded(reason: "test.hidden")
+            }
+
+            XCTAssertTrue(
+                retained.allSatisfy { $0.delegate.discardReasons.isEmpty },
+                "Hidden browser WebViews at the retention limit should stay live."
+            )
+
+            let newest = makeHiddenWebViewRetentionHarness(
+                hiddenAt: baseHiddenAt.addingTimeInterval(Double(limit))
+            )
+            newest.manager.scheduleIfNeeded(reason: "test.hidden.newest")
+
+            XCTAssertEqual(retained[0].delegate.discardReasons.count, 1)
+            XCTAssertTrue(
+                retained[0].delegate.discardReasons.first?.hasPrefix("lru_retention_limit.") == true
+            )
+            XCTAssertTrue(retained.dropFirst().allSatisfy { $0.delegate.discardReasons.isEmpty })
+            XCTAssertTrue(newest.delegate.discardReasons.isEmpty)
+        }
+    }
+
+    func testHiddenWebViewRetentionHonorsDelayBeforeLRUEviction() throws {
+        try XCTSkipIf(
+            Self.hiddenDiscardEnvironmentOverrideDisablesPolicy,
+            "Environment override disables Browser Memory Saver."
+        )
+        try XCTSkipIf(
+            Self.hasHiddenDiscardDelayEnvironmentOverride,
+            "Environment override makes the hidden-discard delay unobservable."
+        )
+
+        try withHiddenWebViewDiscardDefaults(enabled: true, delay: 60) {
+            BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting()
+            defer { BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting() }
+
+            let hiddenAt = Date()
+            let retained = (0...BrowserHiddenWebViewDiscardPolicy.hiddenWebViewRetentionLimit).map { _ in
+                makeHiddenWebViewRetentionHarness(hiddenAt: hiddenAt)
+            }
+
+            for item in retained {
+                item.manager.scheduleIfNeeded(reason: "test.hidden")
+            }
+
+            XCTAssertTrue(
+                retained.allSatisfy { $0.delegate.discardReasons.isEmpty },
+                "Newly hidden WebViews should not be evicted before the configured LRU grace period."
+            )
         }
     }
 

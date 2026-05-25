@@ -5961,13 +5961,17 @@ struct SettingsView: View {
 
     private var browserHiddenWebViewDiscardSubtitle: String {
         if browserHiddenWebViewDiscardEnabled {
-            return String(localized: "settings.browser.hiddenWebViewDiscard.subtitleOn", defaultValue: "Hidden browser tabs release page memory after the delay below, then restore when shown again.")
+            let format = String(
+                localized: "settings.browser.hiddenWebViewDiscard.subtitleOn",
+                defaultValue: "Hidden browser tabs keep the most recent %lld pages live; older hidden tabs may release page memory after the delay below."
+            )
+            return String(format: format, Int64(BrowserHiddenWebViewDiscardPolicy.hiddenWebViewRetentionLimit))
         }
         return String(localized: "settings.browser.hiddenWebViewDiscard.subtitleOff", defaultValue: "Hidden browser tabs keep page memory until closed.")
     }
 
     private var browserHiddenWebViewDiscardDelaySubtitle: String {
-        String(localized: "settings.browser.hiddenWebViewDiscardDelay.subtitle", defaultValue: "How long a browser tab must stay hidden before cmux frees its page memory. Active downloads, popups, developer tools, and fullscreen pages are skipped.")
+        String(localized: "settings.browser.hiddenWebViewDiscardDelay.subtitle", defaultValue: "How long a hidden browser tab must wait before it can be evicted when the retention limit is exceeded. Active downloads, popups, developer tools, and fullscreen pages are skipped.")
     }
 
     private var browserHiddenWebViewDiscardDelayLabel: String {
