@@ -9352,7 +9352,11 @@ struct ContentView: View {
         var openedCount = 0
         if BrowserLinkOpenSettings.openSidebarPullRequestLinksInCmuxBrowser() {
             for pullRequest in pullRequests {
-                if tabManager.openBrowser(url: pullRequest.url, insertAtEnd: true) != nil {
+                if tabManager.openOrFocusBrowser(
+                    inWorkspace: workspace.id,
+                    url: pullRequest.url,
+                    insertAtEnd: true
+                ) != nil {
                     openedCount += 1
                 } else if NSWorkspace.shared.open(pullRequest.url) {
                     openedCount += 1
@@ -14536,7 +14540,7 @@ struct TabItemView: View, Equatable {
     private func openPullRequestLink(_ url: URL) {
         updateSelection()
         if openSidebarPullRequestLinksInCmuxBrowser {
-            if tabManager.openBrowser(
+            if tabManager.openOrFocusBrowser(
                 inWorkspace: tab.id,
                 url: url,
                 preferSplitRight: true,
