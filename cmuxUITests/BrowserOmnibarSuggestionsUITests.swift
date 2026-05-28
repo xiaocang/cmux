@@ -1,22 +1,38 @@
 import XCTest
 import Foundation
+import AppKit
 
 final class BrowserOmnibarSuggestionsUITests: XCTestCase {
     private var dataPath = ""
+    private var socketPath = ""
+    private var launchTag = ""
     private var browserHistorySeedJSON: String?
 
     override func setUp() {
         super.setUp()
         continueAfterFailure = false
         dataPath = "/tmp/cmux-ui-test-omnibar-suggestions-\(UUID().uuidString).json"
+        socketPath = "/tmp/cmux-ui-test-omnibar-suggestions-\(UUID().uuidString).sock"
+        launchTag = "ui-omnibar-\(UUID().uuidString.prefix(8))"
         browserHistorySeedJSON = nil
         try? FileManager.default.removeItem(atPath: dataPath)
+        try? FileManager.default.removeItem(atPath: socketPath)
 
         // Terminate any lingering app from a prior test so its debounced
         // history-save doesn't overwrite the seeded browser_history.json.
+        terminateSystemSettings()
         let cleanup = XCUIApplication()
         cleanup.terminate()
         RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+    }
+
+    override func tearDown() {
+        let cleanup = XCUIApplication()
+        cleanup.terminate()
+        terminateSystemSettings()
+        try? FileManager.default.removeItem(atPath: dataPath)
+        try? FileManager.default.removeItem(atPath: socketPath)
+        super.tearDown()
     }
 
     func testOmnibarSuggestionsAlignToPillAndCtrlNP() {
@@ -185,6 +201,97 @@ final class BrowserOmnibarSuggestionsUITests: XCTestCase {
         app.typeText("bbb")
         let afterOutsideTyping = (omnibar.value as? String) ?? ""
         XCTAssertEqual(afterOutsideTyping, beforeOutsideTyping, "Expected typing after click-outside to not modify omnibar (blurred)")
+    }
+
+    func testSiteSearchShortcutShowsChipAndNavigatesViaTemplate() {
+        seedBrowserHistoryForTest(seedEntries: [])
+
+        let app = XCUIApplication()
+        app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_SETUP"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_PATH"] = dataPath
+        app.launchEnvironment["CMUX_UI_TEST_GOTO_SPLIT_BROWSER_URL"] = "https://cmux.test/"
+        app.launchEnvironment["CMUX_UI_TEST_DISABLE_REMOTE_SUGGESTIONS"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_BROWSER_SITE_SEARCH_ACTIVATION"] = "tab"
+        app.launchEnvironment["CMUX_UI_TEST_BROWSER_SITE_SEARCH_JSON"] = siteSearchSeedJSON()
+        seedSiteSearchLaunchDefaults(app, activation: "tab")
+        launchAndEnsureForeground(app)
+
+        let omnibar = app.textFields["BrowserOmnibarTextField"].firstMatch
+        XCTAssertTrue(omnibar.waitForExistence(timeout: 6.0), "Expected browser omnibar")
+        XCTAssertTrue(
+            typeQueryAndWaitForSuggestions(app: app, omnibar: omnibar, query: "ex", timeout: 6.0),
+            "Expected site search activation suggestion after typing shortcut"
+        )
+
+        let row0 = app.descendants(matching: .any).matching(identifier: "BrowserOmnibarSuggestions.Row.0").firstMatch
+        XCTAssertTrue(row0.waitForExistence(timeout: 6.0), "Expected site search activation suggestion")
+        XCTAssertTrue(
+            waitForCondition(timeout: 3.0) {
+                ((row0.value as? String) ?? "").contains("Search Example Search")
+            },
+            "Expected row 0 to activate Example Search. value=\(String(describing: row0.value))"
+        )
+
+        app.typeKey(XCUIKeyboardKey.tab.rawValue, modifierFlags: [])
+
+        let chip = app.descendants(matching: .any).matching(identifier: "BrowserOmnibarSiteSearchChip").firstMatch
+        XCTAssertTrue(chip.waitForExistence(timeout: 4.0), "Expected site search chip after Tab")
+        attachElementDebug(name: "site-search-chip", element: chip)
+
+        app.typeText("react hooks")
+        app.typeKey(XCUIKeyboardKey.return.rawValue, modifierFlags: [])
+
+        XCTAssertTrue(
+            waitForCondition(timeout: 8.0) {
+                let value = (omnibar.value as? String) ?? ""
+                return value.contains("example.com/search") && value.contains("react%20hooks")
+            },
+            "Expected site search submit to navigate through URL template. value=\(String(describing: omnibar.value))"
+        )
+    }
+
+    func testBrowserSiteSearchSettingsExposeChromeLikeControls() {
+        let app = XCUIApplication()
+        app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_BROWSER_SITE_SEARCH_OPEN_SETTINGS"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_BROWSER_SITE_SEARCH_JSON"] = siteSearchSeedJSON()
+        seedSiteSearchLaunchDefaults(app)
+        launchAndEnsureForeground(app)
+
+        XCTAssertTrue(
+            waitForCondition(timeout: 8.0) { app.windows.count >= 2 },
+            "Expected cmux Settings window to open for Browser Site Search"
+        )
+
+        let section = app.descendants(matching: .any).matching(identifier: "SettingsBrowserSiteSearchSection").firstMatch
+        XCTAssertTrue(section.waitForExistence(timeout: 8.0), "Expected Browser settings to show Site Search section")
+        attachElementDebug(name: "site-search-settings-section", element: section)
+
+        XCTAssertTrue(
+            app.descendants(matching: .any).matching(identifier: "SettingsBrowserSiteSearchKeyboardPicker").firstMatch
+                .waitForExistence(timeout: 4.0),
+            "Expected site search keyboard picker"
+        )
+        XCTAssertTrue(
+            app.textFields.matching(identifier: "SettingsBrowserSiteSearchNameField.11111111-1111-1111-1111-111111111111").firstMatch
+                .waitForExistence(timeout: 4.0),
+            "Expected Chrome-like Name field"
+        )
+        XCTAssertTrue(
+            app.textFields.matching(identifier: "SettingsBrowserSiteSearchShortcutField.11111111-1111-1111-1111-111111111111").firstMatch
+                .waitForExistence(timeout: 4.0),
+            "Expected Chrome-like Shortcut field"
+        )
+        XCTAssertTrue(
+            app.textFields.matching(identifier: "SettingsBrowserSiteSearchURLTemplateField.11111111-1111-1111-1111-111111111111").firstMatch
+                .waitForExistence(timeout: 4.0),
+            "Expected Chrome-like URL template field"
+        )
+        XCTAssertTrue(
+            app.buttons.matching(identifier: "SettingsBrowserSiteSearchAddButton").firstMatch.waitForExistence(timeout: 4.0),
+            "Expected add site search button"
+        )
     }
 
     func testOmnibarSuggestionsCtrlNPWhenAddressBarFocused() {
@@ -539,6 +646,8 @@ final class BrowserOmnibarSuggestionsUITests: XCTestCase {
     }
 
     private func launchAndEnsureForeground(_ app: XCUIApplication, timeout: TimeInterval = 12.0) {
+        app.launchEnvironment["CMUX_TAG"] = launchTag
+        app.launchEnvironment["CMUX_SOCKET_PATH"] = socketPath
         if let browserHistorySeedJSON {
             app.launchEnvironment["CMUX_UI_TEST_BROWSER_HISTORY_JSON"] = browserHistorySeedJSON
         }
@@ -547,6 +656,9 @@ final class BrowserOmnibarSuggestionsUITests: XCTestCase {
             ensureForegroundAfterLaunch(app, timeout: timeout),
             "Expected app to launch in foreground. state=\(app.state.rawValue)"
         )
+        terminateSystemSettings()
+        app.activate()
+        _ = app.wait(for: .runningForeground, timeout: 3.0)
     }
 
     private func ensureForegroundAfterLaunch(_ app: XCUIApplication, timeout: TimeInterval) -> Bool {
@@ -693,6 +805,35 @@ final class BrowserOmnibarSuggestionsUITests: XCTestCase {
 
     private func containsExampleDomain(_ value: String) -> Bool {
         value.contains("example.com") || value.contains("example.org")
+    }
+
+    private func siteSearchSeedJSON() -> String {
+        """
+        [
+          {
+            "id": "11111111-1111-1111-1111-111111111111",
+            "name": "Example Search",
+            "shortcut": "ex",
+            "urlTemplate": "https://example.com/search?q=%s",
+            "isActive": true
+          }
+        ]
+        """
+    }
+
+    private func seedSiteSearchLaunchDefaults(_ app: XCUIApplication, activation: String = "tab") {
+        app.launchArguments += [
+            "-browserSiteSearchShortcuts", siteSearchSeedJSON(),
+            "-browserSiteSearchActivationShortcut", activation,
+        ]
+    }
+
+    private func terminateSystemSettings() {
+        for bundleIdentifier in ["com.apple.systempreferences", "com.apple.SystemSettings"] {
+            for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier) {
+                app.terminate()
+            }
+        }
     }
 
     private func waitForCondition(timeout: TimeInterval, predicate: @escaping () -> Bool) -> Bool {

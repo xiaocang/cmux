@@ -426,6 +426,8 @@ struct BrowserPanelView: View {
     @State private var addressBarFocused: Bool = false
     @AppStorage(BrowserSearchSettings.searchEngineKey) private var searchEngineRaw = BrowserSearchSettings.defaultSearchEngine.rawValue
     @AppStorage(BrowserSearchSettings.searchSuggestionsEnabledKey) private var searchSuggestionsEnabledStorage = BrowserSearchSettings.defaultSearchSuggestionsEnabled
+    @AppStorage(BrowserSiteSearchSettings.shortcutsKey) private var siteSearchShortcutsStorage = BrowserSiteSearchSettings.defaultShortcutsStorage
+    @AppStorage(BrowserSiteSearchSettings.activationShortcutKey) private var siteSearchActivationShortcutRaw = BrowserSiteSearchSettings.defaultActivationShortcut.rawValue
     @AppStorage(BrowserDevToolsButtonDebugSettings.iconNameKey) private var devToolsIconNameRaw = BrowserDevToolsButtonDebugSettings.defaultIcon.rawValue
     @AppStorage(BrowserDevToolsButtonDebugSettings.iconColorKey) private var devToolsIconColorRaw = BrowserDevToolsButtonDebugSettings.defaultColor.rawValue
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
@@ -482,6 +484,19 @@ struct BrowserPanelView: View {
         // Touch @AppStorage so SwiftUI invalidates this view when settings change.
         _ = searchSuggestionsEnabledStorage
         return BrowserSearchSettings.currentSearchSuggestionsEnabled(defaults: .standard)
+    }
+
+    private var siteSearchShortcuts: [BrowserSiteSearchShortcut] {
+        BrowserSiteSearchSettings.decode(siteSearchShortcutsStorage)
+    }
+
+    private var activeSiteSearchShortcuts: [BrowserSiteSearchShortcut] {
+        BrowserSiteSearchSettings.activeShortcuts(from: siteSearchShortcuts)
+    }
+
+    private var siteSearchActivationShortcut: BrowserSiteSearchActivationShortcut {
+        BrowserSiteSearchActivationShortcut(rawValue: siteSearchActivationShortcutRaw)
+            ?? BrowserSiteSearchSettings.defaultActivationShortcut
     }
 
     private var remoteSuggestionsEnabled: Bool {
@@ -806,6 +821,8 @@ struct BrowserPanelView: View {
             UserDefaults.standard.register(defaults: [
                 BrowserSearchSettings.searchEngineKey: BrowserSearchSettings.defaultSearchEngine.rawValue,
                 BrowserSearchSettings.searchSuggestionsEnabledKey: BrowserSearchSettings.defaultSearchSuggestionsEnabled,
+                BrowserSiteSearchSettings.shortcutsKey: BrowserSiteSearchSettings.defaultShortcutsStorage,
+                BrowserSiteSearchSettings.activationShortcutKey: BrowserSiteSearchSettings.defaultActivationShortcut.rawValue,
                 BrowserToolbarAccessorySpacingDebugSettings.key: BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing,
                 BrowserProfilePopoverDebugSettings.horizontalPaddingKey: BrowserProfilePopoverDebugSettings.defaultHorizontalPadding,
                 BrowserProfilePopoverDebugSettings.verticalPaddingKey: BrowserProfilePopoverDebugSettings.defaultVerticalPadding,
@@ -1392,12 +1409,36 @@ struct BrowserPanelView: View {
 
     private var omnibarField: some View {
         let showSecureBadge = panel.currentURL?.scheme == "https"
+        let placeholder = omnibarState.siteSearchSession.map { session in
+            String(
+                format: String(localized: "browser.omnibar.siteSearch.placeholder", defaultValue: "Search %@"),
+                session.shortcut.name
+            )
+        } ?? String(localized: "browser.addressBar.placeholder", defaultValue: "Search or enter URL")
 
         return HStack(spacing: 4) {
             if showSecureBadge {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
+            }
+
+            if let session = omnibarState.siteSearchSession {
+                Text(
+                    String(
+                        format: String(localized: "browser.omnibar.siteSearch.chip", defaultValue: "Search %@"),
+                        session.shortcut.name
+                    )
+                )
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.primary.opacity(0.10))
+                )
+                .accessibilityIdentifier("BrowserOmnibarSiteSearchChip")
             }
 
             OmnibarTextFieldRepresentable(
@@ -1413,11 +1454,29 @@ struct BrowserPanelView: View {
                 isFocused: $addressBarFocused,
                 selectAllRequestId: omnibarSelectAllRequestId,
                 inlineCompletion: inlineCompletion,
-                placeholder: String(localized: "browser.addressBar.placeholder", defaultValue: "Search or enter URL"),
+                placeholder: placeholder,
                 onTap: {
                     handleOmnibarTap()
                 },
                 onSubmit: {
+                    if let session = omnibarState.siteSearchSession {
+                        guard let url = BrowserSiteSearchSettings.searchURL(
+                            template: session.shortcut.urlTemplate,
+                            query: omnibarState.buffer
+                        ) else {
+                            NSSound.beep()
+                            return
+                        }
+                        omnibarState.buffer = url.absoluteString
+                        omnibarState.siteSearchSession = nil
+                        omnibarState.isUserEditing = false
+                        panel.navigateSmart(url.absoluteString)
+                        hideSuggestions()
+                        suppressNextFocusLostRevert = true
+                        setAddressBarFocused(false, reason: "omnibar.submit.siteSearch")
+                        return
+                    }
+
                     if canHandleOmnibarSuggestionInteraction(),
                        let explicitSuggestion = omnibarSelectedSuggestionForExplicitCommit(in: omnibarState) {
                         commitSuggestion(explicitSuggestion)
@@ -1445,6 +1504,9 @@ struct BrowserPanelView: View {
                 },
                 onAcceptInlineCompletion: {
                     acceptInlineCompletion()
+                },
+                onAttemptSiteSearchActivation: { trigger in
+                    attemptSiteSearchActivation(trigger)
                 },
                 onDeleteBackwardWithInlineSelection: {
                     handleInlineBackspace()
@@ -2118,6 +2180,13 @@ struct BrowserPanelView: View {
     }
 
     private func commitSuggestion(_ suggestion: OmnibarSuggestion) {
+        if case .siteSearchActivation(let shortcut, _) = suggestion.kind {
+            let effects = omnibarReduce(state: &omnibarState, event: .enterSiteSearchMode(shortcut))
+            applyOmnibarEffects(effects)
+            inlineCompletion = nil
+            return
+        }
+
         // Treat this as a commit, not a user edit: don't refetch suggestions while we're navigating away.
         omnibarState.buffer = suggestion.completion
         omnibarState.isUserEditing = false
@@ -2131,6 +2200,30 @@ struct BrowserPanelView: View {
         inlineCompletion = nil
         suppressNextFocusLostRevert = true
         setAddressBarFocused(false, reason: "suggestion.commit")
+    }
+
+    private func attemptSiteSearchActivation(_ trigger: OmnibarSiteSearchActivationTrigger) -> Bool {
+        guard addressBarFocused, !omnibarHasMarkedText else { return false }
+        guard omnibarState.siteSearchSession == nil else { return false }
+
+        switch (trigger, siteSearchActivationShortcut) {
+        case (.tab, _):
+            break
+        case (.space, .spaceOrTab):
+            break
+        case (.space, .tab):
+            return false
+        }
+
+        let raw = omnibarState.buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let shortcut = BrowserSiteSearchSettings.matchingShortcut(raw, in: activeSiteSearchShortcuts) else {
+            return false
+        }
+
+        let effects = omnibarReduce(state: &omnibarState, event: .enterSiteSearchMode(shortcut))
+        applyOmnibarEffects(effects)
+        inlineCompletion = nil
+        return true
     }
 
     private func handleOmnibarEscape() {
@@ -2297,12 +2390,13 @@ struct BrowserPanelView: View {
         suggestionTask = nil
         isLoadingRemoteSuggestions = false
 
-        guard addressBarFocused, !omnibarHasMarkedText else {
+        guard addressBarFocused, !omnibarHasMarkedText, omnibarState.siteSearchSession == nil else {
 #if DEBUG
             cmuxDebugLog(
                 "browser.omnibar.suggestions refresh=skip " +
                 "panel=\(panel.id.uuidString.prefix(5)) " +
                 "focused=\(addressBarFocused ? 1 : 0) marked=\(omnibarHasMarkedText ? 1 : 0) " +
+                "siteSearch=\(omnibarState.siteSearchSession == nil ? 0 : 1) " +
                 "bufferLen=\(omnibarState.buffer.utf8.count)"
             )
 #endif
@@ -2327,6 +2421,10 @@ struct BrowserPanelView: View {
             staleRemote = staleRemoteSuggestionsForDisplay(query: query)
         }
         let resolvedURL = query.isEmpty ? nil : panel.resolveNavigableURL(from: query)
+        let matchedSiteSearchShortcut = BrowserSiteSearchSettings.matchingShortcut(
+            query,
+            in: activeSiteSearchShortcuts
+        )
         let items = buildOmnibarSuggestions(
             query: query,
             engineName: searchEngine.displayName,
@@ -2334,6 +2432,8 @@ struct BrowserPanelView: View {
             openTabMatches: openTabMatches,
             remoteQueries: staleRemote,
             resolvedURL: resolvedURL,
+            siteSearchShortcut: matchedSiteSearchShortcut,
+            siteSearchTriggerLabel: siteSearchActivationShortcut.promptText,
             limit: 8
         )
         let effects = omnibarReduce(state: &omnibarState, event: .suggestionsUpdated(items))
@@ -2361,6 +2461,8 @@ struct BrowserPanelView: View {
                 openTabMatches: openTabMatches,
                 remoteQueries: forcedRemote,
                 resolvedURL: resolvedURL,
+                siteSearchShortcut: matchedSiteSearchShortcut,
+                siteSearchTriggerLabel: siteSearchActivationShortcut.promptText,
                 limit: 8
             )
             let forcedEffects = omnibarReduce(state: &omnibarState, event: .suggestionsUpdated(merged))
@@ -2400,6 +2502,11 @@ struct BrowserPanelView: View {
                     openTabMatches: matchingOpenTabSuggestions(for: query, limit: 12),
                     remoteQueries: remote,
                     resolvedURL: panel.resolveNavigableURL(from: query),
+                    siteSearchShortcut: BrowserSiteSearchSettings.matchingShortcut(
+                        query,
+                        in: activeSiteSearchShortcuts
+                    ),
+                    siteSearchTriggerLabel: siteSearchActivationShortcut.promptText,
                     limit: 8
                 )
                 let effects = omnibarReduce(state: &omnibarState, event: .suggestionsUpdated(merged))
@@ -2619,6 +2726,7 @@ func omnibarSuggestionMatchesTypedPrefix(
 
 func omnibarSuggestionSupportsAutocompletion(query: String, suggestion: OmnibarSuggestion) -> Bool {
     if case .search = suggestion.kind { return false }
+    if case .siteSearchActivation = suggestion.kind { return false }
     if case .remote = suggestion.kind { return false }
     guard let completion = omnibarSuggestionCompletion(for: suggestion) else { return false }
     // Reject URLs whose host lacks a TLD (e.g. "https://news." → host "news").
@@ -2694,6 +2802,8 @@ func buildOmnibarSuggestions(
     openTabMatches: [OmnibarOpenTabMatch] = [],
     remoteQueries: [String],
     resolvedURL: URL?,
+    siteSearchShortcut: BrowserSiteSearchShortcut? = nil,
+    siteSearchTriggerLabel: String? = nil,
     limit: Int = 8,
     now: Date = Date()
 ) -> [OmnibarSuggestion] {
@@ -2738,6 +2848,8 @@ func buildOmnibarSuggestions(
 
     func suggestionPriority(for kind: OmnibarSuggestion.Kind) -> Int {
         switch kind {
+        case .siteSearchActivation:
+            return 50
         case .search:
             return 300
         case .remote:
@@ -2797,6 +2909,13 @@ func buildOmnibarSuggestions(
         } else {
             bestByCompletion[key] = ranked
         }
+    }
+
+    if let siteSearchShortcut, let siteSearchTriggerLabel {
+        insert(
+            .siteSearchActivation(shortcut: siteSearchShortcut, triggerLabel: siteSearchTriggerLabel),
+            score: 1_450 + completionScore(for: siteSearchShortcut.shortcut)
+        )
     }
 
     if !(isSingleCharacterQuery && shouldSuppressSingleCharacterSearchResult) {
@@ -3271,10 +3390,20 @@ private struct BrowserAddressBarHeightPreferenceKey: PreferenceKey {
 
 // MARK: - Omnibar State Machine
 
+enum OmnibarSiteSearchActivationTrigger: Equatable {
+    case tab
+    case space
+}
+
+struct OmnibarSiteSearchSession: Equatable {
+    var shortcut: BrowserSiteSearchShortcut
+}
+
 struct OmnibarState: Equatable {
     var isFocused: Bool = false
     var currentURLString: String = ""
     var buffer: String = ""
+    var siteSearchSession: OmnibarSiteSearchSession?
     var suggestions: [OmnibarSuggestion] = []
     var selectedSuggestionIndex: Int = 0
     var selectedSuggestionID: String?
@@ -3292,6 +3421,8 @@ enum OmnibarEvent: Equatable {
     case suggestionsUpdated([OmnibarSuggestion])
     case moveSelection(delta: Int)
     case highlightIndex(Int)
+    case enterSiteSearchMode(BrowserSiteSearchShortcut)
+    case exitSiteSearchMode
     case escape
 }
 
@@ -3310,6 +3441,7 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
         state.isFocused = true
         state.currentURLString = url
         state.buffer = url
+        state.siteSearchSession = nil
         state.isUserEditing = false
         state.suggestions = []
         state.selectedSuggestionIndex = 0
@@ -3325,6 +3457,7 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
         state.isFocused = false
         state.currentURLString = url
         state.buffer = url
+        state.siteSearchSession = nil
         state.isUserEditing = false
         state.suggestions = []
         state.selectedSuggestionIndex = 0
@@ -3334,6 +3467,7 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
     case .focusLostPreserveBuffer(let url):
         state.isFocused = false
         state.currentURLString = url
+        state.siteSearchSession = nil
         state.isUserEditing = false
         state.suggestions = []
         state.selectedSuggestionIndex = 0
@@ -3344,6 +3478,7 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
         state.currentURLString = url
         if !state.isUserEditing {
             state.buffer = url
+            state.siteSearchSession = nil
             state.suggestions = []
             state.selectedSuggestionIndex = 0
             state.selectedSuggestionID = nil
@@ -3353,6 +3488,14 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
     case .bufferChanged(let newValue):
         state.buffer = newValue
         if state.isFocused {
+            if state.siteSearchSession != nil {
+                state.isUserEditing = true
+                state.suggestions = []
+                state.selectedSuggestionIndex = 0
+                state.selectedSuggestionID = nil
+                state.hasExplicitSuggestionSelection = false
+                break
+            }
             state.isUserEditing = (newValue != state.currentURLString)
             state.selectedSuggestionIndex = 0
             state.selectedSuggestionID = nil
@@ -3409,8 +3552,34 @@ func omnibarReduce(state: inout OmnibarState, event: OmnibarEvent) -> OmnibarEff
         state.selectedSuggestionID = state.suggestions[state.selectedSuggestionIndex].id
         state.hasExplicitSuggestionSelection = true
 
+    case .enterSiteSearchMode(let shortcut):
+        state.siteSearchSession = OmnibarSiteSearchSession(shortcut: shortcut)
+        state.buffer = ""
+        state.isUserEditing = true
+        state.suggestions = []
+        state.selectedSuggestionIndex = 0
+        state.selectedSuggestionID = nil
+        state.hasExplicitSuggestionSelection = false
+
+    case .exitSiteSearchMode:
+        if let shortcut = state.siteSearchSession?.shortcut {
+            state.buffer = shortcut.shortcut
+            state.isUserEditing = true
+        }
+        state.siteSearchSession = nil
+        state.suggestions = []
+        state.selectedSuggestionIndex = 0
+        state.selectedSuggestionID = nil
+        state.hasExplicitSuggestionSelection = false
+
     case .escape:
         guard state.isFocused else { break }
+        if state.siteSearchSession != nil {
+            let exitEffects = omnibarReduce(state: &state, event: .exitSiteSearchMode)
+            effects.shouldRefreshSuggestions = exitEffects.shouldRefreshSuggestions
+            effects.shouldSelectAll = true
+            break
+        }
         // Chrome semantics:
         // - If user input is in progress OR the popup is open: revert to the page URL and select-all.
         // - Otherwise: exit omnibar focus.
@@ -3440,6 +3609,7 @@ func omnibarSelectedSuggestionForExplicitCommit(in state: OmnibarState) -> Omnib
 struct OmnibarSuggestion: Identifiable, Hashable {
     enum Kind: Hashable {
         case search(engineName: String, query: String)
+        case siteSearchActivation(shortcut: BrowserSiteSearchShortcut, triggerLabel: String)
         case navigate(url: String)
         case history(url: String, title: String?)
         case switchToTab(tabId: UUID, panelId: UUID, url: String, title: String?)
@@ -3453,6 +3623,8 @@ struct OmnibarSuggestion: Identifiable, Hashable {
         switch kind {
         case .search(let engineName, let query):
             return "search|\(engineName.lowercased())|\(query.lowercased())"
+        case .siteSearchActivation(let shortcut, let triggerLabel):
+            return "site-search|\(shortcut.id.uuidString.lowercased())|\(triggerLabel.lowercased())"
         case .navigate(let url):
             return "navigate|\(url.lowercased())"
         case .history(let url, _):
@@ -3467,6 +3639,7 @@ struct OmnibarSuggestion: Identifiable, Hashable {
     var completion: String {
         switch kind {
         case .search(_, let q): return q
+        case .siteSearchActivation(let shortcut, _): return shortcut.shortcut
         case .navigate(let url): return url
         case .history(let url, _): return url
         case .switchToTab(_, _, let url, _): return url
@@ -3478,6 +3651,11 @@ struct OmnibarSuggestion: Identifiable, Hashable {
         switch kind {
         case .search(let engineName, let q):
             return "Search \(engineName) for \"\(q)\""
+        case .siteSearchActivation(let shortcut, _):
+            return String(
+                format: String(localized: "browser.omnibar.siteSearch.primary", defaultValue: "Search %@"),
+                shortcut.name
+            )
         case .navigate(let url):
             return Self.displayURLText(for: url)
         case .history(let url, let title):
@@ -3510,6 +3688,8 @@ struct OmnibarSuggestion: Identifiable, Hashable {
         case .switchToTab(_, _, let url, let title):
             let titleOneline = Self.singleLineText(title)
             return titleOneline.isEmpty ? nil : Self.displayURLText(for: url)
+        case .siteSearchActivation(_, let triggerLabel):
+            return triggerLabel
         default:
             return nil
         }
@@ -3517,6 +3697,8 @@ struct OmnibarSuggestion: Identifiable, Hashable {
 
     var trailingBadgeText: String? {
         switch kind {
+        case .siteSearchActivation(_, let triggerLabel):
+            return triggerLabel
         case .switchToTab:
             return String(localized: "browser.switchToTab", defaultValue: "Switch to tab")
         default:
@@ -3539,6 +3721,13 @@ struct OmnibarSuggestion: Identifiable, Hashable {
 
     static func search(engineName: String, query: String) -> OmnibarSuggestion {
         OmnibarSuggestion(kind: .search(engineName: engineName, query: query))
+    }
+
+    static func siteSearchActivation(
+        shortcut: BrowserSiteSearchShortcut,
+        triggerLabel: String
+    ) -> OmnibarSuggestion {
+        OmnibarSuggestion(kind: .siteSearchActivation(shortcut: shortcut, triggerLabel: triggerLabel))
     }
 
     static func navigate(url: String) -> OmnibarSuggestion {
@@ -3819,6 +4008,7 @@ struct OmnibarTextFieldRepresentable: NSViewRepresentable {
     let onMoveSelection: (Int) -> Void
     let onDeleteSelectedSuggestion: () -> Void
     let onAcceptInlineCompletion: () -> Void
+    let onAttemptSiteSearchActivation: (OmnibarSiteSearchActivationTrigger) -> Bool
     let onDeleteBackwardWithInlineSelection: () -> Void
     let onClearTypedPrefixWithInlineSelection: () -> Void
     let onDeleteWordBackwardWithInlineSelection: () -> Void
@@ -4119,6 +4309,13 @@ struct OmnibarTextFieldRepresentable: NSViewRepresentable {
                 }
                 return false
             case #selector(NSResponder.insertTab(_:)):
+                let modifiers = NSApp.currentEvent?.modifierFlags.intersection([.command, .control, .shift, .option, .function]) ?? []
+                if modifiers.isEmpty, parent.onAttemptSiteSearchActivation(.tab) {
+#if DEBUG
+                    handled = true
+#endif
+                    return true
+                }
                 if parent.inlineCompletion != nil {
                     parent.onAcceptInlineCompletion()
 #if DEBUG
@@ -4340,8 +4537,21 @@ struct OmnibarTextFieldRepresentable: NSViewRepresentable {
                     return true
                 }
             case 48: // Tab
+                if modifiers.isEmpty, parent.onAttemptSiteSearchActivation(.tab) {
+#if DEBUG
+                    handled = true
+#endif
+                    return true
+                }
                 if parent.inlineCompletion != nil {
                     parent.onAcceptInlineCompletion()
+#if DEBUG
+                    handled = true
+#endif
+                    return true
+                }
+            case 49: // Space
+                if modifiers.isEmpty, parent.onAttemptSiteSearchActivation(.space) {
 #if DEBUG
                     handled = true
 #endif
@@ -4793,6 +5003,8 @@ struct OmnibarSuggestionsView: View {
                     switch item.kind {
                     case .search:
                         return "search"
+                    case .siteSearchActivation:
+                        return "siteSearchActivation"
                     case .navigate:
                         return "navigate"
                     case .history:
@@ -4823,6 +5035,7 @@ struct OmnibarSuggestionsView: View {
                                     RoundedRectangle(cornerRadius: 7, style: .continuous)
                                         .fill(badgeBackgroundColor)
                                 )
+                                .accessibilityIdentifier("BrowserOmnibarSuggestions.Row.\(idx).Badge")
                         }
                         Spacer(minLength: 0)
                     }

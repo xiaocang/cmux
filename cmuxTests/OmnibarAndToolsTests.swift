@@ -440,6 +440,52 @@ final class OmnibarStateMachineTests: XCTestCase {
         XCTAssertTrue(browserOmnibarShouldSelectAllOnFocusReassertion(isUserEditing: false))
     }
 
+    func testSiteSearchModeClearsBufferAndSuppressesSuggestions() throws {
+        var state = OmnibarState()
+        let shortcut = BrowserSiteSearchShortcut(
+            name: "GitHub",
+            shortcut: "gh",
+            urlTemplate: "https://github.com/search?q=%s"
+        )
+
+        _ = omnibarReduce(state: &state, event: .focusGained(currentURLString: "https://example.com/"))
+        _ = omnibarReduce(state: &state, event: .bufferChanged("gh"))
+        _ = omnibarReduce(
+            state: &state,
+            event: .suggestionsUpdated([.siteSearchActivation(shortcut: shortcut, triggerLabel: "Press Tab to search")])
+        )
+
+        var effects = omnibarReduce(state: &state, event: .enterSiteSearchMode(shortcut))
+        XCTAssertEqual(state.siteSearchSession?.shortcut, shortcut)
+        XCTAssertEqual(state.buffer, "")
+        XCTAssertTrue(state.suggestions.isEmpty)
+        XCTAssertFalse(effects.shouldRefreshSuggestions)
+
+        effects = omnibarReduce(state: &state, event: .bufferChanged("react hooks"))
+        XCTAssertEqual(state.buffer, "react hooks")
+        XCTAssertTrue(state.suggestions.isEmpty)
+        XCTAssertFalse(effects.shouldRefreshSuggestions)
+    }
+
+    func testEscapeExitsSiteSearchModeToShortcut() throws {
+        var state = OmnibarState()
+        let shortcut = BrowserSiteSearchShortcut(
+            name: "GitHub",
+            shortcut: "gh",
+            urlTemplate: "https://github.com/search?q=%s"
+        )
+
+        _ = omnibarReduce(state: &state, event: .focusGained(currentURLString: "https://example.com/"))
+        _ = omnibarReduce(state: &state, event: .enterSiteSearchMode(shortcut))
+        _ = omnibarReduce(state: &state, event: .bufferChanged("react hooks"))
+
+        let effects = omnibarReduce(state: &state, event: .escape)
+        XCTAssertNil(state.siteSearchSession)
+        XCTAssertEqual(state.buffer, "gh")
+        XCTAssertTrue(state.isUserEditing)
+        XCTAssertTrue(effects.shouldSelectAll)
+    }
+
     func testEscapeRevertsWhenEditingThenBlursOnSecondEscape() throws {
         var state = OmnibarState()
 
@@ -894,6 +940,7 @@ private final class OmnibarInlineDeletionHarness {
                 onMoveSelection: { _ in },
                 onDeleteSelectedSuggestion: {},
                 onAcceptInlineCompletion: {},
+                onAttemptSiteSearchActivation: { _ in false },
                 onDeleteBackwardWithInlineSelection: { self.deleteSingleCharacterBeforeInlineCompletion() },
                 onClearTypedPrefixWithInlineSelection: { self.clearTypedPrefix() },
                 onDeleteWordBackwardWithInlineSelection: { self.deleteWordBeforeInlineCompletion() },

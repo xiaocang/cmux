@@ -5020,6 +5020,129 @@ final class BrowserSearchSettingsTests: XCTestCase {
     }
 }
 
+final class BrowserSiteSearchSettingsTests: XCTestCase {
+    func testActivationShortcutDefaultsToTab() {
+        let defaults = UserDefaults.standard
+        let previousActivation = defaults.object(forKey: BrowserSiteSearchSettings.activationShortcutKey)
+        defer {
+            restore(defaults: defaults, value: previousActivation, forKey: BrowserSiteSearchSettings.activationShortcutKey)
+        }
+
+        defaults.removeObject(forKey: BrowserSiteSearchSettings.activationShortcutKey)
+
+        XCTAssertEqual(BrowserSiteSearchSettings.currentActivationShortcut(defaults: defaults), .tab)
+    }
+
+    func testSearchURLAppliesTemplateAndEscapesQuery() throws {
+        let url = try XCTUnwrap(
+            BrowserSiteSearchSettings.searchURL(
+                template: "https://example.com/search?q=%s",
+                query: "react hooks & effects"
+            )
+        )
+
+        XCTAssertEqual(url.absoluteString, "https://example.com/search?q=react%20hooks%20%26%20effects")
+    }
+
+    func testMatchingShortcutRequiresActiveValidExactShortcut() {
+        let valid = BrowserSiteSearchShortcut(
+            name: "GitHub",
+            shortcut: "gh",
+            urlTemplate: "https://github.com/search?q=%s",
+            isActive: true
+        )
+        let disabled = BrowserSiteSearchShortcut(
+            name: "MDN",
+            shortcut: "mdn",
+            urlTemplate: "https://developer.mozilla.org/search?q=%s",
+            isActive: false
+        )
+        let invalid = BrowserSiteSearchShortcut(
+            name: "Broken",
+            shortcut: "broken shortcut",
+            urlTemplate: "https://example.com/search?q=%s",
+            isActive: true
+        )
+
+        XCTAssertEqual(BrowserSiteSearchSettings.matchingShortcut(" GH ", in: [valid, disabled, invalid]), valid)
+        XCTAssertNil(BrowserSiteSearchSettings.matchingShortcut("mdn", in: [valid, disabled, invalid]))
+        XCTAssertNil(BrowserSiteSearchSettings.matchingShortcut("broken shortcut", in: [valid, disabled, invalid]))
+        XCTAssertNil(BrowserSiteSearchSettings.matchingShortcut("g", in: [valid, disabled, invalid]))
+    }
+
+    func testSettingsFileStoreParsesBrowserSiteSearchSettings() throws {
+        let defaults = UserDefaults.standard
+        let backupsKey = "cmux.settingsFile.backups.v1"
+        let importedKey = "cmux.settingsFile.importedManagedDefaults.v1"
+        let previousShortcuts = defaults.object(forKey: BrowserSiteSearchSettings.shortcutsKey)
+        let previousActivation = defaults.object(forKey: BrowserSiteSearchSettings.activationShortcutKey)
+        let previousBackups = defaults.object(forKey: backupsKey)
+        let previousImported = defaults.object(forKey: importedKey)
+        defer {
+            restore(defaults: defaults, value: previousShortcuts, forKey: BrowserSiteSearchSettings.shortcutsKey)
+            restore(defaults: defaults, value: previousActivation, forKey: BrowserSiteSearchSettings.activationShortcutKey)
+            restore(defaults: defaults, value: previousBackups, forKey: backupsKey)
+            restore(defaults: defaults, value: previousImported, forKey: importedKey)
+        }
+        defaults.removeObject(forKey: BrowserSiteSearchSettings.shortcutsKey)
+        defaults.removeObject(forKey: BrowserSiteSearchSettings.activationShortcutKey)
+        defaults.removeObject(forKey: backupsKey)
+        defaults.removeObject(forKey: importedKey)
+
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-browser-site-search-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directoryURL) }
+
+        let settingsFileURL = directoryURL.appendingPathComponent("cmux.json", isDirectory: false)
+        try """
+        {
+          "browser": {
+            "siteSearchKeyboardShortcut": "spaceOrTab",
+            "siteSearch": [
+              {
+                "name": "GitHub",
+                "shortcut": "gh",
+                "urlTemplate": "https://github.com/search?q=%s",
+                "isActive": true
+              },
+              {
+                "name": "Broken",
+                "shortcut": "bad shortcut",
+                "urlTemplate": "https://example.com/search?q=%s"
+              }
+            ]
+          }
+        }
+        """.write(to: settingsFileURL, atomically: true, encoding: .utf8)
+
+        _ = KeyboardShortcutSettingsFileStore(
+            primaryPath: settingsFileURL.path,
+            fallbackPath: nil,
+            additionalFallbackPaths: [],
+            startWatching: false
+        )
+
+        XCTAssertEqual(
+            defaults.string(forKey: BrowserSiteSearchSettings.activationShortcutKey),
+            BrowserSiteSearchActivationShortcut.spaceOrTab.rawValue
+        )
+        let shortcuts = BrowserSiteSearchSettings.decode(defaults.string(forKey: BrowserSiteSearchSettings.shortcutsKey))
+        XCTAssertEqual(shortcuts.count, 1)
+        XCTAssertEqual(shortcuts.first?.name, "GitHub")
+        XCTAssertEqual(shortcuts.first?.shortcut, "gh")
+        XCTAssertEqual(shortcuts.first?.urlTemplate, "https://github.com/search?q=%s")
+    }
+
+    private func restore(defaults: UserDefaults, value: Any?, forKey key: String) {
+        if let value {
+            defaults.set(value, forKey: key)
+        } else {
+            defaults.removeObject(forKey: key)
+        }
+    }
+}
+
 
 final class BrowserHistoryStoreTests: XCTestCase {
     func testRecordVisitDedupesAndSuggests() async throws {

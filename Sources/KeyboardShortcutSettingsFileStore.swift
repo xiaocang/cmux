@@ -980,6 +980,24 @@ final class CmuxSettingsFileStore {
         if let value = jsonBool(section["showSearchSuggestions"]) {
             snapshot.managedUserDefaults[BrowserSearchSettings.searchSuggestionsEnabledKey] = .bool(value)
         }
+        if let raw = jsonString(section["siteSearchKeyboardShortcut"]) {
+            guard let mode = BrowserSiteSearchActivationShortcut(rawValue: raw) else {
+                logInvalid("browser.siteSearchKeyboardShortcut", sourcePath: sourcePath)
+                return
+            }
+            snapshot.managedUserDefaults[BrowserSiteSearchSettings.activationShortcutKey] = .string(mode.rawValue)
+        }
+        if let rawItems = section["siteSearch"] as? [[String: Any]] {
+            let shortcuts = BrowserSiteSearchSettings.parseManagedShortcuts(rawItems)
+            if shortcuts.count != rawItems.count {
+                logInvalid("browser.siteSearch", sourcePath: sourcePath)
+            }
+            snapshot.managedUserDefaults[BrowserSiteSearchSettings.shortcutsKey] = .string(
+                BrowserSiteSearchSettings.encode(shortcuts)
+            )
+        } else if section.keys.contains("siteSearch") {
+            logInvalid("browser.siteSearch", sourcePath: sourcePath)
+        }
         if let raw = jsonString(section["theme"]) {
             guard let mode = BrowserThemeMode(rawValue: raw) else {
                 logInvalid("browser.theme", sourcePath: sourcePath)

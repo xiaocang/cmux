@@ -150,6 +150,8 @@ extension CmuxSettingsFileStore {
         "workspaceTab.summaryPriority.sortDirection",
         "browser.defaultSearchEngine",
         "browser.showSearchSuggestions",
+        "browser.siteSearchKeyboardShortcut",
+        "browser.siteSearch",
         "browser.theme",
         "browser.discardHiddenWebViews",
         "browser.hiddenWebViewDiscardDelaySeconds",

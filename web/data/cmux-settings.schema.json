@@ -450,6 +450,45 @@
           "default": true,
           "description": "Show omnibar search suggestions."
         },
+        "siteSearchKeyboardShortcut": {
+          "type": "string",
+          "enum": ["tab", "spaceOrTab"],
+          "default": "tab",
+          "description": "Key that activates a matching site search shortcut in the browser omnibar."
+        },
+        "siteSearch": {
+          "type": "array",
+          "default": [],
+          "description": "Chrome-style site search shortcuts for the browser omnibar.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "shortcut", "urlTemplate"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Display name shown in the omnibar chip."
+              },
+              "shortcut": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^\\S+$",
+                "description": "Address bar shortcut, for example gh."
+              },
+              "urlTemplate": {
+                "type": "string",
+                "pattern": "^https?://.*%s.*$",
+                "description": "HTTP(S) URL template with %s where the query should be inserted."
+              },
+              "isActive": {
+                "type": "boolean",
+                "default": true,
+                "description": "Whether this site search shortcut participates in omnibar matching."
+              }
+            }
+          }
+        },
         "theme": {
           "type": "string",
           "enum": ["system", "light", "dark"],

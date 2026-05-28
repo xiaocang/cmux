@@ -6448,6 +6448,91 @@
         }
       }
     },
+    "browser.omnibar.siteSearch.chip": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ を検索"
+          }
+        }
+      }
+    },
+    "browser.omnibar.siteSearch.placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ を検索"
+          }
+        }
+      }
+    },
+    "browser.omnibar.siteSearch.pressSpaceOrTab": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Press Space or Tab to search"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space または Tab で検索"
+          }
+        }
+      }
+    },
+    "browser.omnibar.siteSearch.pressTab": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Press Tab to search"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tab で検索"
+          }
+        }
+      }
+    },
+    "browser.omnibar.siteSearch.primary": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search %@"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ を検索"
+          }
+        }
+      }
+    },
     "browser.addressBarSuggestions": {
       "extractionState": "manual",
       "localizations": {
@@ -92536,6 +92621,312 @@
         }
       }
     },
+    "settings.browser.siteSearch": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Site Search"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイト検索"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.active": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Active"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有効"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.add": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add site search"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイト検索を追加"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.empty": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No site searches configured."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイト検索は設定されていません。"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.invalidShortcut": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shortcut cannot be empty or contain spaces."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ショートカットは空にできず、スペースも含められません。"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.invalidTemplate": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL must use http or https and include %s."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL は http または https を使用し、%s を含める必要があります。"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.keyboard": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Site Search Shortcut"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイト検索ショートカット"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.keyboard.spaceOrTab": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space or Tab"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Space または Tab"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.keyboard.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "After typing a site shortcut in the address bar, use this key to enter site search mode."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アドレスバーにサイトショートカットを入力した後、このキーでサイト検索モードに入ります。"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.keyboard.tab": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tab"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tab"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.name": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Name"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "名前"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.name.placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "GitHub"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.remove": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove site search"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "サイト検索を削除"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.shortcut": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Shortcut"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ショートカット"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.shortcut.placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "gh"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "gh"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type a shortcut in the address bar, press the site search key, then enter a query. URL templates must include %s where the query belongs."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "アドレスバーにショートカットを入力し、サイト検索キーを押してから検索語句を入力します。URL テンプレートには検索語句の位置に %s を含める必要があります。"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.urlTemplate": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "URL with %s in place of query"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "検索語句の位置に %s を含む URL"
+          }
+        }
+      }
+    },
+    "settings.browser.siteSearch.urlTemplate.placeholder": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://github.com/search?q=%s"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "https://github.com/search?q=%s"
+          }
+        }
+      }
+    },
     "settings.browser.theme": {
       "extractionState": "manual",
       "localizations": {
@@ -107861,6 +108252,23 @@
           "stringUnit": {
             "state": "translated",
             "value": "browser.showSearchSuggestions suggest autocomplete address bar search suggestions програма загальні параметри поведінка док рядок меню статус бічна панель браузер веб webview адресний посилання url вбудований сторінка вкладки пошук пропозиції автодоповнення постачальник пошукова система Браузер: %@ Підказки адресного рядка •"
+          }
+        }
+      }
+    },
+    "settings.search.alias.setting.browser.site-search": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "browser.siteSearch browser.siteSearchKeyboardShortcut omnibar address bar site search shortcut template chrome tab space"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "browser.siteSearch browser.siteSearchKeyboardShortcut omnibar address bar site search shortcut template chrome tab space サイト検索 ショートカット テンプレート アドレスバー"
           }
         }
       }

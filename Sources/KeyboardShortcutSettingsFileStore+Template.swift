@@ -182,6 +182,8 @@ extension CmuxSettingsFileStore {
                 "browser": [
                     "defaultSearchEngine": BrowserSearchSettings.defaultSearchEngine.rawValue,
                     "showSearchSuggestions": BrowserSearchSettings.defaultSearchSuggestionsEnabled,
+                    "siteSearchKeyboardShortcut": BrowserSiteSearchSettings.defaultActivationShortcut.rawValue,
+                    "siteSearch": [Any](),
                     "theme": BrowserThemeSettings.defaultMode.rawValue,
                     "discardHiddenWebViews": BrowserHiddenWebViewDiscardPolicy.defaultEnabled,
                     "hiddenWebViewDiscardDelaySeconds": BrowserHiddenWebViewDiscardPolicy.defaultHiddenDelay,

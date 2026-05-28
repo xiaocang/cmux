@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 
 @MainActor
 enum SettingsWindowPresenter {
@@ -13,6 +14,7 @@ enum SettingsWindowPresenter {
     private static weak var observedParentWindow: NSWindow?
     private static weak var observedSettingsWindow: NSWindow?
     private static var parentCloseObserver: NSObjectProtocol?
+    private static var fallbackWindowController: NSWindowController?
     private static var pendingNavigationTarget: SettingsNavigationTarget?
     private static var pendingContentNavigationTarget: SettingsNavigationTarget?
     private static var shouldOpenWhenConfigured = false
@@ -79,7 +81,7 @@ enum SettingsWindowPresenter {
         }
 
         guard let openWindow else {
-            shouldOpenWhenConfigured = true
+            openFallbackWindow(navigationTarget: navigationTarget)
             return
         }
         openWindow()
@@ -112,11 +114,37 @@ enum SettingsWindowPresenter {
         openWindow = nil
         parentWindowProvider = nil
         settingsWindow = nil
+        fallbackWindowController = nil
         pendingNavigationTarget = nil
         pendingContentNavigationTarget = nil
         shouldOpenWhenConfigured = false
     }
 #endif
+
+    private static func openFallbackWindow(navigationTarget: SettingsNavigationTarget?) {
+        if let window = fallbackWindowController?.window,
+           window.isVisible || window.isMiniaturized {
+            focus(window)
+            if let navigationTarget {
+                SettingsNavigationRequest.post(navigationTarget)
+            }
+            return
+        }
+
+        let hostingController = NSHostingController(rootView: SettingsRootView())
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = String(localized: "settings.title", defaultValue: "Settings")
+        window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        window.setContentSize(minimumSize)
+        let controller = NSWindowController(window: window)
+        fallbackWindowController = controller
+        configure(window: window)
+        controller.showWindow(nil)
+        focus(window)
+        if let navigationTarget {
+            SettingsNavigationRequest.post(navigationTarget)
+        }
+    }
 
     private static func existingWindow() -> NSWindow? {
         if let settingsWindow, settingsWindow.isVisible || settingsWindow.isMiniaturized {

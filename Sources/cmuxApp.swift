@@ -5728,6 +5728,8 @@ struct SettingsView: View {
     @AppStorage(AutomationSettings.portRangeKey) private var cmuxPortRange = AutomationSettings.defaultPortRange
     @AppStorage(BrowserSearchSettings.searchEngineKey) private var browserSearchEngine = BrowserSearchSettings.defaultSearchEngine.rawValue
     @AppStorage(BrowserSearchSettings.searchSuggestionsEnabledKey) private var browserSearchSuggestionsEnabled = BrowserSearchSettings.defaultSearchSuggestionsEnabled
+    @AppStorage(BrowserSiteSearchSettings.shortcutsKey) private var browserSiteSearchShortcutsStorage = BrowserSiteSearchSettings.defaultShortcutsStorage
+    @AppStorage(BrowserSiteSearchSettings.activationShortcutKey) private var browserSiteSearchActivationShortcut = BrowserSiteSearchSettings.defaultActivationShortcut.rawValue
     @AppStorage(BrowserThemeSettings.modeKey) private var browserThemeMode = BrowserThemeSettings.defaultMode.rawValue
     @AppStorage(BrowserAvailabilitySettings.disabledKey) private var browserDisabled = BrowserAvailabilitySettings.defaultDisabled
     @AppStorage(BrowserHiddenWebViewDiscardPolicy.enabledKey)
@@ -5860,6 +5862,9 @@ struct SettingsView: View {
     @State private var didRequestBrowserImportDetection = false
     @State private var isDetectingImportBrowsers = false
     @State private var browserImportDetectionGeneration = 0
+    @State private var newSiteSearchName = ""
+    @State private var newSiteSearchShortcut = ""
+    @State private var newSiteSearchURLTemplate = ""
     @State private var browserInsecureHTTPAllowlistDraft = BrowserInsecureHTTPSettings.defaultAllowlistText
     @State private var socketPasswordDraft = ""
     @State private var socketPasswordStatusMessage: String?
@@ -6260,6 +6265,98 @@ struct SettingsView: View {
         )
     }
 
+    private var browserSiteSearchShortcuts: [BrowserSiteSearchShortcut] {
+        BrowserSiteSearchSettings.decode(browserSiteSearchShortcutsStorage)
+    }
+
+    private var browserSiteSearchActivationSelection: Binding<String> {
+        Binding(
+            get: {
+                BrowserSiteSearchActivationShortcut(rawValue: browserSiteSearchActivationShortcut)?.rawValue
+                    ?? BrowserSiteSearchSettings.defaultActivationShortcut.rawValue
+            },
+            set: { newValue in
+                guard let mode = BrowserSiteSearchActivationShortcut(rawValue: newValue) else { return }
+                browserSiteSearchActivationShortcut = mode.rawValue
+            }
+        )
+    }
+
+    private var canAddBrowserSiteSearchShortcut: Bool {
+        let name = newSiteSearchName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              BrowserSiteSearchSettings.isValidSiteSearchShortcut(newSiteSearchShortcut),
+              BrowserSiteSearchSettings.isValidSiteSearchURLTemplate(newSiteSearchURLTemplate) else {
+            return false
+        }
+
+        let normalized = newSiteSearchShortcut.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return !browserSiteSearchShortcuts.contains {
+            $0.shortcut.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized
+        }
+    }
+
+    private func browserSiteSearchStringBinding(
+        id: UUID,
+        keyPath: WritableKeyPath<BrowserSiteSearchShortcut, String>
+    ) -> Binding<String> {
+        Binding(
+            get: {
+                browserSiteSearchShortcuts.first(where: { $0.id == id })?[keyPath: keyPath] ?? ""
+            },
+            set: { newValue in
+                updateBrowserSiteSearchShortcut(id: id) { shortcut in
+                    shortcut[keyPath: keyPath] = newValue
+                }
+            }
+        )
+    }
+
+    private func browserSiteSearchActiveBinding(id: UUID) -> Binding<Bool> {
+        Binding(
+            get: {
+                browserSiteSearchShortcuts.first(where: { $0.id == id })?.isActive ?? false
+            },
+            set: { newValue in
+                updateBrowserSiteSearchShortcut(id: id) { shortcut in
+                    shortcut.isActive = newValue
+                }
+            }
+        )
+    }
+
+    private func updateBrowserSiteSearchShortcut(
+        id: UUID,
+        update: (inout BrowserSiteSearchShortcut) -> Void
+    ) {
+        var shortcuts = browserSiteSearchShortcuts
+        guard let idx = shortcuts.firstIndex(where: { $0.id == id }) else { return }
+        update(&shortcuts[idx])
+        browserSiteSearchShortcutsStorage = BrowserSiteSearchSettings.encode(shortcuts)
+    }
+
+    private func addBrowserSiteSearchShortcut() {
+        guard canAddBrowserSiteSearchShortcut else { return }
+        var shortcuts = browserSiteSearchShortcuts
+        shortcuts.append(
+            BrowserSiteSearchShortcut(
+                name: newSiteSearchName.trimmingCharacters(in: .whitespacesAndNewlines),
+                shortcut: newSiteSearchShortcut.trimmingCharacters(in: .whitespacesAndNewlines),
+                urlTemplate: newSiteSearchURLTemplate.trimmingCharacters(in: .whitespacesAndNewlines),
+                isActive: true
+            )
+        )
+        browserSiteSearchShortcutsStorage = BrowserSiteSearchSettings.encode(shortcuts)
+        newSiteSearchName = ""
+        newSiteSearchShortcut = ""
+        newSiteSearchURLTemplate = ""
+    }
+
+    private func removeBrowserSiteSearchShortcut(id: UUID) {
+        let shortcuts = browserSiteSearchShortcuts.filter { $0.id != id }
+        browserSiteSearchShortcutsStorage = BrowserSiteSearchSettings.encode(shortcuts)
+    }
+
     private var supportedFileRoutingBinding: Binding<Bool> {
         Binding(
             get: { openSupportedFilesInCmux },
@@ -6326,6 +6423,75 @@ struct SettingsView: View {
                 .controlSize(.small)
                 .accessibilityIdentifier("BrowserEnabledToggle")
         }
+
+        SettingsCardDivider()
+    }
+
+    @ViewBuilder
+    private var browserSiteSearchSettingsRows: some View {
+        SettingsPickerRow(
+            configurationReview: .json("browser.siteSearchKeyboardShortcut"),
+            String(localized: "settings.browser.siteSearch.keyboard", defaultValue: "Site Search Shortcut"),
+            subtitle: String(localized: "settings.browser.siteSearch.keyboard.subtitle", defaultValue: "After typing a site shortcut in the address bar, use this key to enter site search mode."),
+            controlWidth: pickerColumnWidth,
+            selection: browserSiteSearchActivationSelection,
+            accessibilityId: "SettingsBrowserSiteSearchKeyboardPicker"
+        ) {
+            ForEach(BrowserSiteSearchActivationShortcut.allCases) { mode in
+                Text(mode.displayName).tag(mode.rawValue)
+            }
+        }
+
+        SettingsCardDivider()
+
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.browser.siteSearch", defaultValue: "Site Search"))
+                    .font(.system(size: 13, weight: .semibold))
+                Text(String(localized: "settings.browser.siteSearch.subtitle", defaultValue: "Type a shortcut in the address bar, press the site search key, then enter a query. URL templates must include %s where the query belongs."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            BrowserSiteSearchHeaderRow()
+
+            if browserSiteSearchShortcuts.isEmpty {
+                Text(String(localized: "settings.browser.siteSearch.empty", defaultValue: "No site searches configured."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("SettingsBrowserSiteSearchEmpty")
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(browserSiteSearchShortcuts) { shortcut in
+                        BrowserSiteSearchShortcutSettingsRow(
+                            id: shortcut.id,
+                            name: browserSiteSearchStringBinding(id: shortcut.id, keyPath: \.name),
+                            shortcut: browserSiteSearchStringBinding(id: shortcut.id, keyPath: \.shortcut),
+                            urlTemplate: browserSiteSearchStringBinding(id: shortcut.id, keyPath: \.urlTemplate),
+                            isActive: browserSiteSearchActiveBinding(id: shortcut.id),
+                            onRemove: {
+                                removeBrowserSiteSearchShortcut(id: shortcut.id)
+                            }
+                        )
+                    }
+                }
+            }
+
+            BrowserSiteSearchAddShortcutRow(
+                name: $newSiteSearchName,
+                shortcut: $newSiteSearchShortcut,
+                urlTemplate: $newSiteSearchURLTemplate,
+                canAdd: canAddBrowserSiteSearchShortcut,
+                onAdd: addBrowserSiteSearchShortcut
+            )
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .settingsSearchAnchor(SettingsSearchIndex.settingID(for: .browser, idSuffix: "site-search"))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("SettingsBrowserSiteSearchSection")
 
         SettingsCardDivider()
     }
@@ -8423,6 +8589,8 @@ struct SettingsView: View {
 
                         SettingsCardDivider()
 
+                        browserSiteSearchSettingsRows
+
                         SettingsPickerRow(
                             configurationReview: .json("browser.theme"),
                             String(localized: "settings.browser.theme", defaultValue: "Browser Theme"),
@@ -9201,6 +9369,8 @@ struct SettingsView: View {
         openMarkdownInCmuxViewer = CmdClickMarkdownRouteSettings.defaultValue
         browserSearchEngine = BrowserSearchSettings.defaultSearchEngine.rawValue
         browserSearchSuggestionsEnabled = BrowserSearchSettings.defaultSearchSuggestionsEnabled
+        browserSiteSearchShortcutsStorage = BrowserSiteSearchSettings.defaultShortcutsStorage
+        browserSiteSearchActivationShortcut = BrowserSiteSearchSettings.defaultActivationShortcut.rawValue
         browserThemeMode = BrowserThemeSettings.defaultMode.rawValue
         BrowserAvailabilitySettings.setDisabled(BrowserAvailabilitySettings.defaultDisabled)
         browserDisabled = BrowserAvailabilitySettings.defaultDisabled
@@ -9710,6 +9880,164 @@ struct SettingsCardDivider: View {
         Rectangle()
             .fill(Color(nsColor: NSColor.separatorColor).opacity(0.5))
             .frame(height: 1)
+    }
+}
+
+private struct BrowserSiteSearchHeaderRow: View {
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(String(localized: "settings.browser.siteSearch.name", defaultValue: "Name"))
+                .frame(width: 120, alignment: .leading)
+            Text(String(localized: "settings.browser.siteSearch.shortcut", defaultValue: "Shortcut"))
+                .frame(width: 84, alignment: .leading)
+            Text(String(localized: "settings.browser.siteSearch.urlTemplate", defaultValue: "URL with %s in place of query"))
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Text(String(localized: "settings.browser.siteSearch.active", defaultValue: "Active"))
+                .frame(width: 54, alignment: .center)
+            Color.clear.frame(width: 24, height: 1)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+    }
+}
+
+private struct BrowserSiteSearchShortcutSettingsRow: View {
+    let id: UUID
+    @Binding var name: String
+    @Binding var shortcut: String
+    @Binding var urlTemplate: String
+    @Binding var isActive: Bool
+    let onRemove: () -> Void
+
+    private var shortcutIsValid: Bool {
+        BrowserSiteSearchSettings.isValidSiteSearchShortcut(shortcut)
+    }
+
+    private var urlTemplateIsValid: Bool {
+        BrowserSiteSearchSettings.isValidSiteSearchURLTemplate(urlTemplate)
+    }
+
+    private var rowSuffix: String {
+        id.uuidString
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                TextField(
+                    String(localized: "settings.browser.siteSearch.name.placeholder", defaultValue: "GitHub"),
+                    text: $name
+                )
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 120)
+                .accessibilityIdentifier("SettingsBrowserSiteSearchNameField.\(rowSuffix)")
+
+                TextField(
+                    String(localized: "settings.browser.siteSearch.shortcut.placeholder", defaultValue: "gh"),
+                    text: $shortcut
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .frame(width: 84)
+                .accessibilityIdentifier("SettingsBrowserSiteSearchShortcutField.\(rowSuffix)")
+
+                TextField(
+                    String(localized: "settings.browser.siteSearch.urlTemplate.placeholder", defaultValue: "https://github.com/search?q=%s"),
+                    text: $urlTemplate
+                )
+                .textFieldStyle(.roundedBorder)
+                .font(.system(.body, design: .monospaced))
+                .frame(minWidth: 220, maxWidth: .infinity)
+                .accessibilityIdentifier("SettingsBrowserSiteSearchURLTemplateField.\(rowSuffix)")
+
+                Toggle("", isOn: $isActive)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .frame(width: 54)
+                    .accessibilityLabel(String(localized: "settings.browser.siteSearch.active", defaultValue: "Active"))
+                    .accessibilityIdentifier("SettingsBrowserSiteSearchActiveToggle.\(rowSuffix)")
+
+                Button(role: .destructive, action: onRemove) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.borderless)
+                .controlSize(.small)
+                .frame(width: 24)
+                .help(String(localized: "settings.browser.siteSearch.remove", defaultValue: "Remove site search"))
+                .accessibilityIdentifier("SettingsBrowserSiteSearchRemoveButton.\(rowSuffix)")
+            }
+
+            if !shortcutIsValid || !urlTemplateIsValid {
+                Text(validationMessage)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("SettingsBrowserSiteSearchValidation.\(rowSuffix)")
+            }
+        }
+    }
+
+    private var validationMessage: String {
+        if !shortcutIsValid {
+            return String(localized: "settings.browser.siteSearch.invalidShortcut", defaultValue: "Shortcut cannot be empty or contain spaces.")
+        }
+        return String(localized: "settings.browser.siteSearch.invalidTemplate", defaultValue: "URL must use http or https and include %s.")
+    }
+}
+
+private struct BrowserSiteSearchAddShortcutRow: View {
+    @Binding var name: String
+    @Binding var shortcut: String
+    @Binding var urlTemplate: String
+    let canAdd: Bool
+    let onAdd: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            TextField(
+                String(localized: "settings.browser.siteSearch.name.placeholder", defaultValue: "GitHub"),
+                text: $name
+            )
+            .textFieldStyle(.roundedBorder)
+            .frame(width: 120)
+            .onSubmit { if canAdd { onAdd() } }
+            .accessibilityIdentifier("SettingsBrowserSiteSearchNewNameField")
+
+            TextField(
+                String(localized: "settings.browser.siteSearch.shortcut.placeholder", defaultValue: "gh"),
+                text: $shortcut
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(.body, design: .monospaced))
+            .frame(width: 84)
+            .onSubmit { if canAdd { onAdd() } }
+            .accessibilityIdentifier("SettingsBrowserSiteSearchNewShortcutField")
+
+            TextField(
+                String(localized: "settings.browser.siteSearch.urlTemplate.placeholder", defaultValue: "https://github.com/search?q=%s"),
+                text: $urlTemplate
+            )
+            .textFieldStyle(.roundedBorder)
+            .font(.system(.body, design: .monospaced))
+            .frame(minWidth: 220, maxWidth: .infinity)
+            .onSubmit { if canAdd { onAdd() } }
+            .accessibilityIdentifier("SettingsBrowserSiteSearchNewURLTemplateField")
+
+            Color.clear.frame(width: 54, height: 1)
+
+            Button(action: onAdd) {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .frame(width: 24)
+            .disabled(!canAdd)
+            .help(String(localized: "settings.browser.siteSearch.add", defaultValue: "Add site search"))
+            .accessibilityIdentifier("SettingsBrowserSiteSearchAddButton")
+        }
     }
 }
 
@@ -10627,7 +10955,7 @@ private class LeaderKeyRecorderNSButton: NSButton {
     }
 }
 
-private struct SettingsRootView: View {
+struct SettingsRootView: View {
     @SceneStorage("selectedSettingsSection") private var selectedSectionRaw = SettingsNavigationTarget.account.rawValue
     @SceneStorage("selectedSettingsSidebarEntry") private var selectedSidebarEntryID = SettingsSearchIndex.defaultSelectionID
     @State private var columnVisibility: NavigationSplitViewVisibility = .all

@@ -1289,6 +1289,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
                     forKey: BrowserImportHintSettings.dismissedKey
                 )
             }
+            if let rawSiteSearchShortcuts = env["CMUX_UI_TEST_BROWSER_SITE_SEARCH_JSON"] {
+                UserDefaults.standard.set(
+                    rawSiteSearchShortcuts,
+                    forKey: BrowserSiteSearchSettings.shortcutsKey
+                )
+            }
+            if let rawSiteSearchActivation = env["CMUX_UI_TEST_BROWSER_SITE_SEARCH_ACTIVATION"],
+               let activation = BrowserSiteSearchActivationShortcut(rawValue: rawSiteSearchActivation) {
+                UserDefaults.standard.set(
+                    activation.rawValue,
+                    forKey: BrowserSiteSearchSettings.activationShortcutKey
+                )
+            }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
                 guard let self else { return }
                 if NSApp.windows.isEmpty {
@@ -6567,6 +6580,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         didBootstrapInitialMainWindow = true
         if ProcessInfo.processInfo.environment["CMUX_UI_TEST_SHOW_SETTINGS"] == "1" {
             openPreferencesWindow(debugSource: "uiTestShowSettings.\(debugSource)")
+        }
+        if ProcessInfo.processInfo.environment["CMUX_UI_TEST_BROWSER_SITE_SEARCH_OPEN_SETTINGS"] == "1" {
+            openPreferencesWindow(
+                debugSource: "uiTestBrowserSiteSearch.\(debugSource)",
+                navigationTarget: .browser
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                SettingsNavigationRequest.post(
+                    .browser,
+                    anchorID: SettingsSearchIndex.settingID(for: .browser, idSuffix: "site-search")
+                )
+            }
         }
         return windowId
     }
