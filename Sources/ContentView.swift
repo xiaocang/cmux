@@ -7690,6 +7690,18 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.browserSplitLeft",
+                title: constant(String(localized: "command.browserSplitLeft.title", defaultValue: "Split Browser Left")),
+                subtitle: constant(String(localized: "command.browserSplitLeft.subtitle", defaultValue: "Browser Layout")),
+                keywords: ["browser", "split", "left"],
+                when: {
+                    $0.bool(CommandPaletteContextKeys.panelIsBrowser) &&
+                    !$0.bool(CommandPaletteContextKeys.browserDisabled)
+                }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.browserDuplicateRight",
                 title: constant(String(localized: "command.browserDuplicateRight.title", defaultValue: "Duplicate Browser to the Right")),
                 subtitle: constant(String(localized: "command.browserDuplicateRight.subtitle", defaultValue: "Browser Layout")),
@@ -7902,6 +7914,15 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.terminalSplitLeft",
+                title: constant(String(localized: "command.terminalSplitLeft.title", defaultValue: "Split Left")),
+                subtitle: constant(String(localized: "command.terminalSplitLeft.subtitle", defaultValue: "Terminal Layout")),
+                keywords: ["terminal", "split", "left"],
+                when: { $0.bool(CommandPaletteContextKeys.panelIsTerminal) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.terminalSplitBrowserRight",
                 title: constant(String(localized: "command.terminalSplitBrowserRight.title", defaultValue: "Split Browser Right")),
                 subtitle: constant(String(localized: "command.terminalSplitBrowserRight.subtitle", defaultValue: "Terminal Layout")),
@@ -7918,6 +7939,18 @@ struct ContentView: View {
                 title: constant(String(localized: "command.terminalSplitBrowserDown.title", defaultValue: "Split Browser Down")),
                 subtitle: constant(String(localized: "command.terminalSplitBrowserDown.subtitle", defaultValue: "Terminal Layout")),
                 keywords: ["terminal", "split", "browser", "down"],
+                when: {
+                    $0.bool(CommandPaletteContextKeys.panelIsTerminal) &&
+                    !$0.bool(CommandPaletteContextKeys.browserDisabled)
+                }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.terminalSplitBrowserLeft",
+                title: constant(String(localized: "command.terminalSplitBrowserLeft.title", defaultValue: "Split Browser Left")),
+                subtitle: constant(String(localized: "command.terminalSplitBrowserLeft.subtitle", defaultValue: "Terminal Layout")),
+                keywords: ["terminal", "split", "browser", "left"],
                 when: {
                     $0.bool(CommandPaletteContextKeys.panelIsTerminal) &&
                     !$0.bool(CommandPaletteContextKeys.browserDisabled)
@@ -8523,6 +8556,9 @@ struct ContentView: View {
         registry.register(commandId: "palette.browserSplitDown") {
             _ = tabManager.createBrowserSplit(direction: .down)
         }
+        registry.register(commandId: "palette.browserSplitLeft") {
+            _ = tabManager.createBrowserSplit(direction: .left)
+        }
         registry.register(commandId: "palette.browserDuplicateRight") {
             let url = tabManager.focusedBrowserPanel?.preferredURLStringForOmnibar().flatMap(URL.init(string:))
             _ = tabManager.createBrowserSplit(direction: .right, url: url)
@@ -8598,11 +8634,17 @@ struct ContentView: View {
                 tabManager.createSplit(direction: .down)
             }
         }
+        registry.register(commandId: "palette.terminalSplitLeft") {
+            tabManager.createSplit(direction: .left)
+        }
         registry.register(commandId: "palette.terminalSplitBrowserRight") {
             _ = tabManager.createBrowserSplit(direction: .right)
         }
         registry.register(commandId: "palette.terminalSplitBrowserDown") {
             _ = tabManager.createBrowserSplit(direction: .down)
+        }
+        registry.register(commandId: "palette.terminalSplitBrowserLeft") {
+            _ = tabManager.createBrowserSplit(direction: .left)
         }
         registry.register(commandId: "palette.toggleSplitZoom") {
             if !tabManager.toggleFocusedSplitZoom() {
