@@ -43,6 +43,7 @@ enum LeaderKeySettings {
     enum LeaderAction: String, CaseIterable, Identifiable {
         case splitRight
         case splitDown
+        case toggleSplitZoom
         case focusNextPane
         case closePane
         case newTab
@@ -76,6 +77,7 @@ enum LeaderKeySettings {
             switch self {
             case .splitRight: return "\\"
             case .splitDown: return "-"
+            case .toggleSplitZoom: return "z"
             case .focusNextPane: return "o"
             case .closePane: return "x"
             case .newTab: return "c"
@@ -107,6 +109,8 @@ enum LeaderKeySettings {
                 return String(localized: "leader.action.splitRight.label", defaultValue: "Split Right")
             case .splitDown:
                 return String(localized: "leader.action.splitDown.label", defaultValue: "Split Down")
+            case .toggleSplitZoom:
+                return String(localized: "leader.action.toggleSplitZoom.label", defaultValue: "Toggle Pane Zoom")
             case .focusNextPane:
                 return String(localized: "leader.action.focusNextPane.label", defaultValue: "Focus Next Pane")
             case .closePane:
@@ -168,7 +172,7 @@ enum LeaderKeySettings {
 
     /// Non-tab-selector actions shown as configurable rows in settings.
     static let configurableActions: [LeaderAction] = [
-        .splitRight, .splitDown, .focusNextPane, .closePane,
+        .splitRight, .splitDown, .toggleSplitZoom, .focusNextPane, .closePane,
         .newTab, .nextTab, .previousTab, .focusLeft, .focusRight, .focusDown, .focusUp,
         .setWorkspaceTag, .toggleCopyMode, .toggleSpriteAssistant,
     ]

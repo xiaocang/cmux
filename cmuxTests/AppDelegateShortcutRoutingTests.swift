@@ -10228,6 +10228,59 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
         XCTAssertNil(workspace.tag)
     }
 
+    func testLeaderZTogglePaneZoom() {
+        guard let appDelegate = AppDelegate.shared else {
+            XCTFail("Expected AppDelegate.shared")
+            return
+        }
+
+        let windowId = appDelegate.createMainWindow()
+        defer { closeWindow(withId: windowId) }
+
+        guard let window = window(withId: windowId),
+              let manager = appDelegate.tabManagerFor(windowId: windowId),
+              let workspace = manager.selectedWorkspace,
+              let focusedPanelId = workspace.focusedPanelId,
+              workspace.newTerminalSplit(from: focusedPanelId, orientation: .horizontal, focus: false) != nil else {
+            XCTFail("Expected test window with split workspace")
+            return
+        }
+
+        appDelegate.tabManager = manager
+        workspace.focusPanel(focusedPanelId)
+        XCTAssertFalse(workspace.bonsplitController.isSplitZoomed)
+
+        withTemporaryLeaderKeySettings {
+            guard let leaderEvent = makeKeyDownEvent(
+                key: "b",
+                modifiers: [.control],
+                keyCode: 11,
+                windowNumber: window.windowNumber
+            ), let zoomEvent = makeKeyDownEvent(
+                key: "z",
+                modifiers: [],
+                keyCode: 6,
+                windowNumber: window.windowNumber
+            ) else {
+                XCTFail("Failed to construct leader zoom events")
+                return
+            }
+
+#if DEBUG
+            XCTAssertTrue(appDelegate.debugHandleCustomShortcut(event: leaderEvent))
+            XCTAssertTrue(appDelegate.debugHandleCustomShortcut(event: zoomEvent))
+            XCTAssertTrue(workspace.bonsplitController.isSplitZoomed)
+            XCTAssertTrue(appDelegate.debugHandleCustomShortcut(event: leaderEvent))
+            XCTAssertTrue(appDelegate.debugHandleCustomShortcut(event: zoomEvent))
+#else
+            XCTFail("debugHandleCustomShortcut is only available in DEBUG")
+#endif
+        }
+
+        XCTAssertFalse(workspace.bonsplitController.isSplitZoomed)
+        XCTAssertEqual(workspace.focusedPanelId, focusedPanelId)
+    }
+
     private func makeRegisteredShortcutRoutingWindow(id: UUID) -> NSWindow {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 320, height: 240),
@@ -10893,17 +10946,22 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
         workspaceTagsEnabled: Bool,
         _ body: () -> Void
     ) {
+        withTemporaryLeaderKeySettings(workspaceTagsEnabled: workspaceTagsEnabled, body)
+    }
+
+    private func withTemporaryLeaderKeySettings(
+        workspaceTagsEnabled: Bool = false,
+        _ body: () -> Void
+    ) {
         let defaults = UserDefaults.standard
         let leaderChordKey = KeyboardShortcutSettings.Action.leaderKey.defaultsKey
         let savedValues: [(String, Any?)] = [
             (LeaderKeySettings.enabledKey, defaults.object(forKey: LeaderKeySettings.enabledKey)),
             (LeaderKeySettings.workspaceTagsEnabledKey, defaults.object(forKey: LeaderKeySettings.workspaceTagsEnabledKey)),
-            (
-                LeaderKeySettings.LeaderAction.setWorkspaceTag.defaultsKey,
-                defaults.object(forKey: LeaderKeySettings.LeaderAction.setWorkspaceTag.defaultsKey)
-            ),
             (leaderChordKey, defaults.object(forKey: leaderChordKey)),
-        ]
+        ] + LeaderKeySettings.LeaderAction.allCases.map { action in
+            (action.defaultsKey, defaults.object(forKey: action.defaultsKey))
+        }
 
         defer {
             for (key, value) in savedValues {
@@ -10917,7 +10975,9 @@ final class AppDelegateShortcutRoutingTests: XCTestCase {
 
         defaults.set(true, forKey: LeaderKeySettings.enabledKey)
         defaults.set(workspaceTagsEnabled, forKey: LeaderKeySettings.workspaceTagsEnabledKey)
-        defaults.removeObject(forKey: LeaderKeySettings.LeaderAction.setWorkspaceTag.defaultsKey)
+        for action in LeaderKeySettings.LeaderAction.allCases {
+            defaults.removeObject(forKey: action.defaultsKey)
+        }
         defaults.removeObject(forKey: leaderChordKey)
         body()
     }

@@ -14161,6 +14161,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         switch action {
         case .focusNextPane:
             ws.focusNextPane()
+        case .toggleSplitZoom:
+            _ = tabManager.toggleFocusedSplitZoom()
         case .closePane:
             if let paneId = ws.bonsplitController.focusedPaneId {
                 ws.bonsplitController.closePane(paneId)

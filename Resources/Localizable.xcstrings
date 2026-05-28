@@ -60523,6 +60523,23 @@
         }
       }
     },
+    "leader.action.toggleSplitZoom.label": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Toggle Pane Zoom"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ペインズームを切り替え"
+          }
+        }
+      }
+    },
     "leader.action.splitRight.label": {
       "extractionState": "manual",
       "localizations": {
