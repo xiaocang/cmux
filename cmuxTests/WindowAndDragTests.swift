@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import CMUXActions
 import Carbon.HIToolbox
 import Darwin
 import PDFKit
@@ -78,20 +79,2393 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         XCTAssertTrue(route.allowedTools.contains("list_state"))
     }
 
+    func testProductionRoutesUseSnapshotReadToolsWithoutDebugContextTools() {
+        let router = SortAssistantActionRouter()
+        let intents: [SortAssistantIntent] = [
+            .askContext,
+            .clearSession,
+            .explainCurrentOrder,
+            .proposeSort,
+            .applySort,
+            .manualReorderFeedback,
+            .rememberPreference,
+            .forgetPreference,
+            .rememberSpriteMemory,
+            .forgetSpriteMemory,
+            .undoSort,
+            .workspaceColor,
+            .normalChat,
+        ]
+
+        for intent in intents {
+            let tools = router.route(for: intent).allowedTools
+            for tool in sortAssistantDebugOnlyContextTools {
+                XCTAssertFalse(tools.contains(tool), "\(intent.rawValue) should not expose \(tool)")
+            }
+        }
+
+        let askTools = router.route(for: .askContext).allowedTools
+        XCTAssertTrue(askTools.contains("assistant_working_context_get"))
+        XCTAssertTrue(askTools.contains("workspace_snapshot_get"))
+        XCTAssertTrue(askTools.contains("context_freshness_get"))
+        XCTAssertTrue(askTools.contains("ranking_latest_get"))
+        XCTAssertTrue(askTools.contains("suggestions_active_get"))
+        XCTAssertTrue(askTools.contains("workspace_digest_get"))
+        XCTAssertFalse(askTools.contains("suggestion_accept"))
+        XCTAssertFalse(askTools.contains("suggestion_dismiss"))
+    }
+
+    func testProductionAssistantToolSetExcludesDebugRefreshTools() {
+        for tool in sortAssistantDebugOnlyContextTools {
+            XCTAssertFalse(sortAssistantProductionAssistantTools.contains(tool))
+        }
+        XCTAssertTrue(sortAssistantProductionAssistantTools.contains("assistant_working_context_get"))
+        XCTAssertTrue(sortAssistantProductionAssistantTools.contains("workspace_snapshot_get"))
+        XCTAssertTrue(sortAssistantProductionAssistantTools.contains("workspace_digest_get"))
+        XCTAssertTrue(sortAssistantProductionAssistantTools.contains("suggestion_accept"))
+        XCTAssertTrue(sortAssistantProductionAssistantTools.contains("suggestion_dismiss"))
+    }
+
+    func testProductionToolNormalizerRejectsDebugContextToolsEvenWhenQualified() {
+        let requestedTools = Array(sortAssistantDebugOnlyContextTools)
+            + sortAssistantDebugOnlyContextTools.map { "mcp__cmux_sprite__\($0)" }
+            + [
+                "mcp__cmux_sprite__assistant_working_context_get",
+                "workspace_snapshot_get",
+            ]
+
+        let normalized = normalizedSortAssistantProductionInternalTools(requestedTools)
+
+        for tool in sortAssistantDebugOnlyContextTools {
+            XCTAssertFalse(normalized.contains(tool), "production normalizer should reject \(tool)")
+        }
+        XCTAssertEqual(normalized, [
+            "assistant_working_context_get",
+            "workspace_snapshot_get",
+        ])
+    }
+
+    func testRouteAdjustmentCanExplicitlyExposeSuggestionMutationTools() {
+        let route = SortAssistantActionRouter().route(for: .askContext)
+        let adjustment = SortAssistantRouteAdjustment(
+            allowedTools: ["suggestion_accept", "suggestion_dismiss"]
+        )
+        let adjustedTools = adjustment.applyingAllowedTools(to: route.allowedTools)
+
+        XCTAssertFalse(route.allowedTools.contains("suggestion_accept"))
+        XCTAssertFalse(route.allowedTools.contains("suggestion_dismiss"))
+        XCTAssertTrue(adjustedTools.contains("suggestion_accept"))
+        XCTAssertTrue(adjustedTools.contains("suggestion_dismiss"))
+        XCTAssertTrue(adjustment.requestsMutatingTools(applyingTo: route.allowedTools))
+    }
+
+    func testMCPRuntimePlanDoesNotLoadExternalServersForProductionAssistantRoutes() {
+        let intents: [SortAssistantIntent] = [
+            .askContext,
+            .proposeSort,
+            .applySort,
+            .explainCurrentOrder,
+            .rememberPreference,
+            .forgetPreference,
+            .rememberSpriteMemory,
+            .forgetSpriteMemory,
+            .undoSort,
+            .workspaceColor,
+            .normalChat,
+            .manualReorderFeedback,
+        ]
+
+        for intent in intents {
+            let request = makeSpriteMCPRequest(intent: intent)
+            let summary = SortAssistantMCPClient.runtimePlanSummaryForTesting(request)
+
+            XCTAssertEqual(summary.externalPolicy, "sprite_only_for_intent", "\(intent.rawValue)")
+            XCTAssertEqual(summary.externalServerNames, [], "\(intent.rawValue)")
+            XCTAssertEqual(summary.externalAllowedTools, [], "\(intent.rawValue)")
+            XCTAssertFalse(summary.executionAllowedTools.contains { $0.contains("mock_external") }, "\(intent.rawValue)")
+            XCTAssertEqual(
+                summary.serverNames.contains("cmux_sprite"),
+                !request.route.allowedTools.isEmpty,
+                "\(intent.rawValue)"
+            )
+        }
+    }
+
+    func testRouteAdjustmentCannotReintroduceRefreshTools() {
+        let route = SortAssistantActionRouter().route(for: .askContext)
+        let adjusted = route.applying(SortAssistantRouteAdjustment(
+            allowedToolsMode: .append,
+            allowedTools: Array(sortAssistantDebugOnlyContextTools) + ["assistant_working_context_get"]
+        ))
+
+        for tool in sortAssistantDebugOnlyContextTools {
+            XCTAssertFalse(adjusted.allowedTools.contains(tool), "route adjustment should not expose \(tool)")
+        }
+        XCTAssertTrue(adjusted.allowedTools.contains("assistant_working_context_get"))
+    }
+
+    func testEmptyAllowedToolsFallbackCannotReintroduceRefreshTools() {
+        let route = SortAssistantActionRouter().route(for: .workspaceColor)
+        let adjusted = route.applying(
+            SortAssistantRouteAdjustment(allowedToolsMode: .replace),
+            emptyAllowedToolsFallback: Array(sortAssistantDebugOnlyContextTools) + ["workspace_color_get"]
+        )
+
+        for tool in sortAssistantDebugOnlyContextTools {
+            XCTAssertFalse(adjusted.allowedTools.contains(tool), "empty fallback should not expose \(tool)")
+        }
+        XCTAssertTrue(adjusted.allowedTools.contains("workspace_color_get"))
+    }
+
+    func testContextPromptReadsSnapshotsInsteadOfCollectingContext() throws {
+        let prompt = try XCTUnwrap(
+            SortAssistantMCPClient.promptFragmentTextForTesting(named: "context")
+        )
+
+        XCTAssertFalse(prompt.contains("Gather relevant context"))
+        XCTAssertFalse(prompt.contains("context_collect"))
+        XCTAssertFalse(prompt.contains("repository_context"))
+        XCTAssertFalse(prompt.contains("workspace_digest_refresh"))
+        XCTAssertTrue(prompt.contains("assistant_working_context_get"))
+        XCTAssertTrue(prompt.contains("ContextAgent"))
+        XCTAssertTrue(prompt.contains("freshness"))
+    }
+
+    func testSortPromptsReadSnapshotBackedContextInsteadOfSortContext() throws {
+        let sortPrompt = try XCTUnwrap(
+            SortAssistantMCPClient.promptFragmentTextForTesting(named: "sort")
+        )
+        let explainPrompt = try XCTUnwrap(
+            SortAssistantMCPClient.promptFragmentTextForTesting(named: "explain_order")
+        )
+
+        XCTAssertFalse(sortPrompt.contains("sort_context"))
+        XCTAssertFalse(explainPrompt.contains("sort_context"))
+        XCTAssertTrue(sortPrompt.contains("assistant_working_context_get"))
+        XCTAssertTrue(sortPrompt.contains("ranking_latest_get"))
+        XCTAssertTrue(explainPrompt.contains("assistant_working_context_get"))
+        XCTAssertTrue(explainPrompt.contains("ranking_latest_get"))
+    }
+
+    func testDisableRealLLMSemanticRoutingUsesDeterministicContextRoute() async {
+        let decision = await SortAssistantIntentRouter().semanticIntent(
+            for: "summarize context",
+            runtimeMode: noLLMRuntimeMode()
+        )
+
+        XCTAssertEqual(decision.intent, .askContext)
+        XCTAssertEqual(decision.confidence, 1)
+        XCTAssertEqual(decision.reason, "real_llm_disabled")
+    }
+
+    func testDisableRealLLMSemanticRoutingDoesNotTreatPlainChatAsSort() async {
+        let decision = await SortAssistantIntentRouter().semanticIntent(
+            for: "who are you?",
+            runtimeMode: noLLMRuntimeMode()
+        )
+
+        XCTAssertEqual(decision.intent, .normalChat)
+        XCTAssertEqual(decision.reason, "real_llm_disabled")
+    }
+
+    func testDisableRealLLMSemanticRoutingKeepsColorSortRoute() async {
+        let decision = await SortAssistantIntentRouter().semanticIntent(
+            for: "preview a sort by color",
+            runtimeMode: noLLMRuntimeMode()
+        )
+
+        XCTAssertEqual(decision.intent, .proposeSort)
+        XCTAssertEqual(decision.sortRoute, .colorGroup)
+    }
+
+    func testWorkspaceSnapshotContextHashIgnoresUpdatedAtButTracksSemanticChanges() {
+        let workspaceId = UUID(uuidString: "11111111-1111-1111-1111-111111111111")!
+        let context = NormalizedWorkspaceContext(
+            title: "API fix",
+            selected: true,
+            directory: "/tmp/cmux",
+            listRevision: 7,
+            nativeOrder: 0,
+            pinned: false,
+            locked: false,
+            customColor: nil,
+            panelCount: 1,
+            pullRequestCount: 1,
+            stalePullRequestCount: 0
+        )
+        let derived = DerivedWorkspaceState(
+            status: "waiting_user",
+            priorityScore: 91,
+            rankReason: "Needs review",
+            nextAction: "Review agent output",
+            userAttentionNeeded: 0.91
+        )
+        let freshness = ContextFreshness(
+            providers: [
+                ProviderFreshness(
+                    providerId: "summary_priority",
+                    lastCollectedAt: Date(timeIntervalSince1970: 1_000),
+                    ttlSeconds: 120,
+                    stale: false,
+                    error: nil,
+                    confidence: 1
+                ),
+            ],
+            overallConfidence: 1
+        )
+
+        let first = WorkspaceSnapshot(
+            workspaceId: workspaceId,
+            version: 1,
+            updatedAt: Date(timeIntervalSince1970: 1_000),
+            context: context,
+            derived: derived,
+            digest: WorkspaceDigest(summary: "Agent is waiting for user review.", generatedAt: nil),
+            freshness: freshness
+        )
+        let later = WorkspaceSnapshot(
+            workspaceId: workspaceId,
+            version: 1,
+            updatedAt: Date(timeIntervalSince1970: 1_030),
+            context: context,
+            derived: derived,
+            digest: WorkspaceDigest(summary: "Agent is waiting for user review.", generatedAt: nil),
+            freshness: freshness
+        )
+        let changed = WorkspaceSnapshot(
+            workspaceId: workspaceId,
+            version: 1,
+            updatedAt: Date(timeIntervalSince1970: 1_030),
+            context: context,
+            derived: DerivedWorkspaceState(
+                status: "running",
+                priorityScore: 10,
+                rankReason: "No user action needed",
+                nextAction: nil,
+                userAttentionNeeded: 0.1
+            ),
+            digest: WorkspaceDigest(summary: "Agent is running.", generatedAt: nil),
+            freshness: freshness
+        )
+
+        XCTAssertEqual(first.contextHash, later.contextHash)
+        XCTAssertNotEqual(first.contextHash, changed.contextHash)
+    }
+
+    func testDigestUpdatePolicySkipsTimestampOnlySnapshotChange() {
+        let workspaceId = UUID(uuidString: "12121212-1212-1212-1212-121212121212")!
+        let previous = makeWorkspaceSnapshot(
+            workspaceId: workspaceId,
+            title: "Running",
+            nativeOrder: 0,
+            confidence: 1,
+            status: "running"
+        )
+        let next = WorkspaceSnapshot(
+            workspaceId: previous.workspaceId,
+            version: previous.version,
+            updatedAt: previous.updatedAt.addingTimeInterval(30),
+            context: previous.context,
+            derived: previous.derived,
+            digest: previous.digest,
+            freshness: previous.freshness
+        )
+
+        XCTAssertFalse(WorkspaceDigestUpdatePolicy.semanticContextHash.shouldUpdate(
+            previous: previous,
+            next: next
+        ))
+    }
+
+    func testDigestUpdatePolicyUpdatesWhenSemanticSnapshotChanges() {
+        let workspaceId = UUID(uuidString: "13131313-1313-1313-1313-131313131313")!
+        let previous = makeWorkspaceSnapshot(
+            workspaceId: workspaceId,
+            title: "Running",
+            nativeOrder: 0,
+            confidence: 1,
+            status: "running"
+        )
+        let next = makeWorkspaceSnapshot(
+            workspaceId: workspaceId,
+            title: "Waiting",
+            nativeOrder: 0,
+            confidence: 1,
+            status: "waiting_user",
+            userAttentionNeeded: 0.9
+        )
+
+        XCTAssertTrue(WorkspaceDigestUpdatePolicy.semanticContextHash.shouldUpdate(
+            previous: previous,
+            next: next
+        ))
+    }
+
+    func testProviderFreshnessMarksStaleAfterTTL() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        let provider = ProviderFreshness(
+            providerId: "summary_priority",
+            lastCollectedAt: now.addingTimeInterval(-121),
+            ttlSeconds: 120,
+            stale: false,
+            error: nil,
+            confidence: 1
+        )
+
+        XCTAssertTrue(provider.evaluated(at: now).stale)
+    }
+
+    func testWorkspaceSnapshotStoreReturnsLatestWorkingContext() async throws {
+        let store = WorkspaceSnapshotStore()
+        let firstId = UUID(uuidString: "22222222-2222-2222-2222-222222222222")!
+        let secondId = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+        let suggestionId = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        let rankingId = UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
+        let first = makeWorkspaceSnapshot(
+            workspaceId: firstId,
+            title: "First",
+            nativeOrder: 1,
+            confidence: 0.6
+        )
+        let second = makeWorkspaceSnapshot(
+            workspaceId: secondId,
+            title: "Second",
+            nativeOrder: 0,
+            confidence: 0.9
+        )
+        let suggestion = ProactiveSuggestion(
+            id: suggestionId,
+            workspaceId: secondId,
+            type: "sort_preview_ready",
+            title: "Sort preview ready",
+            reason: "The sidebar has a proposed ranking.",
+            confidence: 0.8,
+            createdAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let ranking = RankingSnapshot(
+            id: rankingId,
+            updatedAt: Date(timeIntervalSince1970: 2_000),
+            items: [
+                RankingSnapshot.Item(workspaceId: secondId, rank: 1, score: 91, reason: "Waiting for review"),
+            ]
+        )
+
+        await store.replace(AssistantWorkingContext(
+            activeWorkspaceId: secondId,
+            snapshots: [first, second],
+            freshness: ContextFreshness(providers: [], overallConfidence: 0.75),
+            activeSuggestions: [suggestion],
+            latestRanking: ranking
+        ))
+
+        let context = await store.assistantWorkingContext()
+        XCTAssertEqual(context.activeWorkspaceId, secondId)
+        XCTAssertEqual(context.snapshots.map(\.workspaceId), [secondId, firstId])
+        XCTAssertEqual(context.activeSuggestions.map(\.id), [suggestionId])
+        XCTAssertEqual(context.latestRanking?.id, rankingId)
+        assertEqual(await store.workspaceSnapshot(firstId)?.workspaceId, firstId)
+    }
+
+    func testSuggestionAndRankingStoresPublishThroughAssistantContextReader() async throws {
+        let snapshotStore = WorkspaceSnapshotStore()
+        let suggestionStore = SuggestionSnapshotStore(snapshotStore: snapshotStore)
+        let rankingStore = RankingSnapshotStore(snapshotStore: snapshotStore)
+        let workspaceId = UUID(uuidString: "56565656-5656-5656-5656-565656565656")!
+        let suggestionId = UUID(uuidString: "57575757-5757-5757-5757-575757575757")!
+        let rankingId = UUID(uuidString: "58585858-5858-5858-5858-585858585858")!
+        let suggestion = ProactiveSuggestion(
+            id: suggestionId,
+            workspaceId: workspaceId,
+            type: ProactiveSuggestionTypes.reviewAgentWaitingUser,
+            title: "Review waiting agent",
+            reason: "Agent needs review",
+            confidence: 0.9,
+            createdAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let ranking = RankingSnapshot(
+            id: rankingId,
+            updatedAt: Date(timeIntervalSince1970: 2_000),
+            items: [
+                RankingSnapshot.Item(workspaceId: workspaceId, rank: 1, score: 90, reason: "Agent needs review"),
+            ]
+        )
+
+        await snapshotStore.write(makeWorkspaceSnapshot(
+            workspaceId: workspaceId,
+            title: "Waiting",
+            nativeOrder: 0,
+            confidence: 1,
+            status: "waiting_user"
+        ))
+        await suggestionStore.setActiveSuggestions([suggestion])
+        await rankingStore.setLatestRanking(ranking)
+
+        let context = await snapshotStore.assistantWorkingContext()
+        let storedSuggestionIds = await suggestionStore.activeSuggestions().map(\.id)
+        let storedRanking = await rankingStore.latestRanking()
+        XCTAssertEqual(context.activeSuggestions.map(\.id), [suggestionId])
+        XCTAssertEqual(context.latestRanking?.id, rankingId)
+        XCTAssertEqual(storedSuggestionIds, [suggestionId])
+        XCTAssertEqual(storedRanking?.id, rankingId)
+    }
+
+    func testWorkspaceSnapshotStoreAggregatesFreshnessForIncrementalWrites() async {
+        let store = WorkspaceSnapshotStore()
+        let firstId = UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        let secondId = UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+
+        await store.write(makeWorkspaceSnapshot(
+            workspaceId: firstId,
+            title: "First",
+            nativeOrder: 0,
+            confidence: 0.5
+        ))
+        await store.write(makeWorkspaceSnapshot(
+            workspaceId: secondId,
+            title: "Second",
+            nativeOrder: 1,
+            confidence: 1.0
+        ), activeWorkspaceId: secondId)
+
+        let context = await store.assistantWorkingContext()
+        XCTAssertEqual(context.activeWorkspaceId, secondId)
+        XCTAssertEqual(context.freshness.providers.count, 2)
+        XCTAssertEqual(context.freshness.overallConfidence, 0.75, accuracy: 0.0001)
+    }
+
+    func testAssistantRuntimeReadsContextThroughSnapshotReader() async {
+        let workspaceId = UUID(uuidString: "78787878-7878-7878-7878-787878787878")!
+        var snapshot = makeWorkspaceSnapshot(
+            workspaceId: workspaceId,
+            title: "Stale PR",
+            nativeOrder: 0,
+            confidence: 1
+        )
+        snapshot.freshness = ContextFreshness(
+            providers: [
+                ProviderFreshness(
+                    providerId: "github_context",
+                    lastCollectedAt: Date(timeIntervalSince1970: 100),
+                    ttlSeconds: 30,
+                    stale: false,
+                    error: nil,
+                    confidence: 1
+                ),
+            ],
+            overallConfidence: 1
+        )
+        let reader = StubAssistantContextReader(context: AssistantWorkingContext(
+            activeWorkspaceId: workspaceId,
+            snapshots: [snapshot],
+            freshness: snapshot.freshness,
+            activeSuggestions: [],
+            latestRanking: nil
+        ))
+        let runtime = AssistantRuntime(contextReader: reader)
+
+        let read = await runtime.readContextForAnswer(now: Date(timeIntervalSince1970: 200))
+
+        XCTAssertEqual(read.snapshotVersions, [workspaceId: 1])
+        XCTAssertEqual(read.staleProviderIds, ["github_context"])
+        XCTAssertFalse(read.missingSnapshot)
+        assertEqual(await reader.workingContextReadCount(), 1)
+    }
+
+    func testAssistantRuntimeSubmitsActionsThroughGateway() async throws {
+        let reader = StubAssistantContextReader(context: AssistantWorkingContext(
+            activeWorkspaceId: nil,
+            snapshots: [],
+            freshness: ContextFreshness(providers: [], overallConfidence: 0),
+            activeSuggestions: [],
+            latestRanking: nil
+        ))
+        let executor = RecordingActionExecutor()
+        let auditLog = RecordingActionAuditLog()
+        let gateway = SemanticActionGateway(
+            reviewers: [AllowingActionReviewer()],
+            executor: executor,
+            auditLog: auditLog
+        )
+        let runtime = AssistantRuntime(contextReader: reader, actionGateway: gateway)
+        let intent = makeActionIntent(
+            id: UUID(uuidString: "79797979-7979-7979-7979-797979797979")!,
+            snapshotUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+
+        let result = try await runtime.submitAction(intent)
+
+        XCTAssertEqual(result.decision, .allow)
+        XCTAssertTrue(result.executed)
+        assertEqual(await executor.executedIntentIds(), [intent.id])
+        assertEqual(await auditLog.reviewedIntentIds(), [intent.id])
+    }
+
+    func testContextSchedulerDeduplicatesByWorkspaceAndOrdersByPriority() async {
+        let scheduler = ContextScheduler()
+        let firstId = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+        let secondId = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+
+        await scheduler.enqueue(ContextRefreshJob(
+            workspaceId: firstId,
+            reason: "visible",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 10)
+        ))
+        await scheduler.enqueue(ContextRefreshJob(
+            workspaceId: secondId,
+            reason: "assistant_query_started",
+            priority: .userInitiated,
+            enqueuedAt: Date(timeIntervalSince1970: 20)
+        ))
+        await scheduler.enqueue(ContextRefreshJob(
+            workspaceId: firstId,
+            reason: "background_tick",
+            priority: .background,
+            enqueuedAt: Date(timeIntervalSince1970: 30)
+        ))
+
+        assertEqual(await scheduler.pendingJobCount(), 2)
+        assertEqual(await scheduler.pendingJobs().map(\.workspaceId), [secondId, firstId])
+
+        let firstBatch = await scheduler.nextBatch(maxJobs: 1)
+        XCTAssertEqual(firstBatch.map(\.workspaceId), [secondId])
+        assertEqual(await scheduler.pendingJobs().map(\.workspaceId), [firstId])
+    }
+
+    func testContextSchedulerAttentionLeasePromotesQueuedRefreshPriority() async {
+        let scheduler = ContextScheduler()
+        let workspaceId = UUID(uuidString: "87878787-8787-8787-8787-878787878787")!
+
+        await scheduler.setLease(.hot, for: workspaceId)
+        await scheduler.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "background_tick",
+            priority: .background,
+            enqueuedAt: Date(timeIntervalSince1970: 10)
+        ), honoringAttentionLease: true)
+
+        let job = await scheduler.pendingJobs().first
+
+        assertEqual(await scheduler.lease(for: workspaceId), .hot)
+        XCTAssertEqual(job?.workspaceId, workspaceId)
+        XCTAssertEqual(job?.priority, .userInitiated)
+    }
+
+    func testContextSchedulerEnqueuesHotProviderRefreshBeforeColdWorkspace() async {
+        let scheduler = ContextScheduler()
+        let hotId = UUID(uuidString: "8C8C8C8C-8C8C-8C8C-8C8C-8C8C8C8C8C8C")!
+        let coldId = UUID(uuidString: "8D8D8D8D-8D8D-8D8D-8D8D-8D8D8D8D8D8D")!
+        let policy = ContextProviderRefreshPolicy(
+            providerId: "git",
+            hotIntervalSeconds: 20,
+            visibleIntervalSeconds: 60,
+            coldIntervalSeconds: 300
+        )
+
+        await scheduler.setLease(.hot, for: hotId)
+        await scheduler.setLease(.cold, for: coldId)
+        await scheduler.markProviderCollected("git", workspace: hotId, at: Date(timeIntervalSince1970: 0))
+        await scheduler.markProviderCollected("git", workspace: coldId, at: Date(timeIntervalSince1970: 0))
+
+        await scheduler.enqueueDueProviderRefreshes(
+            policy: policy,
+            workspaceIds: [hotId, coldId],
+            now: Date(timeIntervalSince1970: 25),
+            reason: "provider_due"
+        )
+
+        let jobs = await scheduler.pendingJobs()
+
+        XCTAssertEqual(jobs.map(\.workspaceId), [hotId])
+        XCTAssertEqual(jobs.map(\.providerId), ["git"])
+        XCTAssertEqual(jobs.map(\.priority), [.userInitiated])
+    }
+
+    func testContextSchedulerDebouncesProviderSignalBurst() async {
+        let scheduler = ContextScheduler()
+        let workspaceId = UUID(uuidString: "8E8E8E8E-8E8E-8E8E-8E8E-8E8E8E8E8E8E")!
+        let start = Date(timeIntervalSince1970: 100)
+
+        for offset in 0..<20 {
+            await scheduler.enqueueProviderSignal(
+                providerId: "git",
+                workspaceId: workspaceId,
+                reason: "git_changed",
+                enqueuedAt: start.addingTimeInterval(Double(offset) * 0.05),
+                debounceSeconds: 2
+            )
+        }
+
+        let jobs = await scheduler.pendingJobs()
+
+        XCTAssertEqual(jobs.count, 1)
+        XCTAssertEqual(jobs.first?.workspaceId, workspaceId)
+        XCTAssertEqual(jobs.first?.providerId, "git")
+        XCTAssertEqual(jobs.first?.reason, "git_changed")
+    }
+
+    func testContextSchedulerDiagnosticsExposeQueuedJobsLeasesAndProviderCadence() async throws {
+        let scheduler = ContextScheduler()
+        let workspaceId = UUID(uuidString: "8B8B8B8B-8B8B-8B8B-8B8B-8B8B8B8B8B8B")!
+        let collectedAt = Date(timeIntervalSince1970: 90)
+        let signaledAt = Date(timeIntervalSince1970: 100)
+
+        await scheduler.setLease(.hot, for: workspaceId)
+        await scheduler.markProviderCollected("git", workspace: workspaceId, at: collectedAt)
+        await scheduler.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "assistant.query_started",
+            priority: .background,
+            enqueuedAt: Date(timeIntervalSince1970: 95)
+        ), honoringAttentionLease: true)
+        await scheduler.enqueueProviderSignal(
+            providerId: "git",
+            workspaceId: workspaceId,
+            reason: "git_changed",
+            enqueuedAt: signaledAt,
+            debounceSeconds: 2
+        )
+
+        let diagnostics = await scheduler.diagnostics()
+        let collection = try XCTUnwrap(diagnostics.providerCollections.first)
+
+        XCTAssertEqual(diagnostics.workspaceLeases, [
+            ContextWorkspaceLeaseDiagnostic(workspaceId: workspaceId, lease: .hot),
+        ])
+        XCTAssertEqual(diagnostics.pendingJobs.map(\.workspaceId), [workspaceId, workspaceId])
+        XCTAssertEqual(diagnostics.pendingJobs.map(\.providerId), [nil, "git"])
+        XCTAssertEqual(diagnostics.pendingJobs.map(\.priority), [.userInitiated, .userInitiated])
+        XCTAssertEqual(collection.workspaceId, workspaceId)
+        XCTAssertEqual(collection.providerId, "git")
+        XCTAssertEqual(collection.lastCollectedAt, collectedAt)
+        XCTAssertEqual(collection.lastSignaledAt, signaledAt)
+    }
+
+    func testProviderRegistryReturnsEnabledProvidersInRegistrationOrder() async {
+        let recording = RecordingWorkspaceSnapshotProvider()
+        let alternate = AlternateWorkspaceSnapshotProvider()
+        let registry = ProviderRegistry(providers: [recording, alternate])
+
+        assertEqual(await registry.providerIds(), ["recording", "alternate"])
+        assertEqual(await registry.providers(matching: nil).map(\.providerId), ["recording", "alternate"])
+
+        await registry.setEnabled(false, providerId: "recording")
+
+        assertEqual(await registry.providerIds(), ["alternate"])
+        assertEqual(await registry.providerIds(includeDisabled: true), ["recording", "alternate"])
+        assertEqual(await registry.providers(matching: nil).map(\.providerId), ["alternate"])
+        assertEqual(await registry.providers(matching: "recording").map(\.providerId), [])
+
+        await registry.setEnabled(true, providerId: "recording")
+
+        assertEqual(await registry.providers(matching: "recording").map(\.providerId), ["recording"])
+    }
+
+    func testContextAgentCanRegisterSnapshotProviderAfterInitialization() async {
+        let store = WorkspaceSnapshotStore()
+        let provider = RecordingWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, providers: [])
+        let workspaceId = UUID(uuidString: "8C818181-8181-8181-8181-818181818181")!
+
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "attention_before_provider",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 10)
+        ))
+
+        let emptyResult = await agent.runScheduledBatch()
+        XCTAssertEqual(emptyResult.updatedWorkspaceIds, [])
+        assertEqual(await agent.providerRunRecords(), [])
+        assertEqual(await store.workspaceSnapshot(workspaceId), nil)
+
+        await agent.registerProvider(provider)
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "attention_after_provider",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 20)
+        ))
+
+        let result = await agent.runScheduledBatch()
+
+        assertEqual(await agent.providerIds(), ["recording"])
+        XCTAssertEqual(result.updatedWorkspaceIds, [workspaceId])
+        assertEqual(await store.workspaceSnapshot(workspaceId)?.workspaceId, workspaceId)
+        let records = await agent.providerRunRecords()
+        XCTAssertEqual(records.map(\.providerId), ["recording"])
+    }
+
+    func testContextAgentRunsQueuedJobsThroughSnapshotProvider() async throws {
+        let store = WorkspaceSnapshotStore()
+        let provider = RecordingWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, providers: [provider])
+        let firstId = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+        let secondId = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: firstId,
+            reason: "workspace_visible",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 10)
+        ))
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: secondId,
+            reason: "assistant_query_started",
+            priority: .userInitiated,
+            enqueuedAt: Date(timeIntervalSince1970: 20)
+        ))
+
+        let result = await agent.runScheduledBatch()
+
+        XCTAssertEqual(result.failures, [])
+        XCTAssertEqual(result.updatedWorkspaceIds, [secondId, firstId])
+        assertEqual(await agent.queuedJobCount(), 0)
+        assertEqual(await provider.requestedWorkspaceIds(), [secondId, firstId])
+        assertEqual(await store.workspaceSnapshot(firstId)?.workspaceId, firstId)
+        assertEqual(await store.workspaceSnapshot(secondId)?.context.title, "workspace-\(secondId.uuidString)")
+    }
+
+    func testContextAgentMergesProviderFreshnessForSameWorkspace() async throws {
+        let store = WorkspaceSnapshotStore()
+        let recording = RecordingWorkspaceSnapshotProvider()
+        let alternate = AlternateWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, providers: [recording, alternate])
+        let workspaceId = UUID(uuidString: "8D8E8F80-1111-2222-3333-444444444444")!
+
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "provider_due",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 30)
+        ))
+
+        let result = await agent.runScheduledBatch()
+        let storedSnapshot = await store.workspaceSnapshot(workspaceId)
+        let snapshot = try XCTUnwrap(storedSnapshot)
+        let records = await agent.providerRunRecords()
+
+        XCTAssertEqual(result.failures, [])
+        XCTAssertEqual(result.updatedWorkspaceIds, [workspaceId])
+        XCTAssertEqual(records.map(\.providerId).sorted(), ["alternate", "recording"])
+        XCTAssertEqual(snapshot.freshness.providers.map(\.providerId).sorted(), ["alternate", "recording"])
+        XCTAssertEqual(snapshot.freshness.overallConfidence, 1)
+        XCTAssertEqual(snapshot.context.title, "workspace-\(workspaceId.uuidString)")
+    }
+
+    func testContextAgentKeepsHigherPriorityQueuedJobForWorkspace() async {
+        let store = WorkspaceSnapshotStore()
+        let provider = RecordingWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, providers: [provider])
+        let workspaceId = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "assistant_query_started",
+            priority: .userInitiated,
+            enqueuedAt: Date(timeIntervalSince1970: 20)
+        ))
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "background_tick",
+            priority: .background,
+            enqueuedAt: Date(timeIntervalSince1970: 30)
+        ))
+
+        let result = await agent.runScheduledBatch()
+
+        XCTAssertEqual(result.updatedWorkspaceIds, [workspaceId])
+        assertEqual(await provider.requestedReasons(), ["assistant_query_started"])
+    }
+
+    func testContextAgentUsesProviderRegistryEnablement() async {
+        let store = WorkspaceSnapshotStore()
+        let recording = RecordingWorkspaceSnapshotProvider()
+        let alternate = AlternateWorkspaceSnapshotProvider()
+        let registry = ProviderRegistry(providers: [recording, alternate])
+        let agent = ContextAgent(
+            snapshotStore: store,
+            providerRegistry: registry,
+            providers: []
+        )
+        let workspaceId = UUID(uuidString: "90909090-9090-9090-9090-909090909090")!
+
+        await registry.setEnabled(false, providerId: "recording")
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "provider_due",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 30)
+        ))
+
+        let result = await agent.runScheduledBatch()
+
+        assertEqual(await agent.providerIds(), ["alternate"])
+        XCTAssertEqual(result.updatedWorkspaceIds, [workspaceId])
+        assertEqual(await recording.requestedWorkspaceIds(), [])
+        assertEqual(await alternate.requestedWorkspaceIds(), [workspaceId])
+    }
+
+    func testContextAgentLimitsConcurrentProviderRuns() async {
+        let store = WorkspaceSnapshotStore()
+        let probe = ProviderConcurrencyProbe()
+        let providers: [any WorkspaceSnapshotProviding] = [
+            TrackingWorkspaceSnapshotProvider(providerId: "tracked_1", probe: probe),
+            TrackingWorkspaceSnapshotProvider(providerId: "tracked_2", probe: probe),
+            TrackingWorkspaceSnapshotProvider(providerId: "tracked_3", probe: probe),
+        ]
+        let agent = ContextAgent(
+            snapshotStore: store,
+            executionPolicy: ContextProviderExecutionPolicy(
+                maxConcurrentProviderRuns: 2,
+                providerTimeoutSeconds: nil
+            ),
+            providers: providers
+        )
+        let workspaceId = UUID(uuidString: "91919191-9191-9191-9191-919191919191")!
+
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "provider_due",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 30)
+        ))
+
+        let result = await agent.runScheduledBatch()
+
+        XCTAssertEqual(result.failures, [])
+        assertEqual(await probe.maxActiveCount(), 2)
+        assertEqual(await agent.providerRunRecords().count, 3)
+    }
+
+    func testContextAgentRecordsProviderTimeoutFailure() async {
+        let store = WorkspaceSnapshotStore()
+        let slow = SlowWorkspaceSnapshotProvider()
+        let agent = ContextAgent(
+            snapshotStore: store,
+            executionPolicy: ContextProviderExecutionPolicy(
+                maxConcurrentProviderRuns: 1,
+                providerTimeoutSeconds: 0.01
+            ),
+            providers: [slow]
+        )
+        let workspaceId = UUID(uuidString: "92929292-9292-9292-9292-929292929292")!
+
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "provider_due",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 30)
+        ))
+
+        let result = await agent.runScheduledBatch()
+        let records = await agent.providerRunRecords()
+
+        XCTAssertEqual(result.updatedWorkspaceIds, [])
+        XCTAssertEqual(result.failures.map(\.providerId), ["slow"])
+        XCTAssertTrue(result.failures.first?.message.contains("timeout") ?? false)
+        XCTAssertEqual(records.map(\.providerId), ["slow"])
+        XCTAssertFalse(records.first?.success ?? true)
+        XCTAssertTrue(records.first?.errorMessage?.contains("timeout") ?? false)
+    }
+
+    func testContextAgentProviderSpecificJobRunsOnlyMatchingProvider() async {
+        let store = WorkspaceSnapshotStore()
+        let recording = RecordingWorkspaceSnapshotProvider()
+        let alternate = AlternateWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, providers: [recording, alternate])
+        let workspaceId = UUID(uuidString: "8F8F8F8F-8F8F-8F8F-8F8F-8F8F8F8F8F8F")!
+
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "provider_due",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 25),
+            providerId: "recording"
+        ))
+
+        let result = await agent.runScheduledBatch()
+
+        XCTAssertEqual(result.updatedWorkspaceIds, [workspaceId])
+        assertEqual(await recording.requestedWorkspaceIds(), [workspaceId])
+        assertEqual(await alternate.requestedWorkspaceIds(), [])
+    }
+
+    func testContextAgentWorkspaceAttentionEnqueuesPromotedRefresh() async {
+        let store = WorkspaceSnapshotStore()
+        let scheduler = ContextScheduler()
+        let provider = RecordingWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, scheduler: scheduler, providers: [provider])
+        let workspaceId = UUID(uuidString: "89898989-8989-8989-8989-898989898989")!
+
+        await agent.handleWorkspaceAttention(
+            workspaceId: workspaceId,
+            reason: "assistant_panel_opened",
+            lease: .visible,
+            now: Date(timeIntervalSince1970: 20)
+        )
+
+        let jobs = await scheduler.pendingJobs()
+
+        assertEqual(await scheduler.lease(for: workspaceId), .visible)
+        XCTAssertEqual(jobs.map(\.workspaceId), [workspaceId])
+        XCTAssertEqual(jobs.map(\.reason), ["assistant_panel_opened"])
+        XCTAssertEqual(jobs.map(\.priority), [.visible])
+    }
+
+    func testContextAgentMessageEventSchedulesAgentSessionProvider() async throws {
+        let store = WorkspaceSnapshotStore()
+        let scheduler = ContextScheduler()
+        let provider = RecordingWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, scheduler: scheduler, providers: [provider])
+        let workspaceId = UUID(uuidString: "8A8A8A8A-8A8A-8A8A-8A8A-8A8A8A8A8A8A")!
+        let event = ContextAgentEvent(
+            name: ContextAgentEvent.agentMessageAppendedName,
+            workspaceId: workspaceId,
+            occurredAt: Date(timeIntervalSince1970: 50),
+            payload: ["status": "waiting_user"]
+        )
+
+        await agent.handle(event)
+
+        let pendingJobs = await scheduler.pendingJobs()
+        let job = try XCTUnwrap(pendingJobs.first)
+
+        XCTAssertEqual(job.workspaceId, workspaceId)
+        XCTAssertEqual(job.reason, ContextAgentEvent.agentMessageAppendedName)
+        XCTAssertEqual(job.priority, .visible)
+        XCTAssertNil(job.providerId)
+        XCTAssertEqual(job.payload["status"], "waiting_user")
+        assertEqual(await scheduler.lease(for: workspaceId), .visible)
+    }
+
+    func testContextAgentRoutesWorkspaceEventsToRegisteredProviderSlices() async {
+        let store = WorkspaceSnapshotStore()
+        let scheduler = ContextScheduler()
+        let probe = ProviderConcurrencyProbe()
+        let providers: [any WorkspaceSnapshotProviding] = [
+            TrackingWorkspaceSnapshotProvider(providerId: "list_state", probe: probe),
+            TrackingWorkspaceSnapshotProvider(providerId: "github_context", probe: probe),
+            TrackingWorkspaceSnapshotProvider(providerId: "summary_priority", probe: probe),
+        ]
+        let agent = ContextAgent(snapshotStore: store, scheduler: scheduler, providers: providers)
+        let workspaceId = UUID(uuidString: "8A8B8C8D-0000-1111-2222-333333333333")!
+        let event = ContextAgentEvent(
+            name: "workspace.selected",
+            workspaceId: workspaceId,
+            occurredAt: Date(timeIntervalSince1970: 60)
+        )
+
+        await agent.handle(event)
+
+        let jobs = await scheduler.pendingJobs()
+
+        XCTAssertEqual(jobs.count, 2)
+        XCTAssertEqual(Set(jobs.map(\.workspaceId)), Set([workspaceId]))
+        XCTAssertEqual(Set(jobs.compactMap(\.providerId)), Set(["list_state", "summary_priority"]))
+        XCTAssertEqual(Set(jobs.map(\.priority)), Set([ContextRefreshPriority.visible]))
+        assertEqual(await scheduler.lease(for: workspaceId), .visible)
+    }
+
+    func testContextAgentRoutesAssistantQueryToAllRegisteredContextProviderSlices() async {
+        let store = WorkspaceSnapshotStore()
+        let scheduler = ContextScheduler()
+        let probe = ProviderConcurrencyProbe()
+        let providers: [any WorkspaceSnapshotProviding] = [
+            TrackingWorkspaceSnapshotProvider(providerId: "list_state", probe: probe),
+            TrackingWorkspaceSnapshotProvider(providerId: "agent_session", probe: probe),
+            TrackingWorkspaceSnapshotProvider(providerId: "github_context", probe: probe),
+            TrackingWorkspaceSnapshotProvider(providerId: "summary_priority", probe: probe),
+        ]
+        let agent = ContextAgent(snapshotStore: store, scheduler: scheduler, providers: providers)
+        let workspaceId = UUID(uuidString: "8A8B8C8D-4444-5555-6666-777777777777")!
+        let event = ContextAgentEvent(
+            name: "assistant.query_started",
+            workspaceId: workspaceId,
+            occurredAt: Date(timeIntervalSince1970: 70)
+        )
+
+        await agent.handle(event)
+
+        let jobs = await scheduler.pendingJobs()
+
+        XCTAssertEqual(jobs.count, 4)
+        XCTAssertEqual(Set(jobs.compactMap(\.providerId)), Set([
+            "list_state",
+            "agent_session",
+            "github_context",
+            "summary_priority",
+        ]))
+        XCTAssertEqual(Set(jobs.map(\.priority)), Set([ContextRefreshPriority.userInitiated]))
+        assertEqual(await scheduler.lease(for: workspaceId), .hot)
+    }
+
+    func testContextAgentEventStreamDrainsPublishedWorkspaceEvents() async throws {
+        let eventBus = CmuxEventBus(eventLogURL: nil)
+        let store = WorkspaceSnapshotStore()
+        let provider = RecordingWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, providers: [provider])
+        let workspaceId = UUID(uuidString: "8D828282-8282-8282-8282-828282828282")!
+        let streamTask = agent.startEventStream(
+            from: eventBus,
+            pollTimeout: 0.01,
+            batchMaxJobs: 4
+        )
+        defer { streamTask.cancel() }
+
+        eventBus.publish(
+            name: "workspace.selected",
+            category: "workspace",
+            source: "test",
+            workspaceId: workspaceId.uuidString,
+            payload: ["title": "Selected"]
+        )
+
+        let records = await waitForProviderRunRecords(agent, minimumCount: 1)
+
+        XCTAssertEqual(records.map(\.workspaceId), [workspaceId])
+        XCTAssertEqual(records.map(\.providerId), ["recording"])
+        XCTAssertEqual(records.map(\.reason), ["workspace.selected"])
+        assertEqual(await store.workspaceSnapshot(workspaceId)?.workspaceId, workspaceId)
+    }
+
+    func testAssistantQueryEventStreamRefreshesContextAgentSnapshot() async throws {
+        let eventBus = CmuxEventBus(eventLogURL: nil)
+        let store = WorkspaceSnapshotStore()
+        let provider = RecordingWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, providers: [provider])
+        let workspaceId = UUID(uuidString: "8D828282-8282-8282-8282-828282828283")!
+        let streamTask = agent.startEventStream(
+            from: eventBus,
+            pollTimeout: 0.01,
+            batchMaxJobs: 4
+        )
+        defer { streamTask.cancel() }
+
+        eventBus.publishAssistantQueryStarted(
+            workspaceId: workspaceId,
+            targetWorkspaceId: nil,
+            source: "test",
+            queryCharacterCount: 18,
+            reason: "assistant.query_started"
+        )
+
+        let records = await waitForProviderRunRecords(agent, minimumCount: 1)
+
+        XCTAssertEqual(records.map(\.workspaceId), [workspaceId])
+        XCTAssertEqual(records.map(\.providerId), ["recording"])
+        XCTAssertEqual(records.map(\.reason), ["assistant.query_started"])
+        XCTAssertEqual(records.map(\.priority), [.userInitiated])
+        assertEqual(await store.workspaceSnapshot(workspaceId)?.workspaceId, workspaceId)
+    }
+
+    func testContextAgentRecordsProviderRunMetadata() async throws {
+        let store = WorkspaceSnapshotStore()
+        let scheduler = ContextScheduler()
+        let runStore = ProviderRunStore()
+        let provider = RecordingWorkspaceSnapshotProvider()
+        let agent = ContextAgent(
+            snapshotStore: store,
+            scheduler: scheduler,
+            providerRunStore: runStore,
+            providers: [provider]
+        )
+        let workspaceId = UUID(uuidString: "ABABABAB-ABAB-ABAB-ABAB-ABABABABABAB")!
+
+        await agent.enqueue(ContextRefreshJob(
+            workspaceId: workspaceId,
+            reason: "agent_message_appended",
+            priority: .visible,
+            enqueuedAt: Date(timeIntervalSince1970: 40)
+        ))
+
+        let result = await agent.runScheduledBatch()
+        let records = await runStore.records(for: workspaceId)
+        let record = try XCTUnwrap(records.first)
+
+        XCTAssertEqual(result.updatedWorkspaceIds, [workspaceId])
+        XCTAssertEqual(records.count, 1)
+        XCTAssertEqual(record.providerId, "recording")
+        XCTAssertEqual(record.reason, "agent_message_appended")
+        XCTAssertEqual(record.priority, .visible)
+        XCTAssertTrue(record.success)
+        XCTAssertEqual(record.snapshotVersion, 1)
+        XCTAssertNil(record.errorMessage)
+        XCTAssertLessThanOrEqual(record.startedAt, record.finishedAt)
+        assertEqual(await agent.providerRunRecords(), records)
+    }
+
+    func testContextAgentDiagnosticsExposeSchedulerAndProviderRunMetadata() async throws {
+        let store = WorkspaceSnapshotStore()
+        let scheduler = ContextScheduler()
+        let provider = RecordingWorkspaceSnapshotProvider()
+        let agent = ContextAgent(
+            snapshotStore: store,
+            scheduler: scheduler,
+            providers: [provider]
+        )
+        let workspaceId = UUID(uuidString: "BDBDBDBD-BDBD-BDBD-BDBD-BDBDBDBDBDBD")!
+
+        await agent.handleWorkspaceAttention(
+            workspaceId: workspaceId,
+            reason: "assistant.query_started",
+            lease: .hot,
+            now: Date(timeIntervalSince1970: 200)
+        )
+
+        let queuedDiagnostics = await agent.diagnostics()
+        XCTAssertEqual(queuedDiagnostics.providerIds, ["recording"])
+        XCTAssertEqual(queuedDiagnostics.scheduler.workspaceLeases, [
+            ContextWorkspaceLeaseDiagnostic(workspaceId: workspaceId, lease: .hot),
+        ])
+        XCTAssertEqual(queuedDiagnostics.scheduler.pendingJobs.map(\.workspaceId), [workspaceId])
+        XCTAssertEqual(queuedDiagnostics.providerRuns, [])
+
+        let result = await agent.runScheduledBatch()
+        let drainedDiagnostics = await agent.diagnostics()
+        let run = try XCTUnwrap(drainedDiagnostics.providerRuns.first)
+
+        XCTAssertEqual(result.updatedWorkspaceIds, [workspaceId])
+        XCTAssertEqual(drainedDiagnostics.scheduler.pendingJobs, [])
+        XCTAssertEqual(drainedDiagnostics.scheduler.providerCollections.map(\.providerId), ["recording"])
+        XCTAssertEqual(run.workspaceId, workspaceId)
+        XCTAssertEqual(run.providerId, "recording")
+        XCTAssertEqual(run.reason, "assistant.query_started")
+        XCTAssertTrue(run.success)
+        XCTAssertEqual(run.snapshotVersion, 1)
+    }
+
+    func testReplayProducesWaitingUserSnapshotAndSuggestion() async throws {
+        let fixture = try loadContextAgentReplayFixture(named: "agent_waiting_user")
+        let store = WorkspaceSnapshotStore()
+        let provider = ReplayWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, providers: [provider])
+
+        for event in fixture {
+            await agent.handle(event)
+        }
+        let result = await agent.runScheduledBatch()
+        let context = await store.assistantWorkingContext()
+        let suggestions = SuggestionEngine.default.generate(from: context.snapshots)
+        let snapshot = try XCTUnwrap(context.snapshots.first)
+
+        XCTAssertEqual(result.failures, [])
+        XCTAssertEqual(result.updatedWorkspaceIds, [snapshot.workspaceId])
+        XCTAssertEqual(snapshot.context.title, "API fix")
+        XCTAssertEqual(snapshot.derived.status, "waiting_user")
+        XCTAssertGreaterThan(snapshot.derived.userAttentionNeeded, 0.8)
+        XCTAssertEqual(suggestions.map(\.type), [ProactiveSuggestionTypes.reviewAgentWaitingUser])
+        XCTAssertEqual(suggestions.first?.workspaceId, snapshot.workspaceId)
+    }
+
+    func testReplayProducesCoreProactiveSuggestionAndRankingScenarios() async throws {
+        let fixture = try loadContextAgentReplayFixture(named: "multi_status")
+        let store = WorkspaceSnapshotStore()
+        let provider = ReplayWorkspaceSnapshotProvider()
+        let agent = ContextAgent(snapshotStore: store, providers: [provider])
+
+        for event in fixture {
+            await agent.handle(event)
+        }
+        let result = await agent.runScheduledBatch()
+        let context = await store.assistantWorkingContext()
+        let suggestions = SuggestionEngine.default.generate(from: context.snapshots)
+        let ranking = RankingEngine.default.rank(context.snapshots)
+
+        let waitingId = UUID(uuidString: "8B8B8B8B-8B8B-8B8B-8B8B-8B8B8B8B8B8B")!
+        let ciFailedId = UUID(uuidString: "9C9C9C9C-9C9C-9C9C-9C9C-9C9C9C9C9C9C")!
+        let readyToMergeId = UUID(uuidString: "ADADADAD-ADAD-ADAD-ADAD-ADADADADADAD")!
+
+        XCTAssertEqual(result.failures, [])
+        XCTAssertEqual(Set(result.updatedWorkspaceIds), Set([waitingId, ciFailedId, readyToMergeId]))
+        XCTAssertEqual(
+            context.snapshots.map { "\($0.context.title):\($0.derived.status)" },
+            [
+                "API fix:waiting_user",
+                "CI failure:ci_failed",
+                "Ready to merge:ready_to_merge",
+            ]
+        )
+        XCTAssertEqual(
+            suggestions.map(\.type),
+            [
+                ProactiveSuggestionTypes.reviewAgentWaitingUser,
+                ProactiveSuggestionTypes.fixCIFailure,
+                ProactiveSuggestionTypes.mergeReady,
+            ]
+        )
+        XCTAssertEqual(
+            ranking.items.map(\.workspaceId),
+            [
+                ciFailedId,
+                waitingId,
+                readyToMergeId,
+            ]
+        )
+    }
+
+    func testRankingEnginePrioritizesUserAttentionNeededDeterministically() {
+        let runningId = UUID(uuidString: "BCBCBCBC-BCBC-BCBC-BCBC-BCBCBCBCBCBC")!
+        let waitingId = UUID(uuidString: "CDCDCDCD-CDCD-CDCD-CDCD-CDCDCDCDCDCD")!
+        let ciFailedId = UUID(uuidString: "DEDEDEDE-DEDE-DEDE-DEDE-DEDEDEDEDEDE")!
+        let snapshots = [
+            makeWorkspaceSnapshot(
+                workspaceId: runningId,
+                title: "Running",
+                nativeOrder: 0,
+                confidence: 1,
+                status: "running",
+                priorityScore: 90,
+                userAttentionNeeded: 0.1
+            ),
+            makeWorkspaceSnapshot(
+                workspaceId: waitingId,
+                title: "Waiting",
+                nativeOrder: 1,
+                confidence: 1,
+                status: "waiting_user",
+                priorityScore: 50,
+                userAttentionNeeded: 0.7
+            ),
+            makeWorkspaceSnapshot(
+                workspaceId: ciFailedId,
+                title: "CI failed",
+                nativeOrder: 2,
+                confidence: 1,
+                status: "ci_failed",
+                priorityScore: 10,
+                userAttentionNeeded: 0.95
+            ),
+        ]
+
+        let first = RankingEngine.default.rank(snapshots)
+        let second = RankingEngine.default.rank(snapshots)
+
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(first.items.map(\.workspaceId), [ciFailedId, waitingId, runningId])
+        XCTAssertEqual(first.items.map(\.rank), [1, 2, 3])
+    }
+
+    func testSuggestionEngineCreatesSnapshotDrivenSuggestions() {
+        let waitingId = UUID(uuidString: "EFEFEFEF-EFEF-EFEF-EFEF-EFEFEFEFEFEF")!
+        let ciFailedId = UUID(uuidString: "F0F0F0F0-F0F0-F0F0-F0F0-F0F0F0F0F0F0")!
+        let readyId = UUID(uuidString: "A1A1A1A1-A1A1-A1A1-A1A1-A1A1A1A1A1A1")!
+        let runningId = UUID(uuidString: "B2B2B2B2-B2B2-B2B2-B2B2-B2B2B2B2B2B2")!
+
+        let suggestions = SuggestionEngine.default.generate(from: [
+            makeWorkspaceSnapshot(
+                workspaceId: waitingId,
+                title: "Waiting",
+                nativeOrder: 0,
+                confidence: 1,
+                status: "waiting_user",
+                rankReason: "Agent needs review",
+                nextAction: "Review agent output",
+                userAttentionNeeded: 0.9
+            ),
+            makeWorkspaceSnapshot(
+                workspaceId: ciFailedId,
+                title: "CI failed",
+                nativeOrder: 1,
+                confidence: 1,
+                status: "ci_failed",
+                rankReason: "CI failed",
+                nextAction: "Fix CI failure",
+                userAttentionNeeded: 0.8
+            ),
+            makeWorkspaceSnapshot(
+                workspaceId: readyId,
+                title: "Ready",
+                nativeOrder: 2,
+                confidence: 1,
+                status: "ready_to_merge",
+                rankReason: "PR is ready",
+                nextAction: "Merge PR",
+                userAttentionNeeded: 0.6
+            ),
+            makeWorkspaceSnapshot(
+                workspaceId: runningId,
+                title: "Running",
+                nativeOrder: 3,
+                confidence: 1,
+                status: "running",
+                userAttentionNeeded: 0.2
+            ),
+        ])
+
+        XCTAssertEqual(suggestions.map(\.type), [
+            ProactiveSuggestionTypes.reviewAgentWaitingUser,
+            ProactiveSuggestionTypes.fixCIFailure,
+            ProactiveSuggestionTypes.mergeReady,
+        ])
+        XCTAssertEqual(suggestions.map(\.workspaceId), [waitingId, ciFailedId, readyId])
+        XCTAssertGreaterThan(suggestions[0].confidence, 0.8)
+    }
+
+    func testDismissedSuggestionDoesNotRepeatUntilStateChanges() async throws {
+        let store = SuggestionStore()
+        let engine = SuggestionEngine(store: store)
+        let workspaceId = UUID(uuidString: "C3C3C3C3-C3C3-C3C3-C3C3-C3C3C3C3C3C3")!
+        let snapshot = makeWorkspaceSnapshot(
+            workspaceId: workspaceId,
+            title: "Waiting",
+            nativeOrder: 0,
+            confidence: 1,
+            status: "waiting_user",
+            rankReason: "Agent needs review",
+            nextAction: "Review agent output",
+            userAttentionNeeded: 0.9
+        )
+
+        let firstSuggestions = await engine.generateAndStore(from: [snapshot])
+        let first = try XCTUnwrap(firstSuggestions.first)
+        await store.dismiss(first.id)
+
+        let second = await engine.generateAndStore(from: [snapshot])
+        XCTAssertTrue(second.isEmpty)
+
+        let changed = makeWorkspaceSnapshot(
+            workspaceId: workspaceId,
+            title: "Waiting",
+            nativeOrder: 0,
+            confidence: 1,
+            status: "waiting_user",
+            rankReason: "Agent needs review",
+            nextAction: "Review revised agent output",
+            userAttentionNeeded: 0.9,
+            contextHash: "fnv1a64:changed"
+        )
+        let third = await engine.generateAndStore(from: [changed])
+
+        XCTAssertFalse(third.isEmpty)
+        XCTAssertNotEqual(third.first?.id, first.id)
+    }
+
+    func testNextWorkspaceServiceReturnsNextRankedUnlockedWorkspace() {
+        let activeId = UUID(uuidString: "D4D4D4D4-D4D4-D4D4-D4D4-D4D4D4D4D4D4")!
+        let pinnedId = UUID(uuidString: "E5E5E5E5-E5E5-E5E5-E5E5-E5E5E5E5E5E5")!
+        let nextId = UUID(uuidString: "F6F6F6F6-F6F6-F6F6-F6F6-F6F6F6F6F6F6")!
+        let context = AssistantWorkingContext(
+            activeWorkspaceId: activeId,
+            snapshots: [
+                makeWorkspaceSnapshot(workspaceId: activeId, title: "Active", nativeOrder: 0, confidence: 1),
+                makeWorkspaceSnapshot(workspaceId: pinnedId, title: "Pinned", nativeOrder: 1, confidence: 1, pinned: true),
+                makeWorkspaceSnapshot(workspaceId: nextId, title: "Next", nativeOrder: 2, confidence: 1),
+            ],
+            freshness: ContextFreshness(providers: [], overallConfidence: 1),
+            activeSuggestions: [],
+            latestRanking: RankingSnapshot(
+                id: UUID(uuidString: "A7A7A7A7-A7A7-A7A7-A7A7-A7A7A7A7A7A7")!,
+                updatedAt: Date(timeIntervalSince1970: 1_000),
+                items: [
+                    RankingSnapshot.Item(workspaceId: activeId, rank: 1, score: 100, reason: nil),
+                    RankingSnapshot.Item(workspaceId: pinnedId, rank: 2, score: 90, reason: nil),
+                    RankingSnapshot.Item(workspaceId: nextId, rank: 3, score: 80, reason: nil),
+                ]
+            )
+        )
+
+        let next = NextWorkspaceService.default.nextWorkspace(in: context)
+
+        XCTAssertEqual(next?.workspaceId, nextId)
+    }
+
+    func testNextWorkspaceServiceReturnsNilWhenAllRankedWorkspacesAreLockedOrPinned() {
+        let pinnedId = UUID(uuidString: "B8B8B8B8-B8B8-B8B8-B8B8-B8B8B8B8B8B8")!
+        let lockedId = UUID(uuidString: "C9C9C9C9-C9C9-C9C9-C9C9-C9C9C9C9C9C9")!
+        let context = AssistantWorkingContext(
+            activeWorkspaceId: nil,
+            snapshots: [
+                makeWorkspaceSnapshot(workspaceId: pinnedId, title: "Pinned", nativeOrder: 0, confidence: 1, pinned: true),
+                makeWorkspaceSnapshot(workspaceId: lockedId, title: "Locked", nativeOrder: 1, confidence: 1, locked: true),
+            ],
+            freshness: ContextFreshness(providers: [], overallConfidence: 1),
+            activeSuggestions: [],
+            latestRanking: RankingSnapshot(
+                id: UUID(uuidString: "D0D0D0D0-D0D0-D0D0-D0D0-D0D0D0D0D0D0")!,
+                updatedAt: Date(timeIntervalSince1970: 1_000),
+                items: [
+                    RankingSnapshot.Item(workspaceId: pinnedId, rank: 1, score: 100, reason: nil),
+                    RankingSnapshot.Item(workspaceId: lockedId, rank: 2, score: 90, reason: nil),
+                ]
+            )
+        )
+
+        XCTAssertNil(NextWorkspaceService.default.nextWorkspace(in: context))
+    }
+
+    func testSemanticActionGatewayExecutesAllowedIntentAndAudits() async throws {
+        let executor = RecordingActionExecutor()
+        let auditLog = RecordingActionAuditLog()
+        let gateway = SemanticActionGateway(
+            reviewers: [AllowingActionReviewer()],
+            executor: executor,
+            auditLog: auditLog
+        )
+        let intent = makeActionIntent(
+            id: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!,
+            snapshotUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+
+        let result = try await gateway.submit(intent)
+
+        XCTAssertEqual(result.decision, .allow)
+        XCTAssertTrue(result.executed)
+        assertEqual(await executor.executedIntentIds(), [intent.id])
+        assertEqual(await auditLog.reviewedIntentIds(), [intent.id])
+        assertEqual(await auditLog.executedIntentIds(), [intent.id])
+    }
+
+    func testSemanticActionGatewayRequiresConfirmationForStaleSnapshotEvidence() async throws {
+        let executor = RecordingActionExecutor()
+        let auditLog = RecordingActionAuditLog()
+        let gateway = SemanticActionGateway(
+            reviewers: [
+                ActionFreshnessReviewer(
+                    maxSnapshotAge: 120,
+                    now: Date(timeIntervalSince1970: 1_300)
+                ),
+            ],
+            executor: executor,
+            auditLog: auditLog
+        )
+        let intent = makeActionIntent(
+            id: UUID(uuidString: "CCCCCCCC-CCCC-CCCC-CCCC-CCCCCCCCCCCC")!,
+            snapshotUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+
+        let result = try await gateway.submit(intent)
+
+        XCTAssertEqual(result.decision, .requireConfirmation)
+        XCTAssertFalse(result.executed)
+        XCTAssertEqual(result.reasons, ["stale snapshot evidence"])
+        assertEqual(await executor.executedIntentIds(), [])
+        assertEqual(await auditLog.reviewedIntentIds(), [intent.id])
+        assertEqual(await auditLog.executedIntentIds(), [])
+    }
+
+    func testSemanticActionGatewayDeniesDuplicateApplySortTargets() async throws {
+        let executor = RecordingActionExecutor()
+        let auditLog = RecordingActionAuditLog()
+        let workspaceId = UUID(uuidString: "D1D1D1D1-D1D1-D1D1-D1D1-D1D1D1D1D1D1")!
+        let intent = ActionIntent(
+            id: UUID(uuidString: "D2D2D2D2-D2D2-D2D2-D2D2-D2D2D2D2D2D2")!,
+            requestedBy: ActionRequester(id: "sprite", route: SortAssistantIntent.applySort.rawValue),
+            kind: .applySort,
+            arguments: [
+                "patchId": UUID(uuidString: "D3D3D3D3-D3D3-D3D3-D3D3-D3D3D3D3D3D3")!.uuidString,
+                "itemIds": "\(workspaceId.uuidString),\(workspaceId.uuidString)",
+            ],
+            reason: "Apply malformed order",
+            evidence: ActionEvidence(
+                snapshotVersions: [workspaceId: 1],
+                snapshotUpdatedAt: [workspaceId: Date(timeIntervalSince1970: 1_000)],
+                suggestionId: nil,
+                rankingSnapshotId: nil
+            ),
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let gateway = SemanticActionGateway(
+            reviewers: [ActionArgumentReviewer()],
+            executor: executor,
+            auditLog: auditLog
+        )
+
+        let result = try await gateway.submit(intent)
+
+        XCTAssertEqual(result.decision, .deny)
+        XCTAssertEqual(result.reasons, ["duplicate workspace target"])
+        XCTAssertFalse(result.executed)
+        assertEqual(await executor.executedIntentIds(), [])
+        assertEqual(await auditLog.reviewedIntentIds(), [intent.id])
+    }
+
+    func testSemanticActionGatewayRequiresConfirmationWhenActionTargetHasNoSnapshotEvidence() async throws {
+        let executor = RecordingActionExecutor()
+        let auditLog = RecordingActionAuditLog()
+        let workspaceId = UUID(uuidString: "D4D4D4D4-D4D4-D4D4-D4D4-D4D4D4D4D4D4")!
+        let intent = ActionIntent(
+            id: UUID(uuidString: "D5D5D5D5-D5D5-D5D5-D5D5-D5D5D5D5D5D5")!,
+            requestedBy: ActionRequester(id: "sprite", route: nil),
+            kind: .lockList,
+            arguments: ["itemId": workspaceId.uuidString, "locked": "true"],
+            reason: nil,
+            evidence: ActionEvidence(
+                snapshotVersions: [:],
+                snapshotUpdatedAt: [:],
+                suggestionId: nil,
+                rankingSnapshotId: nil
+            ),
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let gateway = SemanticActionGateway(
+            reviewers: [ActionArgumentReviewer()],
+            executor: executor,
+            auditLog: auditLog
+        )
+
+        let result = try await gateway.submit(intent)
+
+        XCTAssertEqual(result.decision, .requireConfirmation)
+        XCTAssertEqual(result.reasons, ["missing snapshot evidence for action target"])
+        XCTAssertFalse(result.executed)
+        assertEqual(await executor.executedIntentIds(), [])
+        assertEqual(await auditLog.reviewedIntentIds(), [intent.id])
+    }
+
+    func testSemanticActionGatewayAllowsSuggestionActionsWithSnapshotEvidence() async throws {
+        let executor = RecordingActionExecutor()
+        let auditLog = RecordingActionAuditLog()
+        let workspaceId = UUID(uuidString: "E1E1E1E1-E1E1-E1E1-E1E1-E1E1E1E1E1E1")!
+        let suggestionId = UUID(uuidString: "E2E2E2E2-E2E2-E2E2-E2E2-E2E2E2E2E2E2")!
+        let now = Date(timeIntervalSince1970: 2_000)
+        let intents = [
+            CmuxActionKind.acceptSuggestion,
+            CmuxActionKind.dismissSuggestion,
+        ].enumerated().map { index, kind in
+            ActionIntent(
+                id: UUID(uuidString: "E3E3E3E3-E3E3-E3E3-E3E3-E3E3E3E3E3E\(index)")!,
+                requestedBy: ActionRequester(id: "sprite", route: nil),
+                kind: kind,
+                arguments: [
+                    "suggestionId": suggestionId.uuidString,
+                    "workspaceId": workspaceId.uuidString,
+                ],
+                reason: nil,
+                evidence: ActionEvidence(
+                    snapshotVersions: [workspaceId: 1],
+                    snapshotUpdatedAt: [workspaceId: now],
+                    suggestionId: suggestionId,
+                    rankingSnapshotId: nil
+                ),
+                createdAt: now
+            )
+        }
+        let gateway = SemanticActionGateway(
+            reviewers: [
+                ActionArgumentReviewer(),
+                ActionFreshnessReviewer(maxSnapshotAge: 120, now: now),
+            ],
+            executor: executor,
+            auditLog: auditLog
+        )
+
+        for intent in intents {
+            let result = try await gateway.submit(intent)
+            XCTAssertEqual(result.decision, .allow)
+            XCTAssertTrue(result.executed)
+        }
+
+        assertEqual(await executor.executedIntentIds(), intents.map(\.id))
+        assertEqual(await auditLog.reviewedIntentIds(), intents.map(\.id))
+    }
+
+    func testSemanticActionGatewayDeniesSuggestionActionWithoutValidSuggestionId() async throws {
+        let executor = RecordingActionExecutor()
+        let auditLog = RecordingActionAuditLog()
+        let workspaceId = UUID(uuidString: "E4E4E4E4-E4E4-E4E4-E4E4-E4E4E4E4E4E4")!
+        let intent = ActionIntent(
+            id: UUID(uuidString: "E5E5E5E5-E5E5-E5E5-E5E5-E5E5E5E5E5E5")!,
+            requestedBy: ActionRequester(id: "sprite", route: nil),
+            kind: .dismissSuggestion,
+            arguments: [
+                "suggestionId": "not-a-uuid",
+                "workspaceId": workspaceId.uuidString,
+            ],
+            reason: nil,
+            evidence: ActionEvidence(
+                snapshotVersions: [workspaceId: 1],
+                snapshotUpdatedAt: [workspaceId: Date(timeIntervalSince1970: 2_000)],
+                suggestionId: nil,
+                rankingSnapshotId: nil
+            ),
+            createdAt: Date(timeIntervalSince1970: 2_000)
+        )
+        let gateway = SemanticActionGateway(
+            reviewers: [ActionArgumentReviewer()],
+            executor: executor,
+            auditLog: auditLog
+        )
+
+        let result = try await gateway.submit(intent)
+
+        XCTAssertEqual(result.decision, .deny)
+        XCTAssertEqual(result.reasons, ["invalid suggestionId argument"])
+        XCTAssertFalse(result.executed)
+        assertEqual(await executor.executedIntentIds(), [])
+        assertEqual(await auditLog.reviewedIntentIds(), [intent.id])
+    }
+
+    func testSemanticActionGatewayAllowsMemoryWriteWithoutSnapshotEvidence() async throws {
+        let executor = RecordingActionExecutor()
+        let auditLog = RecordingActionAuditLog()
+        let intent = ActionIntent(
+            id: UUID(uuidString: "D6D6D6D6-D6D6-D6D6-D6D6-D6D6D6D6D6D6")!,
+            requestedBy: ActionRequester(id: "sprite", route: SortAssistantIntent.rememberPreference.rawValue),
+            kind: .writeMemory,
+            arguments: ["domain": "free_sort", "text": "Keep pinned workspaces first"],
+            reason: nil,
+            evidence: ActionEvidence(
+                snapshotVersions: [:],
+                snapshotUpdatedAt: [:],
+                suggestionId: nil,
+                rankingSnapshotId: nil
+            ),
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let gateway = SemanticActionGateway(
+            reviewers: [
+                ActionArgumentReviewer(),
+                ActionFreshnessReviewer(
+                    maxSnapshotAge: 120,
+                    now: Date(timeIntervalSince1970: 1_300)
+                ),
+            ],
+            executor: executor,
+            auditLog: auditLog
+        )
+
+        let result = try await gateway.submit(intent)
+
+        XCTAssertEqual(result.decision, .allow)
+        XCTAssertTrue(result.executed)
+        assertEqual(await executor.executedIntentIds(), [intent.id])
+        assertEqual(await auditLog.reviewedIntentIds(), [intent.id])
+    }
+
+    func testSemanticActionGatewaySynchronousAdapterExecutesAndAudits() throws {
+        let intent = makeActionIntent(
+            id: UUID(uuidString: "ABABABAB-ABAB-ABAB-ABAB-ABABABABABAB")!,
+            snapshotUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        var reviewedIds: [UUID] = []
+        var executedIds: [UUID] = []
+
+        let result = try SemanticActionGateway.submitSynchronously(
+            intent,
+            recordReview: { intent, _, _ in reviewedIds.append(intent.id) },
+            recordExecuted: { intent, _, _ in executedIds.append(intent.id) }
+        ) {
+            ActionExecutionResult(payload: ["applied": "true"])
+        }
+
+        XCTAssertEqual(result.decision, .allow)
+        XCTAssertTrue(result.executed)
+        XCTAssertEqual(result.executionResult?.payload["applied"], "true")
+        XCTAssertEqual(reviewedIds, [intent.id])
+        XCTAssertEqual(executedIds, [intent.id])
+    }
+
+    func testSemanticActionGatewaySynchronousAdapterSkipsExecutionWhenReviewRequiresConfirmation() throws {
+        let intent = makeActionIntent(
+            id: UUID(uuidString: "ACACACAC-ACAC-ACAC-ACAC-ACACACACACAC")!,
+            snapshotUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        var executed = false
+
+        let result = try SemanticActionGateway.submitSynchronously(
+            intent,
+            reviewSignals: [
+                SemanticReviewSignal(
+                    decision: .requireConfirmation,
+                    reason: "stale snapshot evidence"
+                ),
+            ]
+        ) {
+            executed = true
+            return ActionExecutionResult(payload: ["applied": "true"])
+        }
+
+        XCTAssertEqual(result.decision, .requireConfirmation)
+        XCTAssertEqual(result.reasons, ["stale snapshot evidence"])
+        XCTAssertFalse(result.executed)
+        XCTAssertFalse(executed)
+    }
+
+    @MainActor
+    func testSocketActionReviewPayloadPreservesConfirmationDecision() {
+        let intent = makeActionIntent(
+            id: UUID(uuidString: "BCBCBCBC-BCBC-BCBC-BCBC-BCBCBCBCBCBC")!,
+            snapshotUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let result = SemanticReviewResult(
+            intentId: intent.id,
+            decision: .requireConfirmation,
+            reasons: ["stale snapshot evidence"],
+            executed: false,
+            executionResult: nil
+        )
+
+        let payload = SortAssistantCoordinator.socketActionReviewPayload(
+            intent: intent,
+            result: result,
+            base: ["accepted": false]
+        )
+
+        XCTAssertEqual(payload["accepted"] as? Bool, false)
+        XCTAssertEqual(payload["intentId"] as? String, intent.id.uuidString)
+        XCTAssertEqual(payload["actionKind"] as? String, CmuxActionKind.applySort.rawValue)
+        XCTAssertEqual(payload["reviewDecision"] as? String, SemanticActionDecision.requireConfirmation.rawValue)
+        XCTAssertEqual(payload["reviewReasons"] as? [String], ["stale snapshot evidence"])
+        XCTAssertEqual(payload["requiresConfirmation"] as? Bool, true)
+        XCTAssertNil(payload["reviewDenied"])
+    }
+
+#if DEBUG
+    @MainActor
+    func testSortAssistantSemanticConfirmationRunsPendingActionAndClearsState() {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        var confirmed = false
+
+        coordinator.debugQueueSemanticActionConfirmation(
+            actionName: "apply sort",
+            reasons: ["stale snapshot evidence"],
+            confirm: { confirmed = true }
+        )
+
+        XCTAssertEqual(coordinator.semanticActionConfirmation?.reasons, ["stale snapshot evidence"])
+        coordinator.confirmSemanticAction()
+        XCTAssertTrue(confirmed)
+        XCTAssertNil(coordinator.semanticActionConfirmation)
+        coordinator.clearCurrentSession()
+    }
+
+    @MainActor
+    func testSortAssistantSemanticConfirmationCancelDoesNotRunPendingAction() {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        var confirmed = false
+
+        coordinator.debugQueueSemanticActionConfirmation(
+            actionName: "apply sort",
+            reasons: ["missing snapshot evidence"],
+            confirm: { confirmed = true }
+        )
+
+        coordinator.dismissSemanticActionConfirmation()
+
+        XCTAssertFalse(confirmed)
+        XCTAssertNil(coordinator.semanticActionConfirmation)
+        coordinator.clearCurrentSession()
+    }
+#endif
+
+    @MainActor
+    func testSelectWorkspaceSlashCommandRequiresGatewayConfirmationBeforeChangingSelection() throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        defer { coordinator.clearCurrentSession() }
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        let initialWorkspace = try XCTUnwrap(tabManager.selectedWorkspace)
+        let targetWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+
+        XCTAssertEqual(tabManager.selectedWorkspace?.id, initialWorkspace.id)
+
+        coordinator.submit(
+            "/select @{Review Queue}",
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+
+        let confirmation = try XCTUnwrap(coordinator.semanticActionConfirmation)
+        XCTAssertEqual(confirmation.actionName, "switch workspace")
+        XCTAssertEqual(confirmation.reasons, ["stale snapshot evidence"])
+        XCTAssertEqual(tabManager.selectedWorkspace?.id, initialWorkspace.id)
+
+        coordinator.confirmSemanticAction()
+
+        XCTAssertNil(coordinator.semanticActionConfirmation)
+        XCTAssertEqual(tabManager.selectedWorkspace?.id, targetWorkspace.id)
+    }
+
+    @MainActor
+    func testSocketWorkspaceColorSetAndClearReturnGatewayConfirmationBeforeMutatingStaleTarget() throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        defer { coordinator.clearCurrentSession() }
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        let workspace = try XCTUnwrap(tabManager.selectedWorkspace)
+        coordinator.submit(
+            "/help",
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+
+        let payload = try XCTUnwrap(coordinator.socketWorkspaceColorSet(
+            workspaceId: workspace.id.uuidString,
+            color: "#C0392B"
+        ))
+
+        XCTAssertEqual(payload["actionKind"] as? String, CmuxActionKind.setWorkspaceColor.rawValue)
+        XCTAssertEqual(payload["reviewDecision"] as? String, SemanticActionDecision.requireConfirmation.rawValue)
+        XCTAssertEqual(payload["reviewReasons"] as? [String], ["stale snapshot evidence"])
+        XCTAssertEqual(payload["requiresConfirmation"] as? Bool, true)
+        XCTAssertNil(workspace.customColor)
+
+        tabManager.setTabColor(tabId: workspace.id, color: "#C0392B")
+        let clearPayload = try XCTUnwrap(coordinator.socketWorkspaceColorClear(
+            workspaceId: workspace.id.uuidString
+        ))
+
+        XCTAssertEqual(clearPayload["actionKind"] as? String, CmuxActionKind.clearWorkspaceColor.rawValue)
+        XCTAssertEqual(clearPayload["reviewDecision"] as? String, SemanticActionDecision.requireConfirmation.rawValue)
+        XCTAssertEqual(clearPayload["reviewReasons"] as? [String], ["stale snapshot evidence"])
+        XCTAssertEqual(clearPayload["requiresConfirmation"] as? Bool, true)
+        XCTAssertEqual(workspace.customColor, "#C0392B")
+    }
+
+    @MainActor
+    func testSocketPinAndLockReturnGatewayConfirmationBeforeMutatingStaleTargets() throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        defer { coordinator.clearCurrentSession() }
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        let workspace = try XCTUnwrap(tabManager.selectedWorkspace)
+        coordinator.submit(
+            "/help",
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+
+        let pinPayload = try XCTUnwrap(coordinator.socketSetPinned(itemId: workspace.id, pinned: true))
+        XCTAssertEqual(pinPayload["actionKind"] as? String, CmuxActionKind.pinWorkspace.rawValue)
+        XCTAssertEqual(pinPayload["reviewDecision"] as? String, SemanticActionDecision.requireConfirmation.rawValue)
+        XCTAssertEqual(pinPayload["reviewReasons"] as? [String], ["stale snapshot evidence"])
+        XCTAssertEqual(pinPayload["requiresConfirmation"] as? Bool, true)
+        XCTAssertFalse(workspace.isPinned)
+
+        let lockPayload = coordinator.socketSetLocked(itemId: workspace.id, locked: true)
+        XCTAssertEqual(lockPayload["actionKind"] as? String, CmuxActionKind.lockList.rawValue)
+        XCTAssertEqual(lockPayload["reviewDecision"] as? String, SemanticActionDecision.requireConfirmation.rawValue)
+        XCTAssertEqual(lockPayload["reviewReasons"] as? [String], ["stale snapshot evidence"])
+        XCTAssertEqual(lockPayload["requiresConfirmation"] as? Bool, true)
+        XCTAssertEqual(lockPayload["locked"] as? Bool, false)
+
+        let listState = try XCTUnwrap(coordinator.socketListState())
+        let items = try XCTUnwrap(listState["items"] as? [[String: Any]])
+        let item = try XCTUnwrap(items.first { $0["id"] as? String == workspace.id.uuidString })
+        XCTAssertEqual(item["pinned"] as? Bool, false)
+        XCTAssertEqual(item["locked"] as? Bool, false)
+    }
+
+    @MainActor
+    func testSocketSortApplyReturnsGatewayConfirmationBeforeReorderingStaleTargets() throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        defer { coordinator.clearCurrentSession() }
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        _ = try XCTUnwrap(tabManager.selectedWorkspace)
+        let targetWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        coordinator.submit(
+            "/help",
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+        let orderBefore = tabManager.tabs.map(\.id)
+        let requestedOrder = [targetWorkspace.id] + orderBefore.filter { $0 != targetWorkspace.id }
+
+        let payload = try XCTUnwrap(coordinator.socketSortApply(
+            patchId: nil,
+            itemIds: requestedOrder
+        ))
+
+        XCTAssertEqual(payload["applied"] as? Bool, false)
+        XCTAssertEqual(payload["actionKind"] as? String, CmuxActionKind.applySort.rawValue)
+        XCTAssertEqual(payload["reviewDecision"] as? String, SemanticActionDecision.requireConfirmation.rawValue)
+        XCTAssertEqual(payload["reviewReasons"] as? [String], ["stale snapshot evidence"])
+        XCTAssertEqual(payload["requiresConfirmation"] as? Bool, true)
+        XCTAssertEqual(tabManager.tabs.map(\.id), orderBefore)
+    }
+
+    @MainActor
+    func testSocketSortUndoReturnsGatewayConfirmationBeforeMutatingStaleTargets() throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        defer { coordinator.clearCurrentSession() }
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        coordinator.submit(
+            "/help",
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+
+        let payload = try XCTUnwrap(coordinator.socketSortUndo())
+
+        XCTAssertEqual(payload["undone"] as? Bool, false)
+        XCTAssertEqual(payload["actionKind"] as? String, CmuxActionKind.undoSort.rawValue)
+        XCTAssertEqual(payload["reviewDecision"] as? String, SemanticActionDecision.requireConfirmation.rawValue)
+        XCTAssertEqual(payload["reviewReasons"] as? [String], ["stale snapshot evidence"])
+        XCTAssertEqual(payload["requiresConfirmation"] as? Bool, true)
+    }
+
+#if DEBUG
+    @MainActor
+    func testSocketWriteMemoryCandidateRecordsGatewayReviewAndExecutionAudit() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        coordinator.debugResetMemoryState()
+        defer { coordinator.clearCurrentSession() }
+
+        let before = await coordinator.debugContextAgentInspectorSnapshot()
+        let beforeAuditCount = before.auditEntries.count
+
+        let payload = coordinator.socketWriteMemoryCandidate(
+            text: "Keep review workspaces near the top",
+            sourceSummary: "user preference"
+        )
+
+        XCTAssertEqual(payload["domain"] as? String, "free_sort")
+        XCTAssertEqual(payload["created"] as? Bool, true)
+        XCTAssertEqual(payload["text"] as? String, "Keep review workspaces near the top")
+        XCTAssertNil(payload["reviewDecision"])
+        XCTAssertEqual(coordinator.memoryCandidate?.text, "Keep review workspaces near the top")
+        XCTAssertEqual(coordinator.memoryCandidate?.sourceSummary, "user preference")
+        XCTAssertEqual(coordinator.memoryCandidate?.target, .freeSort)
+
+        let after = await coordinator.debugContextAgentInspectorSnapshot()
+        let auditEntries = Array(after.auditEntries.dropFirst(beforeAuditCount))
+        XCTAssertEqual(auditEntries.map(\.kind), [.writeMemory, .writeMemory])
+        XCTAssertEqual(auditEntries.map(\.decision), [.allow, .allow])
+        XCTAssertEqual(auditEntries.map(\.executed), [false, true])
+    }
+
+    @MainActor
+    func testSocketForgetMemoryRecordsGatewayReviewAndExecutionAudit() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        coordinator.debugResetMemoryState()
+        defer {
+            coordinator.clearCurrentSession()
+            coordinator.debugResetMemoryState()
+        }
+
+        let memory = SortAssistantMemory(
+            id: UUID(),
+            text: "Keep review workspaces near the top",
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        coordinator.debugSeedFreeSortMemories([memory])
+
+        let before = await coordinator.debugContextAgentInspectorSnapshot()
+        let beforeAuditCount = before.auditEntries.count
+
+        let payload = coordinator.socketForgetMemory(id: memory.id.uuidString, text: nil)
+
+        XCTAssertEqual(payload["domain"] as? String, "free_sort")
+        XCTAssertEqual(payload["deleted"] as? Int, 1)
+        XCTAssertNil(payload["reviewDecision"])
+        XCTAssertFalse(coordinator.memories.contains { $0.id == memory.id })
+
+        let queryPayload = coordinator.socketMemoryQuery()
+        let memories = try XCTUnwrap(queryPayload["memories"] as? [[String: Any]])
+        XCTAssertFalse(memories.contains { $0["id"] as? String == memory.id.uuidString })
+
+        let after = await coordinator.debugContextAgentInspectorSnapshot()
+        let auditEntries = Array(after.auditEntries.dropFirst(beforeAuditCount))
+        XCTAssertEqual(auditEntries.map(\.kind), [.forgetMemory, .forgetMemory])
+        XCTAssertEqual(auditEntries.map(\.decision), [.allow, .allow])
+        XCTAssertEqual(auditEntries.map(\.executed), [false, true])
+    }
+
+    @MainActor
+    func testAssistantDeleteMemoryRecordsGatewayReviewAndExecutionAudit() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        coordinator.debugResetMemoryState()
+        defer {
+            coordinator.clearCurrentSession()
+            coordinator.debugResetMemoryState()
+        }
+
+        let memory = SortAssistantMemory(
+            id: UUID(),
+            text: "Keep review workspaces near the top",
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        coordinator.debugSeedFreeSortMemories([memory])
+
+        let before = await coordinator.debugContextAgentInspectorSnapshot()
+        let beforeAuditCount = before.auditEntries.count
+
+        coordinator.deleteMemory(memory)
+
+        XCTAssertFalse(coordinator.memories.contains { $0.id == memory.id })
+
+        let after = await coordinator.debugContextAgentInspectorSnapshot()
+        let auditEntries = Array(after.auditEntries.dropFirst(beforeAuditCount))
+        XCTAssertEqual(auditEntries.map(\.kind), [.forgetMemory, .forgetMemory])
+        XCTAssertEqual(auditEntries.map(\.decision), [.allow, .allow])
+        XCTAssertEqual(auditEntries.map(\.executed), [false, true])
+    }
+
+    @MainActor
+    func testSocketWriteSpriteMemoryRecordsGatewayReviewAndExecutionAudit() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        coordinator.debugResetMemoryState()
+        defer {
+            coordinator.clearCurrentSession()
+            coordinator.debugResetMemoryState()
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-sprite-memory-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let before = await coordinator.debugContextAgentInspectorSnapshot()
+        let beforeAuditCount = before.auditEntries.count
+
+        let payload = coordinator.socketWriteSpriteMemory(
+            text: "Use bun for web commands",
+            sourceSummary: "project convention",
+            directory: directory.path
+        )
+
+        let memoryFile = try XCTUnwrap(SpriteWorkspaceMemoryDocument.fileURL(directory: directory.path))
+        XCTAssertEqual(payload["domain"] as? String, "sprite")
+        XCTAssertEqual(payload["created"] as? Bool, true)
+        XCTAssertEqual(payload["text"] as? String, "Use bun for web commands")
+        XCTAssertEqual(payload["sourceSummary"] as? String, "project convention")
+        XCTAssertEqual(payload["memoryFile"] as? String, memoryFile.path)
+        XCTAssertNil(payload["reviewDecision"])
+
+        let memory = try XCTUnwrap(payload["memory"] as? [String: Any])
+        XCTAssertEqual(memory["text"] as? String, "Use bun for web commands")
+
+        let content = try String(contentsOf: memoryFile, encoding: .utf8)
+        XCTAssertTrue(content.contains("Use bun for web commands"))
+        XCTAssertTrue(content.contains("<!-- cmux-memory:id="))
+
+        let queryPayload = coordinator.socketSpriteMemoryQuery(directory: directory.path)
+        let memories = try XCTUnwrap(queryPayload["memories"] as? [[String: Any]])
+        XCTAssertEqual(memories.count, 1)
+        XCTAssertEqual(memories.first?["text"] as? String, "Use bun for web commands")
+
+        let after = await coordinator.debugContextAgentInspectorSnapshot()
+        let auditEntries = Array(after.auditEntries.dropFirst(beforeAuditCount))
+        XCTAssertEqual(auditEntries.map(\.kind), [.writeMemory, .writeMemory])
+        XCTAssertEqual(auditEntries.map(\.decision), [.allow, .allow])
+        XCTAssertEqual(auditEntries.map(\.executed), [false, true])
+    }
+
+    @MainActor
+    func testSocketForgetSpriteMemoryRecordsGatewayReviewAndExecutionAudit() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        coordinator.debugResetMemoryState()
+        defer {
+            coordinator.clearCurrentSession()
+            coordinator.debugResetMemoryState()
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-sprite-memory-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writePayload = coordinator.socketWriteSpriteMemory(
+            text: "Use bun for web commands",
+            sourceSummary: "project convention",
+            directory: directory.path
+        )
+        XCTAssertEqual(writePayload["created"] as? Bool, true)
+
+        let memoryFile = try XCTUnwrap(SpriteWorkspaceMemoryDocument.fileURL(directory: directory.path))
+        let memory = try XCTUnwrap(writePayload["memory"] as? [String: Any])
+        let memoryId = try XCTUnwrap(memory["id"] as? String)
+
+        let before = await coordinator.debugContextAgentInspectorSnapshot()
+        let beforeAuditCount = before.auditEntries.count
+
+        let payload = coordinator.socketForgetSpriteMemory(
+            id: memoryId,
+            text: nil,
+            directory: directory.path
+        )
+
+        XCTAssertEqual(payload["domain"] as? String, "sprite")
+        XCTAssertEqual(payload["deleted"] as? Int, 1)
+        XCTAssertEqual(payload["memoryFile"] as? String, memoryFile.path)
+        XCTAssertNil(payload["reviewDecision"])
+
+        let content = try String(contentsOf: memoryFile, encoding: .utf8)
+        XCTAssertFalse(content.contains("Use bun for web commands"))
+
+        let queryPayload = coordinator.socketSpriteMemoryQuery(directory: directory.path)
+        let memories = try XCTUnwrap(queryPayload["memories"] as? [[String: Any]])
+        XCTAssertFalse(memories.contains { $0["id"] as? String == memoryId })
+
+        let after = await coordinator.debugContextAgentInspectorSnapshot()
+        let auditEntries = Array(after.auditEntries.dropFirst(beforeAuditCount))
+        XCTAssertEqual(auditEntries.map(\.kind), [.forgetMemory, .forgetMemory])
+        XCTAssertEqual(auditEntries.map(\.decision), [.allow, .allow])
+        XCTAssertEqual(auditEntries.map(\.executed), [false, true])
+    }
+
+    @MainActor
+    func testAssistantDeleteSpriteMemoryRecordsGatewayReviewAndExecutionAudit() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        coordinator.debugResetMemoryState()
+        defer {
+            coordinator.clearCurrentSession()
+            coordinator.debugResetMemoryState()
+        }
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-sprite-memory-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let writePayload = coordinator.socketWriteSpriteMemory(
+            text: "Use bun for web commands",
+            sourceSummary: "project convention",
+            directory: directory.path
+        )
+        XCTAssertEqual(writePayload["created"] as? Bool, true)
+
+        let memoryFile = try XCTUnwrap(SpriteWorkspaceMemoryDocument.fileURL(directory: directory.path))
+        let memory = try XCTUnwrap(coordinator.spriteMemories.first {
+            $0.text == "Use bun for web commands"
+        })
+
+        let before = await coordinator.debugContextAgentInspectorSnapshot()
+        let beforeAuditCount = before.auditEntries.count
+
+        coordinator.deleteSpriteMemory(memory)
+
+        XCTAssertFalse(coordinator.spriteMemories.contains { $0.id == memory.id })
+        let content = try String(contentsOf: memoryFile, encoding: .utf8)
+        XCTAssertFalse(content.contains("Use bun for web commands"))
+
+        let after = await coordinator.debugContextAgentInspectorSnapshot()
+        let auditEntries = Array(after.auditEntries.dropFirst(beforeAuditCount))
+        XCTAssertEqual(auditEntries.map(\.kind), [.forgetMemory, .forgetMemory])
+        XCTAssertEqual(auditEntries.map(\.decision), [.allow, .allow])
+        XCTAssertEqual(auditEntries.map(\.executed), [false, true])
+    }
+
+    @MainActor
+    func testSocketAcceptSuggestionRecordsGatewayReviewAndExecutionAudit() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        defer { coordinator.clearCurrentSession() }
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        let initialWorkspace = try XCTUnwrap(tabManager.selectedWorkspace)
+        let targetWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        workspaceTabStore.summaryPriority = makeSummaryPriorityState(items: [
+            makeSummaryPriorityItem(
+                workspace: initialWorkspace,
+                nativeOrder: 0,
+                status: "running",
+                score: 10,
+                nextAction: nil
+            ),
+            makeSummaryPriorityItem(
+                workspace: targetWorkspace,
+                nativeOrder: 1,
+                status: "waiting_user",
+                score: 96,
+                nextAction: "Review agent output"
+            ),
+        ])
+        coordinator.submit(
+            "/help",
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+
+        let before = await coordinator.debugContextAgentInspectorSnapshot()
+        let suggestion = try XCTUnwrap(before.workingContext.activeSuggestions.first {
+            $0.workspaceId == targetWorkspace.id && $0.type == ProactiveSuggestionTypes.reviewAgentWaitingUser
+        })
+        let beforeAuditCount = before.auditEntries.count
+
+        let payload = try XCTUnwrap(coordinator.socketAcceptSuggestion(suggestionId: suggestion.id))
+
+        XCTAssertEqual(payload["accepted"] as? Bool, true)
+        XCTAssertEqual(payload["suggestionId"] as? String, suggestion.id.uuidString)
+        XCTAssertEqual(tabManager.selectedWorkspace?.id, targetWorkspace.id)
+
+        let after = await coordinator.debugContextAgentInspectorSnapshot()
+        let auditEntries = Array(after.auditEntries.dropFirst(beforeAuditCount))
+        XCTAssertEqual(auditEntries.map(\.kind), [.acceptSuggestion, .acceptSuggestion])
+        XCTAssertEqual(auditEntries.map(\.decision), [.allow, .allow])
+        XCTAssertEqual(auditEntries.map(\.executed), [false, true])
+        XCTAssertFalse(after.workingContext.activeSuggestions.contains { $0.id == suggestion.id })
+    }
+
+    @MainActor
+    func testSocketDismissSuggestionRecordsGatewayReviewAndExecutionAudit() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        defer { coordinator.clearCurrentSession() }
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        let initialWorkspace = try XCTUnwrap(tabManager.selectedWorkspace)
+        let targetWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        workspaceTabStore.summaryPriority = makeSummaryPriorityState(items: [
+            makeSummaryPriorityItem(
+                workspace: initialWorkspace,
+                nativeOrder: 0,
+                status: "running",
+                score: 10,
+                nextAction: nil
+            ),
+            makeSummaryPriorityItem(
+                workspace: targetWorkspace,
+                nativeOrder: 1,
+                status: "waiting_user",
+                score: 96,
+                nextAction: "Review agent output"
+            ),
+        ])
+        coordinator.submit(
+            "/help",
+            tabManager: tabManager,
+            workspaceTabStore: workspaceTabStore
+        )
+
+        let before = await coordinator.debugContextAgentInspectorSnapshot()
+        let suggestion = try XCTUnwrap(before.workingContext.activeSuggestions.first {
+            $0.workspaceId == targetWorkspace.id && $0.type == ProactiveSuggestionTypes.reviewAgentWaitingUser
+        })
+        let beforeAuditCount = before.auditEntries.count
+
+        let payload = try XCTUnwrap(coordinator.socketDismissSuggestion(suggestionId: suggestion.id))
+
+        XCTAssertEqual(payload["dismissed"] as? Bool, true)
+        XCTAssertEqual(payload["suggestionId"] as? String, suggestion.id.uuidString)
+        XCTAssertEqual(tabManager.selectedWorkspace?.id, initialWorkspace.id)
+
+        let after = await coordinator.debugContextAgentInspectorSnapshot()
+        let auditEntries = Array(after.auditEntries.dropFirst(beforeAuditCount))
+        XCTAssertEqual(auditEntries.map(\.kind), [.dismissSuggestion, .dismissSuggestion])
+        XCTAssertEqual(auditEntries.map(\.decision), [.allow, .allow])
+        XCTAssertEqual(auditEntries.map(\.executed), [false, true])
+        XCTAssertFalse(after.workingContext.activeSuggestions.contains { $0.id == suggestion.id })
+    }
+#endif
+
+    func testActionIntentCodableRoundTripPreservesEvidence() throws {
+        let intent = makeActionIntent(
+            id: UUID(uuidString: "ADADADAD-ADAD-ADAD-ADAD-ADADADADADAD")!,
+            snapshotUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+
+        let data = try JSONEncoder().encode(intent)
+        let decoded = try JSONDecoder().decode(ActionIntent.self, from: data)
+
+        XCTAssertEqual(decoded, intent)
+    }
+
+    func testActionIntentTrustDescriptorIncludesRouteArgumentsAndSnapshotContext() {
+        let workspaceId = UUID(uuidString: "AEAEAEAE-AEAE-AEAE-AEAE-AEAEAEAEAEAE")!
+        let intent = makeActionIntent(
+            id: UUID(uuidString: "AFAFAFAF-AFAF-AFAF-AFAF-AFAFAFAFAFAF")!,
+            workspaceId: workspaceId,
+            snapshotUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        var reordered = intent
+        reordered.arguments = Dictionary<String, String>(
+            uniqueKeysWithValues: intent.arguments.map { ($0.key, $0.value) }.reversed()
+        )
+
+        let descriptor = intent.trustDescriptor
+        let reorderedDescriptor = reordered.trustDescriptor
+
+        XCTAssertEqual(descriptor.schemaVersion, 2)
+        XCTAssertEqual(descriptor.actionID, "sprite.applySort")
+        XCTAssertEqual(descriptor.kind, CmuxActionKind.applySort.rawValue)
+        XCTAssertEqual(descriptor.workspaceId, workspaceId.uuidString)
+        XCTAssertEqual(descriptor.assistantRoute, SortAssistantIntent.applySort.rawValue)
+        XCTAssertNotNil(descriptor.normalizedArgumentsHash)
+        XCTAssertNotNil(descriptor.contextSnapshotHash)
+        XCTAssertEqual(descriptor.fingerprint, reorderedDescriptor.fingerprint)
+    }
+
+    func testActionIntentTrustDescriptorChangesWhenSnapshotVersionChanges() {
+        let workspaceId = UUID(uuidString: "B0B0B0B0-B0B0-B0B0-B0B0-B0B0B0B0B0B0")!
+        let first = makeActionIntent(
+            id: UUID(uuidString: "B1B1B1B1-B1B1-B1B1-B1B1-B1B1B1B1B1B1")!,
+            workspaceId: workspaceId,
+            snapshotUpdatedAt: Date(timeIntervalSince1970: 1_000)
+        )
+        var second = first
+        second.evidence.snapshotVersions[workspaceId] = 2
+
+        XCTAssertNotEqual(first.trustDescriptor.fingerprint, second.trustDescriptor.fingerprint)
+    }
+
     func testSemanticRouterToolCatalogUsesMCPToolsListProtocol() async throws {
         let script = """
-        while IFS= read -r line; do
-          id=$(printf '%s\\n' "$line" | sed -E 's/.*"id":[[:space:]]*([^,}]*).*/\\1/')
-          case "$line" in
-            *'"method":"initialize"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{"listChanged":false}},"serverInfo":{"name":"mock","version":"1"}}}\\n' "$id" ;;
-            *'"method":"tools/list"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"external_probe","description":"External probe tool","inputSchema":{"type":"object"}}]}}\\n' "$id" ;;
-          esac
-        done
+        import json
+        import sys
+
+        for line in sys.stdin:
+            request = json.loads(line)
+            method = request.get("method")
+            if method == "initialize":
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request.get("id"),
+                    "result": {
+                        "protocolVersion": "2025-11-25",
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": "mock", "version": "1"},
+                    },
+                }
+            elif method == "tools/list":
+                response = {
+                    "jsonrpc": "2.0",
+                    "id": request.get("id"),
+                    "result": {
+                        "tools": [{
+                            "name": "external_probe",
+                            "description": "External probe tool",
+                            "inputSchema": {"type": "object"},
+                        }],
+                    },
+                }
+            else:
+                continue
+            print(json.dumps(response, separators=(",", ":")), flush=True)
         """
 
         let tools = await SortAssistantIntentRouter.semanticMCPToolCatalogForTesting(externalServers: [
             "mock_external": [
-                "command": "/bin/sh",
+                "command": "/usr/bin/python3",
                 "args": ["-c", script],
             ],
         ])
@@ -101,6 +2475,601 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         XCTAssertEqual(tool["qualifiedName"] as? String, "mcp__mock_external__external_probe")
         XCTAssertEqual(tool["description"] as? String, "External probe tool")
         XCTAssertEqual((tool["inputSchema"] as? [String: Any])?["type"] as? String, "object")
+    }
+
+    func testSemanticRouterProductionToolCatalogDoesNotLoadExternalServers() {
+        let serverNames = SortAssistantIntentRouter.semanticMCPServerNamesForTesting(externalServers: [
+            "mock_external": [
+                "command": "/bin/sh",
+                "args": ["-c", "exit 1"],
+            ],
+        ])
+
+        XCTAssertEqual(serverNames, ["cmux_sprite"])
+    }
+
+    private func makeSpriteMCPRequest(
+        intent: SortAssistantIntent,
+        route: SortAssistantActionRoute? = nil,
+        routeSteps: [SortAssistantRouteStep]? = nil
+    ) -> SortAssistantMCPRequest {
+        let actionRouter = SortAssistantActionRouter()
+        let resolvedRoute = route ?? actionRouter.route(for: intent)
+        return SortAssistantMCPRequest(
+            goal: "fixture",
+            intent: intent,
+            routeSteps: routeSteps ?? [SortAssistantRouteStep(intent: intent)],
+            route: resolvedRoute,
+            routeAdjustment: .empty,
+            visibleScopeSignature: "fixture",
+            requiresMCPScopeRefresh: false,
+            conversationContext: [],
+            includeConversationContext: false,
+            explicitSlashCommand: false,
+            workspaceId: "11111111-1111-1111-1111-111111111111",
+            workspaceDirectory: nil,
+            socketPath: "/tmp/cmux-test.sock",
+            cmuxCLIPath: "/tmp/cmux",
+            claudeSessionId: nil,
+            claudeSessionReused: false,
+            debugSession: nil
+        )
+    }
+
+    private func noLLMRuntimeMode() -> CmuxRuntimeMode {
+        CmuxRuntimeMode(
+            isUITest: true,
+            fixtureName: "assistant-context-agent-basic",
+            disableNetwork: true,
+            disableSparkle: true,
+            disableRealLLM: true,
+            disableAutoUpdate: true,
+            disableAnimations: true,
+            resetTestState: true,
+            fakeContextAgent: true,
+            fakeAssistant: true,
+            fixedNow: ISO8601DateFormatter().date(from: "2026-05-23T10:00:00Z"),
+            appearanceMode: "light"
+        )
+    }
+
+    private func assertEqual<T: Equatable>(
+        _ expression1: T,
+        _ expression2: T,
+        _ message: String = "",
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(expression1, expression2, message, file: file, line: line)
+    }
+
+    private func makeWorkspaceSnapshot(
+        workspaceId: UUID,
+        title: String,
+        nativeOrder: Int,
+        confidence: Double,
+        status: String = "ready",
+        priorityScore: Double? = nil,
+        rankReason: String? = nil,
+        nextAction: String? = nil,
+        userAttentionNeeded: Double? = nil,
+        pinned: Bool = false,
+        locked: Bool = false,
+        contextHash: String? = nil
+    ) -> WorkspaceSnapshot {
+        let freshness = ContextFreshness(
+            providers: [
+                ProviderFreshness(
+                    providerId: "summary_priority",
+                    lastCollectedAt: Date(timeIntervalSince1970: 1_000),
+                    ttlSeconds: 120,
+                    stale: false,
+                    error: nil,
+                    confidence: confidence
+                ),
+            ],
+            overallConfidence: confidence
+        )
+        return WorkspaceSnapshot(
+            workspaceId: workspaceId,
+            version: 1,
+            updatedAt: Date(timeIntervalSince1970: 1_000),
+            context: NormalizedWorkspaceContext(
+                title: title,
+                selected: false,
+                directory: nil,
+                listRevision: 1,
+                nativeOrder: nativeOrder,
+                pinned: pinned,
+                locked: locked,
+                customColor: nil,
+                panelCount: 0,
+                pullRequestCount: 0,
+                stalePullRequestCount: 0
+            ),
+            derived: DerivedWorkspaceState(
+                status: status,
+                priorityScore: priorityScore,
+                rankReason: rankReason,
+                nextAction: nextAction,
+                userAttentionNeeded: userAttentionNeeded ?? confidence
+            ),
+            digest: nil,
+            freshness: freshness,
+            contextHash: contextHash
+        )
+    }
+
+    private func makeSummaryPriorityState(
+        items: [WorkspaceSidebarSummaryPriorityItem]
+    ) -> WorkspaceSidebarSummaryPriorityState {
+        let topScore = items
+            .flatMap { $0.scores.dimensions.values.map(\.rawScore) }
+            .max() ?? 0
+        return WorkspaceSidebarSummaryPriorityState(
+            profileId: "test-profile",
+            sort: .dimension(id: "urgency"),
+            items: items,
+            dimensions: WorkspaceSidebarDimensionDefinition.builtinDefaults,
+            stats: WorkspaceSidebarSummaryPriorityStats(
+                total: items.count,
+                needsAttention: items.filter { $0.status == "waiting_user" || $0.status == "ci_failed" }.count,
+                topScore: topScore,
+                staleDigestCount: items.filter { $0.stale == true }.count
+            ),
+            generatedAt: "2026-05-23T10:00:00Z"
+        )
+    }
+
+    @MainActor
+    private func makeSummaryPriorityItem(
+        workspace: Workspace,
+        nativeOrder: Int,
+        status: String,
+        score: Double,
+        nextAction: String?
+    ) -> WorkspaceSidebarSummaryPriorityItem {
+        WorkspaceSidebarSummaryPriorityItem(
+            workspaceId: workspace.id.uuidString,
+            nativeOrder: nativeOrder,
+            title: workspace.displayTitle,
+            subtitle: nil,
+            generatedAt: "2026-05-23T10:00:00Z",
+            inputHash: workspace.id.uuidString,
+            topic: WorkspaceSidebarSummaryPriorityItem.Topic(
+                text: workspace.displayTitle,
+                emoji: nil,
+                confidence: 1
+            ),
+            summary: WorkspaceSidebarSummaryPriorityItem.Summary(
+                short: "Workspace summary",
+                detailed: "Workspace summary"
+            ),
+            status: status,
+            presentStatus: nil,
+            scores: WorkspaceSidebarSummaryPriorityItem.Scores(
+                dimensions: [
+                    "urgency": WorkspaceSidebarDimensionScore(
+                        rawScore: score,
+                        confidence: 1,
+                        reason: "test score"
+                    ),
+                ],
+                rankReason: "test score"
+            ),
+            nextAction: nextAction.map {
+                WorkspaceSidebarSummaryPriorityItem.NextAction(
+                    label: $0,
+                    detail: nil,
+                    risk: nil
+                )
+            },
+            pinned: workspace.isPinned,
+            stale: false,
+            evidence: nil
+        )
+    }
+
+    private func loadContextAgentReplayFixture(named name: String) throws -> [ContextAgentEvent] {
+        let testFileURL = URL(fileURLWithPath: #filePath)
+        let fixtureURL = testFileURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/ContextAgent/\(name).eventlog.jsonl")
+        return try ContextAgentEventLog.decodeJSONLines(Data(contentsOf: fixtureURL))
+    }
+
+    private func makeActionIntent(
+        id: UUID,
+        workspaceId: UUID = UUID(uuidString: "DDDDDDDD-DDDD-DDDD-DDDD-DDDDDDDDDDDD")!,
+        snapshotUpdatedAt: Date
+    ) -> ActionIntent {
+        return ActionIntent(
+            id: id,
+            requestedBy: ActionRequester(id: "sprite", route: SortAssistantIntent.applySort.rawValue),
+            kind: .applySort,
+            arguments: [
+                "patchId": "patch-1",
+                "workspaceId": workspaceId.uuidString,
+            ],
+            reason: "Apply proposed sidebar order",
+            evidence: ActionEvidence(
+                snapshotVersions: [workspaceId: 1],
+                snapshotUpdatedAt: [workspaceId: snapshotUpdatedAt],
+                suggestionId: nil,
+                rankingSnapshotId: nil
+            ),
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+    }
+
+    private func waitForProviderRunRecords(
+        _ agent: ContextAgent,
+        minimumCount: Int
+    ) async -> [ProviderRunRecord] {
+        for _ in 0..<50 {
+            let records = await agent.providerRunRecords()
+            if records.count >= minimumCount {
+                return records
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return await agent.providerRunRecords()
+    }
+
+    private actor StubAssistantContextReader: AssistantContextReadable {
+        private let context: AssistantWorkingContext
+        private var workingContextReads = 0
+
+        init(context: AssistantWorkingContext) {
+            self.context = context
+        }
+
+        func assistantWorkingContext() async -> AssistantWorkingContext {
+            workingContextReads += 1
+            return context
+        }
+
+        func workspaceSnapshot(_ id: UUID) async -> WorkspaceSnapshot? {
+            context.snapshots.first { $0.workspaceId == id }
+        }
+
+        func activeSuggestions() async -> [ProactiveSuggestion] {
+            context.activeSuggestions
+        }
+
+        func latestRanking() async -> RankingSnapshot? {
+            context.latestRanking
+        }
+
+        func workingContextReadCount() -> Int {
+            workingContextReads
+        }
+    }
+
+    private actor RecordingWorkspaceSnapshotProvider: WorkspaceSnapshotProviding {
+        nonisolated let providerId = "recording"
+
+        private var jobs: [ContextRefreshJob] = []
+
+        func snapshot(for job: ContextRefreshJob) async throws -> WorkspaceSnapshot {
+            jobs.append(job)
+            return makeSnapshot(for: job)
+        }
+
+        func requestedWorkspaceIds() -> [UUID] {
+            jobs.map(\.workspaceId)
+        }
+
+        func requestedReasons() -> [String] {
+            jobs.map(\.reason)
+        }
+
+        private func makeSnapshot(for job: ContextRefreshJob) -> WorkspaceSnapshot {
+            WorkspaceSnapshot(
+                workspaceId: job.workspaceId,
+                version: 1,
+                updatedAt: job.enqueuedAt,
+                context: NormalizedWorkspaceContext(
+                    title: "workspace-\(job.workspaceId.uuidString)",
+                    selected: false,
+                    directory: nil,
+                    listRevision: 1,
+                    nativeOrder: 0,
+                    pinned: false,
+                    locked: false,
+                    customColor: nil,
+                    panelCount: 0,
+                    pullRequestCount: 0,
+                    stalePullRequestCount: 0
+                ),
+                derived: DerivedWorkspaceState(
+                    status: "ready",
+                    priorityScore: nil,
+                    rankReason: job.reason,
+                    nextAction: nil,
+                    userAttentionNeeded: 0
+                ),
+                digest: nil,
+                freshness: ContextFreshness(
+                    providers: [
+                        ProviderFreshness(
+                            providerId: "recording",
+                            lastCollectedAt: job.enqueuedAt,
+                            ttlSeconds: 120,
+                            stale: false,
+                            error: nil,
+                            confidence: 1
+                        ),
+                    ],
+                    overallConfidence: 1
+                )
+            )
+        }
+    }
+
+    private actor AlternateWorkspaceSnapshotProvider: WorkspaceSnapshotProviding {
+        nonisolated let providerId = "alternate"
+
+        private var jobs: [ContextRefreshJob] = []
+
+        func snapshot(for job: ContextRefreshJob) async throws -> WorkspaceSnapshot {
+            jobs.append(job)
+            return WorkspaceSnapshot(
+                workspaceId: job.workspaceId,
+                version: 1,
+                updatedAt: job.enqueuedAt,
+                context: NormalizedWorkspaceContext(
+                    title: "alternate-\(job.workspaceId.uuidString)",
+                    selected: false,
+                    directory: nil,
+                    listRevision: 1,
+                    nativeOrder: 0,
+                    pinned: false,
+                    locked: false,
+                    customColor: nil,
+                    panelCount: 0,
+                    pullRequestCount: 0,
+                    stalePullRequestCount: 0
+                ),
+                derived: DerivedWorkspaceState(
+                    status: "ready",
+                    priorityScore: nil,
+                    rankReason: nil,
+                    nextAction: nil,
+                    userAttentionNeeded: 0
+                ),
+                digest: nil,
+                freshness: ContextFreshness(
+                    providers: [
+                        ProviderFreshness(
+                            providerId: providerId,
+                            lastCollectedAt: job.enqueuedAt,
+                            ttlSeconds: 120,
+                            stale: false,
+                            error: nil,
+                            confidence: 1
+                        ),
+                    ],
+                    overallConfidence: 1
+                )
+            )
+        }
+
+        func requestedWorkspaceIds() -> [UUID] {
+            jobs.map(\.workspaceId)
+        }
+    }
+
+    private actor ProviderConcurrencyProbe {
+        private var activeCount = 0
+        private var maxActive = 0
+
+        func begin() {
+            activeCount += 1
+            maxActive = max(maxActive, activeCount)
+        }
+
+        func end() {
+            activeCount -= 1
+        }
+
+        func maxActiveCount() -> Int {
+            maxActive
+        }
+    }
+
+    private actor TrackingWorkspaceSnapshotProvider: WorkspaceSnapshotProviding {
+        nonisolated let providerId: String
+        private let probe: ProviderConcurrencyProbe
+        private let delayNanoseconds: UInt64
+
+        init(
+            providerId: String,
+            probe: ProviderConcurrencyProbe,
+            delayNanoseconds: UInt64 = 10_000_000
+        ) {
+            self.providerId = providerId
+            self.probe = probe
+            self.delayNanoseconds = delayNanoseconds
+        }
+
+        func snapshot(for job: ContextRefreshJob) async throws -> WorkspaceSnapshot {
+            await probe.begin()
+            do {
+                try await Task.sleep(nanoseconds: delayNanoseconds)
+                await probe.end()
+                return Self.snapshot(providerId: providerId, job: job)
+            } catch {
+                await probe.end()
+                throw error
+            }
+        }
+
+        nonisolated static func snapshot(
+            providerId: String,
+            job: ContextRefreshJob
+        ) -> WorkspaceSnapshot {
+            WorkspaceSnapshot(
+                workspaceId: job.workspaceId,
+                version: 1,
+                updatedAt: job.enqueuedAt,
+                context: NormalizedWorkspaceContext(
+                    title: providerId,
+                    selected: false,
+                    directory: nil,
+                    listRevision: 1,
+                    nativeOrder: 0,
+                    pinned: false,
+                    locked: false,
+                    customColor: nil,
+                    panelCount: 0,
+                    pullRequestCount: 0,
+                    stalePullRequestCount: 0
+                ),
+                derived: DerivedWorkspaceState(
+                    status: "ready",
+                    priorityScore: nil,
+                    rankReason: nil,
+                    nextAction: nil,
+                    userAttentionNeeded: 0
+                ),
+                digest: nil,
+                freshness: ContextFreshness(
+                    providers: [
+                        ProviderFreshness(
+                            providerId: providerId,
+                            lastCollectedAt: job.enqueuedAt,
+                            ttlSeconds: 120,
+                            stale: false,
+                            error: nil,
+                            confidence: 1
+                        ),
+                    ],
+                    overallConfidence: 1
+                )
+            )
+        }
+    }
+
+    private actor SlowWorkspaceSnapshotProvider: WorkspaceSnapshotProviding {
+        nonisolated let providerId = "slow"
+
+        func snapshot(for job: ContextRefreshJob) async throws -> WorkspaceSnapshot {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            return TrackingWorkspaceSnapshotProvider.snapshot(providerId: providerId, job: job)
+        }
+    }
+
+    private actor ReplayWorkspaceSnapshotProvider: WorkspaceSnapshotProviding {
+        nonisolated let providerId = "agent_session"
+
+        private var versionsByWorkspaceId: [UUID: Int] = [:]
+
+        func snapshot(for job: ContextRefreshJob) async throws -> WorkspaceSnapshot {
+            let version = (versionsByWorkspaceId[job.workspaceId] ?? 0) + 1
+            versionsByWorkspaceId[job.workspaceId] = version
+            let status = job.payload["status"] ?? "running"
+            let priorityScore = Self.double(job.payload["priorityScore"])
+            let userAttentionNeeded = Self.double(job.payload["userAttentionNeeded"])
+                ?? min(max((priorityScore ?? 0) / 100, 0), 1)
+            let nativeOrder = Self.int(job.payload["nativeOrder"]) ?? 0
+            let title = job.payload["title"] ?? "workspace-\(job.workspaceId.uuidString)"
+            let rankReason = Self.nonEmpty(job.payload["rankReason"])
+            let nextAction = Self.nonEmpty(job.payload["nextAction"])
+            let digestSummary = Self.nonEmpty(job.payload["summary"])
+
+            return WorkspaceSnapshot(
+                workspaceId: job.workspaceId,
+                version: version,
+                updatedAt: job.enqueuedAt,
+                context: NormalizedWorkspaceContext(
+                    title: title,
+                    selected: false,
+                    directory: Self.nonEmpty(job.payload["directory"]),
+                    listRevision: version,
+                    nativeOrder: nativeOrder,
+                    pinned: false,
+                    locked: false,
+                    customColor: nil,
+                    panelCount: Self.int(job.payload["panelCount"]) ?? 0,
+                    pullRequestCount: Self.int(job.payload["pullRequestCount"]) ?? 0,
+                    stalePullRequestCount: Self.int(job.payload["stalePullRequestCount"]) ?? 0
+                ),
+                derived: DerivedWorkspaceState(
+                    status: status,
+                    priorityScore: priorityScore,
+                    rankReason: rankReason,
+                    nextAction: nextAction,
+                    userAttentionNeeded: userAttentionNeeded
+                ),
+                digest: digestSummary.map {
+                    WorkspaceDigest(summary: $0, generatedAt: job.enqueuedAt)
+                },
+                freshness: ContextFreshness(
+                    providers: [
+                        ProviderFreshness(
+                            providerId: providerId,
+                            lastCollectedAt: job.enqueuedAt,
+                            ttlSeconds: 120,
+                            stale: false,
+                            error: nil,
+                            confidence: 1
+                        ),
+                    ],
+                    overallConfidence: 1
+                )
+            )
+        }
+
+        private nonisolated static func double(_ value: String?) -> Double? {
+            value.flatMap(Double.init)
+        }
+
+        private nonisolated static func int(_ value: String?) -> Int? {
+            value.flatMap(Int.init)
+        }
+
+        private nonisolated static func nonEmpty(_ value: String?) -> String? {
+            guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !value.isEmpty else {
+                return nil
+            }
+            return value
+        }
+    }
+
+    private actor RecordingActionExecutor: CmuxActionExecutor {
+        private var intentIds: [UUID] = []
+
+        func execute(_ intent: ActionIntent) async throws -> ActionExecutionResult {
+            intentIds.append(intent.id)
+            return ActionExecutionResult(payload: ["executed": intent.kind.rawValue])
+        }
+
+        func executedIntentIds() -> [UUID] {
+            intentIds
+        }
+    }
+
+    private actor RecordingActionAuditLog: ActionAuditLog {
+        private var reviewedIds: [UUID] = []
+        private var executedIds: [UUID] = []
+
+        func recordReview(intent: ActionIntent, result: SemanticReviewResult) async {
+            reviewedIds.append(intent.id)
+        }
+
+        func recordExecuted(intent: ActionIntent, result: ActionExecutionResult) async {
+            executedIds.append(intent.id)
+        }
+
+        func reviewedIntentIds() -> [UUID] {
+            reviewedIds
+        }
+
+        func executedIntentIds() -> [UUID] {
+            executedIds
+        }
     }
 
     func testSemanticRouterDefaultTimeoutIsTwelveSeconds() {
@@ -293,6 +3262,105 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         XCTAssertTrue(route.allowedTools.contains("memory_query"))
         XCTAssertTrue(route.allowedTools.contains("memory_write_candidate"))
         XCTAssertFalse(route.allowedTools.contains("sprite_memory_write"))
+    }
+
+    func testSpriteAssistantComponentSemanticSnapshotMatchesBaseline() throws {
+        let baselineURL = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("Fixtures/SpriteAssistant/component-semantic-snapshot.txt")
+        let expected = try String(contentsOf: baselineURL, encoding: .utf8)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        XCTAssertEqual(
+            Self.spriteAssistantComponentSemanticSnapshot(),
+            expected
+        )
+    }
+
+    private static func spriteAssistantComponentSemanticSnapshot() -> String {
+        let assistantMessage = SortAssistantMessage(
+            id: UUID(uuidString: "11111111-1111-1111-1111-111111111111")!,
+            kind: .assistant,
+            text: """
+            CI failed on the API workspace.
+            The failing check is unit-tests.
+            The agent has already produced a patch.
+            Review the diff before applying.
+            Provider freshness is stale for github_context.
+            Use the snapshot age warning in the assistant panel.
+            This final line keeps the bubble collapsed by default.
+            """
+        )
+        let userMessage = SortAssistantMessage(
+            id: UUID(uuidString: "22222222-2222-2222-2222-222222222222")!,
+            kind: .user,
+            text: "What needs attention?"
+        )
+        let suggestion = ProactiveSuggestion(
+            id: UUID(uuidString: "33333333-3333-3333-3333-333333333333")!,
+            workspaceId: UUID(uuidString: "44444444-4444-4444-4444-444444444444")!,
+            type: ProactiveSuggestionTypes.reviewAgentWaitingUser,
+            title: "Review agent output",
+            reason: "Agent is waiting for your decision.",
+            confidence: 0.92,
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        let confirmation = SortAssistantSemanticActionConfirmation(
+            id: UUID(uuidString: "55555555-5555-5555-5555-555555555555")!,
+            title: "Review before accepting suggestion",
+            message: "This changes the selected workspace.",
+            reasons: [
+                "Snapshot evidence is stale",
+                "Action targets a different workspace",
+            ],
+            actionName: "Accept suggestion"
+        )
+
+        let lines = [
+            "SortAssistant component semantic snapshot v1",
+            "",
+            "message-row assistant",
+            "  identifier: \(SortAssistantAccessibility.messageRow(assistantMessage.id))",
+            "  kind: assistant",
+            "  collapsible: \(SortAssistantMessageCollapseRules.isCollapsible(assistantMessage))",
+            "  collapsedLineLimit: \(SortAssistantMessageCollapseRules.lineLimit)",
+            "  copyAction: true",
+            "  expandAction: true",
+            "  text: \(assistantMessage.text.replacingOccurrences(of: "\n", with: " | "))",
+            "",
+            "message-row user",
+            "  identifier: \(SortAssistantAccessibility.messageRow(userMessage.id))",
+            "  kind: user",
+            "  collapsible: \(SortAssistantMessageCollapseRules.isCollapsible(userMessage))",
+            "  copyAction: false",
+            "  expandAction: false",
+            "  text: \(userMessage.text)",
+            "",
+            "suggestion-card",
+            "  listIdentifier: \(SortAssistantAccessibility.suggestionList)",
+            "  cardIdentifier: \(SortAssistantAccessibility.suggestionCard(suggestion))",
+            "  openIdentifier: \(SortAssistantAccessibility.suggestionOpenButton(suggestion))",
+            "  dismissIdentifier: \(SortAssistantAccessibility.suggestionDismissButton(suggestion))",
+            "  type: \(suggestion.type)",
+            "  title: \(suggestion.title)",
+            "  reason: \(suggestion.reason ?? "")",
+            String(format: "  confidence: %.2f", suggestion.confidence),
+            "",
+            "semantic-confirmation",
+            "  identifier: \(SortAssistantAccessibility.semanticActionConfirmation)",
+            "  confirmIdentifier: \(SortAssistantAccessibility.semanticActionConfirmButton)",
+            "  cancelIdentifier: \(SortAssistantAccessibility.semanticActionCancelButton)",
+            "  title: \(confirmation.title)",
+            "  message: \(confirmation.message)",
+            "  actionName: \(confirmation.actionName)",
+            "  reasons: \(confirmation.reasons.joined(separator: " | "))",
+            "",
+            "input",
+            "  containerIdentifier: \(SortAssistantAccessibility.input)",
+            "  fieldIdentifier: \(SortAssistantAccessibility.inputField)",
+            "  sendIdentifier: \(SortAssistantAccessibility.sendButton)",
+        ]
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -3866,6 +6934,7 @@ final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
     private var hostView: SortAssistantFloatingPanelHostView!
     private var tabManager: TabManager!
     private var workspaceTabStore: WorkspaceTabStore!
+    private var layoutRevision = 0
 
     override func setUp() {
         super.setUp()
@@ -3901,8 +6970,11 @@ final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
     override func tearDown() {
         if hostView != nil {
             hostView.endDrag()
+            layoutRevision += 1
             hostView.update(
                 isPresented: false,
+                layoutRevision: layoutRevision,
+                focusRevision: 0,
                 coordinator: SortAssistantCoordinator.shared,
                 tabManager: tabManager,
                 workspaceTabStore: workspaceTabStore
@@ -3919,8 +6991,11 @@ final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
     }
 
     private func present() {
+        layoutRevision += 1
         hostView.update(
             isPresented: true,
+            layoutRevision: layoutRevision,
+            focusRevision: 0,
             coordinator: SortAssistantCoordinator.shared,
             tabManager: tabManager,
             workspaceTabStore: workspaceTabStore
@@ -4054,8 +7129,11 @@ final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
         // Replace the parent window's contentView with a flipped wrapper that
         // mirrors the real cmux main window's NSHostingView setup.
         hostView.endDrag()
+        layoutRevision += 1
         hostView.update(
             isPresented: false,
+            layoutRevision: layoutRevision,
+            focusRevision: 0,
             coordinator: SortAssistantCoordinator.shared,
             tabManager: tabManager,
             workspaceTabStore: workspaceTabStore

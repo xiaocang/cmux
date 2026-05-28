@@ -3607,6 +3607,228 @@ final class UITestLaunchManifestTests: XCTestCase {
     }
 }
 
+final class CmuxRuntimeModeTests: XCTestCase {
+    func testUITestLaunchArgumentsProduceDeterministicEnvironmentOverrides() {
+        let overrides = CmuxRuntimeMode.environmentOverrides(from: [
+            "cmux",
+            "--cmux-ui-test",
+            "--fixture", "assistant-context-agent-basic",
+            "--disable-network",
+            "--disable-sparkle",
+            "--disable-real-llm",
+            "--disable-auto-update",
+            "--reset-test-state",
+            "--fixed-now", "2026-05-23T10:00:00Z",
+            "--appearance", "dark",
+        ])
+
+        XCTAssertEqual(overrides["CMUX_UI_TEST_MODE"], "1")
+        XCTAssertEqual(overrides["CMUX_TEST_MODE"], "1")
+        XCTAssertEqual(overrides["CMUX_UI_TEST_FIXTURE"], "assistant-context-agent-basic")
+        XCTAssertEqual(overrides["CMUX_DISABLE_NETWORK"], "1")
+        XCTAssertEqual(overrides["CMUX_DISABLE_SPARKLE"], "1")
+        XCTAssertEqual(overrides["CMUX_DISABLE_REAL_LLM"], "1")
+        XCTAssertEqual(overrides["CMUX_DISABLE_AUTO_UPDATE"], "1")
+        XCTAssertEqual(overrides["CMUX_DISABLE_ANIMATIONS"], "1")
+        XCTAssertEqual(overrides["CMUX_RESET_TEST_STATE"], "1")
+        XCTAssertEqual(overrides["CMUX_FAKE_CONTEXT_AGENT"], "1")
+        XCTAssertEqual(overrides["CMUX_FAKE_ASSISTANT"], "1")
+        XCTAssertEqual(overrides["CMUX_FIXED_NOW"], "2026-05-23T10:00:00Z")
+        XCTAssertEqual(overrides["CMUX_UI_TEST_APPEARANCE"], "dark")
+    }
+
+    func testCurrentRuntimeModeMergesEnvironmentAndLaunchArguments() {
+        let mode = CmuxRuntimeMode.current(
+            arguments: [
+                "cmux",
+                "--cmux-ui-test",
+                "--fixture", "assistant-context-agent-basic",
+            ],
+            environment: [
+                "CMUX_DISABLE_REAL_LLM": "1",
+                "CMUX_DISABLE_SPARKLE": "1",
+                "CMUX_FIXED_NOW": "2026-05-23T10:00:00Z",
+            ]
+        )
+
+        XCTAssertTrue(mode.isUITest)
+        XCTAssertEqual(mode.fixtureName, "assistant-context-agent-basic")
+        XCTAssertFalse(mode.disableNetwork)
+        XCTAssertTrue(mode.disableSparkle)
+        XCTAssertTrue(mode.disableRealLLM)
+        XCTAssertTrue(mode.disableAutoUpdate)
+        XCTAssertTrue(mode.disableAnimations)
+        XCTAssertFalse(mode.resetTestState)
+        XCTAssertTrue(mode.fakeContextAgent)
+        XCTAssertTrue(mode.fakeAssistant)
+        XCTAssertEqual(
+            mode.fixedNow,
+            ISO8601DateFormatter().date(from: "2026-05-23T10:00:00Z")
+        )
+        XCTAssertEqual(mode.appearanceMode, "light")
+    }
+
+    func testUITestAppearanceEnvironmentCanOverrideDefaultAppearance() {
+        let mode = CmuxRuntimeMode.current(
+            arguments: ["cmux", "--cmux-ui-test"],
+            environment: ["CMUX_UI_TEST_APPEARANCE": "dark"]
+        )
+
+        XCTAssertEqual(mode.appearanceMode, "dark")
+    }
+
+    func testResetTestStateClearsDefaultsOnlyForUITestResetMode() {
+        let suiteName = "CmuxRuntimeModeTests.reset.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        defaults.set("old-model", forKey: "digest.model")
+
+        XCTAssertFalse(CmuxRuntimeTestStateReset.applyIfRequested(
+            mode: runtimeMode(isUITest: true, resetTestState: false),
+            defaults: defaults,
+            domainName: suiteName
+        ))
+        XCTAssertEqual(defaults.string(forKey: "digest.model"), "old-model")
+
+        XCTAssertFalse(CmuxRuntimeTestStateReset.applyIfRequested(
+            mode: runtimeMode(isUITest: false, resetTestState: true),
+            defaults: defaults,
+            domainName: suiteName
+        ))
+        XCTAssertEqual(defaults.string(forKey: "digest.model"), "old-model")
+
+        XCTAssertTrue(CmuxRuntimeTestStateReset.applyIfRequested(
+            mode: runtimeMode(isUITest: true, resetTestState: true),
+            defaults: defaults,
+            domainName: suiteName
+        ))
+        XCTAssertNil(defaults.object(forKey: "digest.model"))
+    }
+
+    func testUITestAppearanceOverrideAppliesOnlyForUITestMode() {
+        let suiteName = "CmuxRuntimeModeTests.appearance.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertFalse(CmuxRuntimeAppearanceOverride.applyIfRequested(
+            mode: runtimeMode(isUITest: false, resetTestState: false, appearanceMode: "light"),
+            defaults: defaults
+        ))
+        XCTAssertNil(defaults.string(forKey: AppearanceSettings.appearanceModeKey))
+
+        XCTAssertTrue(CmuxRuntimeAppearanceOverride.applyIfRequested(
+            mode: runtimeMode(isUITest: true, resetTestState: false, appearanceMode: "light"),
+            defaults: defaults
+        ))
+        XCTAssertEqual(defaults.string(forKey: AppearanceSettings.appearanceModeKey), "light")
+    }
+
+    @MainActor
+    func testUITestWindowSizeRequiresUITestModeAndValidDimensions() {
+        let parsed = AppDelegate.uiTestMainWindowContentSize(environment: [
+            "CMUX_UI_TEST_MODE": "1",
+            "CMUX_UI_TEST_WINDOW_SIZE": "1280x900",
+        ])
+
+        guard let parsed else {
+            XCTFail("Expected valid UI test window size")
+            return
+        }
+
+        XCTAssertEqual(parsed.width, 1280)
+        XCTAssertEqual(parsed.height, 900)
+        XCTAssertNil(AppDelegate.uiTestMainWindowContentSize(environment: [
+            "CMUX_UI_TEST_WINDOW_SIZE": "1280x900",
+        ]))
+        XCTAssertNil(AppDelegate.uiTestMainWindowContentSize(environment: [
+            "CMUX_UI_TEST_MODE": "1",
+            "CMUX_UI_TEST_WINDOW_SIZE": "100x100",
+        ]))
+        XCTAssertNil(AppDelegate.uiTestMainWindowContentSize(environment: [
+            "CMUX_UI_TEST_MODE": "1",
+            "CMUX_UI_TEST_WINDOW_SIZE": "wide",
+        ]))
+    }
+
+    func testAssistantContextAgentFixtureDefinesDeterministicWorkspaces() {
+        let fixture = CmuxUITestWorkspaceFixture.fixture(named: "assistant-context-agent-basic")
+
+        XCTAssertEqual(fixture?.name, "assistant-context-agent-basic")
+        XCTAssertEqual(fixture?.entries.map(\.title), [
+            "API fix",
+            "CI failure",
+            "Refactor agent",
+            "Ready to merge",
+        ])
+        XCTAssertEqual(fixture?.entries.map(\.status), [
+            "waiting_user",
+            "ci_failed",
+            "running",
+            "ready_to_merge",
+        ])
+        XCTAssertEqual(fixture?.entries.last?.pullRequest?.isStale, true)
+        XCTAssertEqual(fixture?.entries.last?.pullRequest?.status, "open")
+    }
+
+    func testUITestWorkspaceFixtureRequiresUITestRuntimeMode() {
+        let disabled = CmuxUITestWorkspaceFixture.current(mode: CmuxRuntimeMode(
+            isUITest: false,
+            fixtureName: "assistant-context-agent-basic",
+            disableNetwork: false,
+            disableSparkle: false,
+            disableRealLLM: false,
+            disableAutoUpdate: false,
+            disableAnimations: false,
+            resetTestState: false,
+            fakeContextAgent: false,
+            fakeAssistant: false,
+            fixedNow: nil,
+            appearanceMode: nil
+        ))
+        let enabled = CmuxUITestWorkspaceFixture.current(mode: CmuxRuntimeMode(
+            isUITest: true,
+            fixtureName: "assistant-context-agent-basic",
+            disableNetwork: true,
+            disableSparkle: true,
+            disableRealLLM: true,
+            disableAutoUpdate: true,
+            disableAnimations: true,
+            resetTestState: true,
+            fakeContextAgent: true,
+            fakeAssistant: true,
+            fixedNow: nil,
+            appearanceMode: "light"
+        ))
+
+        XCTAssertNil(disabled)
+        XCTAssertEqual(enabled?.entries.count, 4)
+    }
+
+    private func runtimeMode(
+        isUITest: Bool,
+        resetTestState: Bool,
+        appearanceMode: String? = nil
+    ) -> CmuxRuntimeMode {
+        CmuxRuntimeMode(
+            isUITest: isUITest,
+            fixtureName: nil,
+            disableNetwork: false,
+            disableSparkle: false,
+            disableRealLLM: false,
+            disableAutoUpdate: false,
+            disableAnimations: false,
+            resetTestState: resetTestState,
+            fakeContextAgent: false,
+            fakeAssistant: false,
+            fixedNow: nil,
+            appearanceMode: appearanceMode
+        )
+    }
+}
+
 final class PostHogAnalyticsPropertiesTests: XCTestCase {
     func testDailyActivePropertiesIncludeVersionAndBuild() {
         let properties = PostHogAnalytics.dailyActiveProperties(

@@ -5,6 +5,8 @@ on:
     branches:
       - main
   pull_request:
+  schedule:
+    - cron: "17 10 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -29,6 +31,12 @@ jobs:
 
       - name: Validate cmux scheme test configuration
         run: ./tests/test_ci_scheme_testaction_debug.sh
+
+      - name: Validate UI E2E artifact capture
+        run: ./tests/test_ci_e2e_ui_artifacts.sh
+
+      - name: Validate Sprite Assistant visual baseline guard
+        run: ./tests/test_ci_sprite_assistant_visual_baseline.sh
 
       - name: Validate GhosttyKit checksum verification
         run: ./tests/test_ci_ghosttykit_checksum_verification.sh
@@ -153,6 +161,43 @@ jobs:
           bun test tests/db-schema.test.ts
           bun test tests/drizzle-effect.test.ts
           bun test tests/vm-db-read-model.test.ts
+
+  swift-package-tests:
+    runs-on: warp-macos-15-arm64-6x
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Select Xcode
+        run: |
+          set -euo pipefail
+          if [ -d "/Applications/Xcode.app/Contents/Developer" ]; then
+            XCODE_DIR="/Applications/Xcode.app/Contents/Developer"
+          else
+            XCODE_APP="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort | tail -n 1 || true)"
+            if [ -n "$XCODE_APP" ]; then
+              XCODE_DIR="$XCODE_APP/Contents/Developer"
+            else
+              echo "No Xcode.app found under /Applications" >&2
+              exit 1
+            fi
+          fi
+          echo "DEVELOPER_DIR=$XCODE_DIR" >> "$GITHUB_ENV"
+          export DEVELOPER_DIR="$XCODE_DIR"
+          swift --version
+
+      - name: Run extracted Swift package tests
+        run: |
+          set -euo pipefail
+          for package in \
+            Packages/CMUXActions \
+            Packages/CMUXContracts \
+            Packages/CMUXOrchestration \
+            Packages/CMUXContextAgent \
+            Packages/CMUXAssistant; do
+            swift test --package-path "$package"
+          done
 
   tests:
     runs-on: warp-macos-15-arm64-6x
@@ -371,6 +416,7 @@ jobs:
           CMUX_CLI_BIN="$CLI_BIN" python3 tests/test_cli_version_memory_guard.py
           CMUX_CLI_BIN="$CLI_BIN" python3 tests/test_cli_contract_help.py
           CMUX_CLI_BIN="$CLI_BIN" python3 tests/test_cli_layout_focus_contract.py
+          CMUX_CLI_BIN="$CLI_BIN" python3 tests/test_cli_sprite_mcp_tool_policy.py
           CMUX_CLI_BIN="$CLI_BIN" python3 tests/test_cli_socket_operation_deadline.py
           CMUX_CLI_BIN="$CLI_BIN" python3 tests/test_cli_omo_openagent_plugin_migration.py
           CMUX_CLI_BIN="$CLI_BIN" python3 tests/test_cli_socket_autodiscovery.py
@@ -765,6 +811,56 @@ jobs:
             exit 1
           fi
           echo "Persistent virtual display ready: ID=$(cat "$VDISPLAY_ID_PATH")"
+
+      - name: Run Sprite Assistant fixture UI regression
+        run: |
+          set -euo pipefail
+          SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
+          RESULT_BUNDLE="/tmp/cmux-sprite-assistant-ui.xcresult"
+          SCREENSHOT_DIR="$HOME/Library/Containers/com.cmuxterm.appuitests.xctrunner/Data/tmp/cmux-sprite-assistant-screenshots"
+          BASELINE_DIR="$PWD/cmuxUITests/__Screenshots__/baseline"
+          rm -rf "$RESULT_BUNDLE"
+          rm -rf "$SCREENSHOT_DIR"
+          mkdir -p "$SCREENSHOT_DIR"
+          cleanup() {
+            pkill -x "cmux DEV" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+
+          CMUX_UI_TEST_BASELINE_DIR="$BASELINE_DIR" \
+          CMUX_UI_TEST_SCREENSHOT_MAX_MISMATCH="0.05" \
+            xcodebuild -project cmux.xcodeproj -scheme cmux -configuration Debug \
+            -clonedSourcePackagesDirPath "$SOURCE_PACKAGES_DIR" \
+            -disableAutomaticPackageResolution \
+            -destination "platform=macOS" \
+            -maximum-test-execution-time-allowance 240 \
+            -resultBundlePath "$RESULT_BUNDLE" \
+            -only-testing:cmuxUITests/SpriteAssistantUITests \
+            test-without-building
+
+      - name: Validate Sprite Assistant screenshot artifacts
+        run: |
+          set -euo pipefail
+          SCREENSHOT_DIR="$HOME/Library/Containers/com.cmuxterm.appuitests.xctrunner/Data/tmp/cmux-sprite-assistant-screenshots"
+          python3 tests/validate_sprite_assistant_screenshots.py "$SCREENSHOT_DIR" --require-baseline
+
+      - name: Upload Sprite Assistant UI result bundle
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sprite-assistant-ui-xcresult
+          path: /tmp/cmux-sprite-assistant-ui.xcresult
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Sprite Assistant UI screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sprite-assistant-ui-screenshots
+          path: ~/Library/Containers/com.cmuxterm.appuitests.xctrunner/Data/tmp/cmux-sprite-assistant-screenshots
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Run display resolution churn UI regression
         run: |

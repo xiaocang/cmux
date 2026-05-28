@@ -216,12 +216,14 @@ final class SidebarTabItemPresentationResolutionPolicyTests: XCTestCase {
         let frozen = SidebarTabItemPresentationSnapshot(
             tabId: tabId,
             unreadCount: 0,
+            hasUnreadMonitorNotification: false,
             latestNotificationText: nil,
             showsModifierShortcutHints: true
         )
         let live = SidebarTabItemPresentationSnapshot(
             tabId: tabId,
             unreadCount: 1,
+            hasUnreadMonitorNotification: true,
             latestNotificationText: "done",
             showsModifierShortcutHints: false
         )
@@ -232,6 +234,7 @@ final class SidebarTabItemPresentationResolutionPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(resolved.unreadCount, 1)
+        XCTAssertTrue(resolved.hasUnreadMonitorNotification)
         XCTAssertEqual(resolved.latestNotificationText, "done")
         XCTAssertTrue(resolved.showsModifierShortcutHints)
     }
@@ -240,6 +243,7 @@ final class SidebarTabItemPresentationResolutionPolicyTests: XCTestCase {
         let live = SidebarTabItemPresentationSnapshot(
             tabId: UUID(),
             unreadCount: 2,
+            hasUnreadMonitorNotification: true,
             latestNotificationText: "live",
             showsModifierShortcutHints: true
         )
@@ -256,12 +260,14 @@ final class SidebarTabItemPresentationResolutionPolicyTests: XCTestCase {
         let frozen = SidebarTabItemPresentationSnapshot(
             tabId: UUID(),
             unreadCount: 0,
+            hasUnreadMonitorNotification: false,
             latestNotificationText: nil,
             showsModifierShortcutHints: true
         )
         let live = SidebarTabItemPresentationSnapshot(
             tabId: UUID(),
             unreadCount: 1,
+            hasUnreadMonitorNotification: true,
             latestNotificationText: "done",
             showsModifierShortcutHints: false
         )
@@ -272,6 +278,7 @@ final class SidebarTabItemPresentationResolutionPolicyTests: XCTestCase {
         )
 
         XCTAssertEqual(resolved.unreadCount, 1)
+        XCTAssertTrue(resolved.hasUnreadMonitorNotification)
         XCTAssertEqual(resolved.latestNotificationText, "done")
         XCTAssertFalse(resolved.showsModifierShortcutHints)
     }

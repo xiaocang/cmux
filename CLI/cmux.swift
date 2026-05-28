@@ -5561,7 +5561,7 @@ struct CMUXCLI {
         case "ping":
             return [:]
         case "tools/list":
-            return ["tools": spriteMCPTools()]
+            return ["tools": filteredSpriteMCPTools()]
         case "prompts/list":
             return ["prompts": []]
         case "resources/list":
@@ -5572,6 +5572,9 @@ struct CMUXCLI {
             }
             guard spriteMCPToolNames.contains(toolName) else {
                 throw CLIError(message: "Unknown sprite assistant MCP tool: \(toolName)")
+            }
+            guard isSpriteMCPToolAllowed(toolName) else {
+                throw CLIError(message: "Sprite assistant MCP tool is not allowed for this route: \(toolName)")
             }
             let arguments = params["arguments"] as? [String: Any] ?? [:]
 #if DEBUG
@@ -5653,6 +5656,13 @@ struct CMUXCLI {
             "list_state",
             "list_lock",
             "list_pin",
+            "assistant_working_context_get",
+            "workspace_snapshot_get",
+            "context_freshness_get",
+            "suggestions_active_get",
+            "suggestion_accept",
+            "suggestion_dismiss",
+            "ranking_latest_get",
             "context_collect",
             "repository_context",
             "ghpr_context",
@@ -5667,6 +5677,69 @@ struct CMUXCLI {
             "workspace_digest_refresh",
             "workspace_digest_progress",
         ])
+    }
+
+    private var spriteMCPDebugOnlyContextToolNames: Set<String> {
+        Set([
+            "context_collect",
+            "repository_context",
+            "github_context",
+            "github_pr_context",
+            "ghpr_context",
+            "ghpr_status",
+            "ghpr_refresh",
+            "sort_context",
+            "workspace_digest_progress",
+            "workspace_digest_refresh",
+        ])
+    }
+
+    private var spriteMCPProductionDefaultToolNames: Set<String> {
+        spriteMCPToolNames.subtracting(spriteMCPDebugOnlyContextToolNames)
+    }
+
+    private var spriteMCPDebugContextToolsEnabled: Bool {
+        ProcessInfo.processInfo.environment["CMUX_SPRITE_ENABLE_DEBUG_CONTEXT_TOOLS"] == "1"
+    }
+
+    private var spriteMCPAllowedToolNames: Set<String> {
+        guard let raw = ProcessInfo.processInfo.environment["CMUX_SPRITE_ALLOWED_TOOLS"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !raw.isEmpty else {
+            return spriteMCPDebugContextToolsEnabled
+                ? spriteMCPToolNames
+                : spriteMCPProductionDefaultToolNames
+        }
+        let names = raw
+            .split { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" }
+            .map { String($0) }
+            .compactMap(normalizedSpriteMCPToolName)
+        let requestedTools = Set(names).intersection(spriteMCPToolNames)
+        guard spriteMCPDebugContextToolsEnabled else {
+            return requestedTools.subtracting(spriteMCPDebugOnlyContextToolNames)
+        }
+        return requestedTools
+    }
+
+    private func normalizedSpriteMCPToolName(_ raw: String) -> String? {
+        var name = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return nil }
+        if name.hasPrefix("mcp__cmux_sprite__") {
+            name.removeFirst("mcp__cmux_sprite__".count)
+        }
+        return name.isEmpty ? nil : name
+    }
+
+    private func isSpriteMCPToolAllowed(_ toolName: String) -> Bool {
+        spriteMCPAllowedToolNames.contains(toolName)
+    }
+
+    private func filteredSpriteMCPTools() -> [[String: Any]] {
+        let allowed = spriteMCPAllowedToolNames
+        return spriteMCPTools().filter { tool in
+            guard let name = tool["name"] as? String else { return false }
+            return allowed.contains(name)
+        }
     }
 
     private func spriteMCPSocketMethod(for toolName: String) -> String {
@@ -5701,6 +5774,20 @@ struct CMUXCLI {
             return "list.lock"
         case "list_pin":
             return "list.pin"
+        case "assistant_working_context_get":
+            return "assistant.working_context.get"
+        case "workspace_snapshot_get":
+            return "workspace.snapshot.get"
+        case "context_freshness_get":
+            return "context.freshness.get"
+        case "suggestions_active_get":
+            return "suggestions.active.get"
+        case "suggestion_accept":
+            return "suggestion.accept"
+        case "suggestion_dismiss":
+            return "suggestion.dismiss"
+        case "ranking_latest_get":
+            return "ranking.latest.get"
         case "context_collect":
             return "plugin.context.collect"
         case "ghpr_context", "github_pr_context":
@@ -5712,11 +5799,11 @@ struct CMUXCLI {
         case "github_context":
             return "github.context"
         case "workspace_color_get":
-            return "workspace.color.get"
+            return "sprite.workspace_color.get"
         case "workspace_color_set":
-            return "workspace.color.set"
+            return "sprite.workspace_color.set"
         case "workspace_color_clear":
-            return "workspace.color.clear"
+            return "sprite.workspace_color.clear"
         case "workspace_digest_get":
             return "plugin.digest.get"
         case "workspace_digest_refresh":
@@ -5737,6 +5824,8 @@ struct CMUXCLI {
              "sprite_memory_forget":
             addDefaultWorkspaceDirectory(to: &params)
         case "context_collect",
+             "workspace_snapshot_get",
+             "context_freshness_get",
              "ghpr_context",
              "github_pr_context",
              "ghpr_refresh",
@@ -5880,6 +5969,51 @@ struct CMUXCLI {
             spriteMCPTool(
                 name: "list_state",
                 description: "Return current workspace sidebar list state, revision, pinned flags, locked flags, and customColor/custom_color values.",
+                properties: [:]
+            ),
+            spriteMCPTool(
+                name: "assistant_working_context_get",
+                description: "Return the assistant's cached working context: workspace snapshots, freshness, active suggestions, and latest ranking maintained by cmux.",
+                properties: [:]
+            ),
+            spriteMCPTool(
+                name: "workspace_snapshot_get",
+                description: "Return the cached ContextAgent-style snapshot for the current or specified workspace. This is read-only and does not refresh providers.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "context_freshness_get",
+                description: "Return cached provider freshness for the current or specified workspace. This is read-only and does not refresh providers.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active sprite workspace."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "suggestions_active_get",
+                description: "Return active cached proactive suggestions for the sprite assistant.",
+                properties: [:]
+            ),
+            spriteMCPTool(
+                name: "suggestion_accept",
+                description: "Accept an active proactive suggestion by id. Workspace suggestions switch to the suggested workspace through the action gateway.",
+                properties: [
+                    "suggestionId": stringSchema(description: "Active suggestion UUID from suggestions_active_get."),
+                ],
+                required: ["suggestionId"]
+            ),
+            spriteMCPTool(
+                name: "suggestion_dismiss",
+                description: "Dismiss an active proactive suggestion by id so it stays hidden until the underlying snapshot changes.",
+                properties: [
+                    "suggestionId": stringSchema(description: "Active suggestion UUID from suggestions_active_get."),
+                ],
+                required: ["suggestionId"]
+            ),
+            spriteMCPTool(
+                name: "ranking_latest_get",
+                description: "Return the latest cached workspace ranking snapshot when available.",
                 properties: [:]
             ),
             spriteMCPTool(

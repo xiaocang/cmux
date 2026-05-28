@@ -300,3 +300,275 @@ enum UITestLaunchManifest {
         return rawPath.isEmpty ? nil : rawPath
     }
 }
+
+struct CmuxRuntimeMode: Equatable, Sendable {
+    static let uiTestArgument = "--cmux-ui-test"
+    static let fixtureArgument = "--fixture"
+    static let disableNetworkArgument = "--disable-network"
+    static let disableSparkleArgument = "--disable-sparkle"
+    static let disableRealLLMArgument = "--disable-real-llm"
+    static let disableAutoUpdateArgument = "--disable-auto-update"
+    static let disableAnimationsArgument = "--disable-animations"
+    static let resetTestStateArgument = "--reset-test-state"
+    static let fixedNowArgument = "--fixed-now"
+    static let appearanceArgument = "--appearance"
+
+    let isUITest: Bool
+    let fixtureName: String?
+    let disableNetwork: Bool
+    let disableSparkle: Bool
+    let disableRealLLM: Bool
+    let disableAutoUpdate: Bool
+    let disableAnimations: Bool
+    let resetTestState: Bool
+    let fakeContextAgent: Bool
+    let fakeAssistant: Bool
+    let fixedNow: Date?
+    let appearanceMode: String?
+
+    static func current(
+        arguments: [String] = CommandLine.arguments,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> CmuxRuntimeMode {
+        let overrides = environmentOverrides(from: arguments)
+        let fixedNowRaw = overrides["CMUX_FIXED_NOW"] ?? environment["CMUX_FIXED_NOW"]
+        let appearanceRaw = normalizedAppearanceMode(value(after: appearanceArgument, in: arguments))
+            ?? normalizedAppearanceMode(environment["CMUX_UI_TEST_APPEARANCE"])
+            ?? overrides["CMUX_UI_TEST_APPEARANCE"]
+        return CmuxRuntimeMode(
+            isUITest: enabled("CMUX_UI_TEST_MODE", overrides: overrides, environment: environment)
+                || enabled("CMUX_TEST_MODE", overrides: overrides, environment: environment),
+            fixtureName: overrides["CMUX_UI_TEST_FIXTURE"] ?? environment["CMUX_UI_TEST_FIXTURE"],
+            disableNetwork: enabled("CMUX_DISABLE_NETWORK", overrides: overrides, environment: environment),
+            disableSparkle: enabled("CMUX_DISABLE_SPARKLE", overrides: overrides, environment: environment),
+            disableRealLLM: enabled("CMUX_DISABLE_REAL_LLM", overrides: overrides, environment: environment),
+            disableAutoUpdate: enabled("CMUX_DISABLE_AUTO_UPDATE", overrides: overrides, environment: environment)
+                || enabled("CMUX_DISABLE_SPARKLE", overrides: overrides, environment: environment),
+            disableAnimations: enabled("CMUX_DISABLE_ANIMATIONS", overrides: overrides, environment: environment),
+            resetTestState: enabled("CMUX_RESET_TEST_STATE", overrides: overrides, environment: environment),
+            fakeContextAgent: enabled("CMUX_FAKE_CONTEXT_AGENT", overrides: overrides, environment: environment),
+            fakeAssistant: enabled("CMUX_FAKE_ASSISTANT", overrides: overrides, environment: environment),
+            fixedNow: fixedNowRaw.flatMap { fixedNowDate(from: $0) },
+            appearanceMode: normalizedAppearanceMode(appearanceRaw)
+        )
+    }
+
+    static func applyLaunchArgumentsIfPresent(
+        arguments: [String] = CommandLine.arguments,
+        applyEnvironment: (String, String) -> Void = { key, value in
+            setenv(key, value, 1)
+        }
+    ) {
+        for (key, value) in environmentOverrides(from: arguments) {
+            applyEnvironment(key, value)
+        }
+    }
+
+    static func environmentOverrides(from arguments: [String]) -> [String: String] {
+        var overrides: [String: String] = [:]
+        if arguments.contains(uiTestArgument) {
+            overrides["CMUX_UI_TEST_MODE"] = "1"
+            overrides["CMUX_TEST_MODE"] = "1"
+            overrides["CMUX_DISABLE_ANIMATIONS"] = "1"
+            overrides["CMUX_FAKE_CONTEXT_AGENT"] = "1"
+            overrides["CMUX_FAKE_ASSISTANT"] = "1"
+            overrides["CMUX_UI_TEST_APPEARANCE"] = "light"
+        }
+        if arguments.contains(disableNetworkArgument) {
+            overrides["CMUX_DISABLE_NETWORK"] = "1"
+        }
+        if arguments.contains(disableSparkleArgument) {
+            overrides["CMUX_DISABLE_SPARKLE"] = "1"
+            overrides["CMUX_DISABLE_AUTO_UPDATE"] = "1"
+        }
+        if arguments.contains(disableRealLLMArgument) {
+            overrides["CMUX_DISABLE_REAL_LLM"] = "1"
+        }
+        if arguments.contains(disableAutoUpdateArgument) {
+            overrides["CMUX_DISABLE_AUTO_UPDATE"] = "1"
+        }
+        if arguments.contains(disableAnimationsArgument) {
+            overrides["CMUX_DISABLE_ANIMATIONS"] = "1"
+        }
+        if arguments.contains(resetTestStateArgument) {
+            overrides["CMUX_RESET_TEST_STATE"] = "1"
+        }
+        if let fixture = value(after: fixtureArgument, in: arguments) {
+            overrides["CMUX_UI_TEST_FIXTURE"] = fixture
+        }
+        if let fixedNow = value(after: fixedNowArgument, in: arguments) {
+            overrides["CMUX_FIXED_NOW"] = fixedNow
+        }
+        if let appearance = normalizedAppearanceMode(value(after: appearanceArgument, in: arguments)) {
+            overrides["CMUX_UI_TEST_APPEARANCE"] = appearance
+        }
+        return overrides
+    }
+
+    private static func enabled(
+        _ key: String,
+        overrides: [String: String],
+        environment: [String: String]
+    ) -> Bool {
+        overrides[key] == "1" || environment[key] == "1"
+    }
+
+    private static func fixedNowDate(from rawValue: String) -> Date? {
+        ISO8601DateFormatter().date(from: rawValue)
+    }
+
+    private static func normalizedAppearanceMode(_ rawValue: String?) -> String? {
+        guard let rawValue = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              ["light", "dark"].contains(rawValue) else {
+            return nil
+        }
+        return rawValue
+    }
+
+    private static func value(after argument: String, in arguments: [String]) -> String? {
+        guard let index = arguments.firstIndex(of: argument) else { return nil }
+        let valueIndex = arguments.index(after: index)
+        guard valueIndex < arguments.endIndex else { return nil }
+        let value = arguments[valueIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, !value.hasPrefix("--") else { return nil }
+        return value
+    }
+}
+
+enum CmuxRuntimeAppearanceOverride {
+    @discardableResult
+    static func applyIfRequested(
+        mode: CmuxRuntimeMode = .current(),
+        defaults: UserDefaults = .standard
+    ) -> Bool {
+        guard mode.isUITest,
+              let rawMode = mode.appearanceMode,
+              let appearanceMode = AppearanceMode(rawValue: rawMode) else {
+            return false
+        }
+
+        defaults.set(appearanceMode.rawValue, forKey: AppearanceSettings.appearanceModeKey)
+        return true
+    }
+}
+
+enum CmuxRuntimeTestStateReset {
+    @discardableResult
+    static func applyIfRequested(
+        mode: CmuxRuntimeMode = .current(),
+        defaults: UserDefaults = .standard,
+        domainName: String? = Bundle.main.bundleIdentifier
+    ) -> Bool {
+        guard mode.isUITest, mode.resetTestState else { return false }
+        guard let domainName = domainName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !domainName.isEmpty else {
+            return false
+        }
+
+        defaults.removePersistentDomain(forName: domainName)
+        _ = defaults.synchronize()
+        return true
+    }
+}
+
+struct CmuxUITestWorkspaceFixture: Equatable {
+    struct Entry: Equatable {
+        struct PullRequest: Equatable {
+            let number: Int
+            let label: String
+            let url: String
+            let status: String
+            let branch: String?
+            let isStale: Bool
+        }
+
+        let title: String
+        let description: String?
+        let color: String?
+        let status: String?
+        let workingDirectory: String?
+        let pullRequest: PullRequest?
+
+        init(
+            title: String,
+            description: String?,
+            color: String?,
+            status: String?,
+            workingDirectory: String?,
+            pullRequest: PullRequest? = nil
+        ) {
+            self.title = title
+            self.description = description
+            self.color = color
+            self.status = status
+            self.workingDirectory = workingDirectory
+            self.pullRequest = pullRequest
+        }
+    }
+
+    let name: String
+    let entries: [Entry]
+
+    static func current(
+        mode: CmuxRuntimeMode = CmuxRuntimeMode.current()
+    ) -> CmuxUITestWorkspaceFixture? {
+        guard mode.isUITest else { return nil }
+        return fixture(named: mode.fixtureName)
+    }
+
+    static func fixture(named name: String?) -> CmuxUITestWorkspaceFixture? {
+        switch normalizedName(name) {
+        case "assistant-context-agent-basic":
+            return CmuxUITestWorkspaceFixture(
+                name: "assistant-context-agent-basic",
+                entries: [
+                    Entry(
+                        title: "API fix",
+                        description: "Agent is waiting for user review.",
+                        color: "#D97706",
+                        status: "waiting_user",
+                        workingDirectory: nil
+                    ),
+                    Entry(
+                        title: "CI failure",
+                        description: "CI is failing and needs attention.",
+                        color: "#DC2626",
+                        status: "ci_failed",
+                        workingDirectory: nil
+                    ),
+                    Entry(
+                        title: "Refactor agent",
+                        description: "Refactor work is in progress.",
+                        color: "#2563EB",
+                        status: "running",
+                        workingDirectory: nil
+                    ),
+                    Entry(
+                        title: "Ready to merge",
+                        description: "PR is ready but cached pull request context is stale.",
+                        color: "#16A34A",
+                        status: "ready_to_merge",
+                        workingDirectory: nil,
+                        pullRequest: Entry.PullRequest(
+                            number: 42,
+                            label: "PR",
+                            url: "https://github.com/manaflow-ai/cmux/pull/42",
+                            status: "open",
+                            branch: nil,
+                            isStale: true
+                        )
+                    ),
+                ]
+            )
+        default:
+            return nil
+        }
+    }
+
+    private static func normalizedName(_ name: String?) -> String {
+        name?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        ?? ""
+    }
+}

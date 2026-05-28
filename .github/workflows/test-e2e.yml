@@ -204,7 +204,15 @@ jobs:
           set -euo pipefail
           SOURCE_PACKAGES_DIR="$PWD/.ci-source-packages"
           ONLY_TESTING="-only-testing:cmuxUITests/$TEST_FILTER"
-          DISPLAY_ENV_PREFIX=()
+          RESULT_BUNDLE="/tmp/cmux-ui-tests.xcresult"
+          SCREENSHOT_DIR="$HOME/Library/Containers/com.cmuxterm.appuitests.xctrunner/Data/tmp/cmux-ui-test-screenshots"
+          FALLBACK_SCREENSHOT_DIR="$HOME/Library/Containers/com.cmuxterm.appuitests.xctrunner/Data/tmp/cmux-sprite-assistant-screenshots"
+          DISPLAY_ENV_PREFIX=("CMUX_UI_TEST_SCREENSHOT_OUTPUT_DIR=$SCREENSHOT_DIR")
+          rm -rf "$RESULT_BUNDLE"
+          rm -rf "$SCREENSHOT_DIR"
+          rm -rf "$FALLBACK_SCREENSHOT_DIR"
+          mkdir -p "$SCREENSHOT_DIR"
+          mkdir -p "$FALLBACK_SCREENSHOT_DIR"
 
           if [ "$TEST_FILTER" = "DisplayResolutionRegressionUITests" ]; then
             HELPER_PATH="/tmp/create-virtual-display"
@@ -254,6 +262,7 @@ jobs:
             -disableAutomaticPackageResolution
             -destination "platform=macOS"
             -maximum-test-execution-time-allowance "$TEST_TIMEOUT"
+            -resultBundlePath "$RESULT_BUNDLE"
             $ONLY_TESTING
             test
           )
@@ -289,6 +298,26 @@ jobs:
             } >> "$GITHUB_OUTPUT"
             exit 1
           fi
+
+      - name: Upload UI test result bundle
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-test-xcresult
+          path: /tmp/cmux-ui-tests.xcresult
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload UI test screenshots
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ui-test-screenshots
+          path: |
+            ~/Library/Containers/com.cmuxterm.appuitests.xctrunner/Data/tmp/cmux-ui-test-screenshots
+            ~/Library/Containers/com.cmuxterm.appuitests.xctrunner/Data/tmp/cmux-sprite-assistant-screenshots
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Stop recording and trim
         if: ${{ always() && inputs.record_video && env.RECORD_PID != '' }}

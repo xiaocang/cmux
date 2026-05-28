@@ -113,6 +113,16 @@
 		C0DE50100000000000000008 /* CMUXPluginAPI in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50100000000000000006 /* CMUXPluginAPI */; };
 		C0DE50200000000000000007 /* CMUXEnhancementAPI in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50200000000000000006 /* CMUXEnhancementAPI */; };
 		C0DE50200000000000000008 /* CMUXEnhancementAPI in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50200000000000000006 /* CMUXEnhancementAPI */; };
+		C0DE50300000000000000007 /* CMUXActions in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50300000000000000006 /* CMUXActions */; };
+		C0DE50300000000000000008 /* CMUXActions in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50300000000000000006 /* CMUXActions */; };
+		C0DE50400000000000000007 /* CMUXContracts in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50400000000000000006 /* CMUXContracts */; };
+		C0DE50400000000000000008 /* CMUXContracts in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50400000000000000006 /* CMUXContracts */; };
+		C0DE50500000000000000007 /* CMUXOrchestration in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50500000000000000006 /* CMUXOrchestration */; };
+		C0DE50500000000000000008 /* CMUXOrchestration in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50500000000000000006 /* CMUXOrchestration */; };
+		C0DE50600000000000000007 /* CMUXContextAgent in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50600000000000000006 /* CMUXContextAgent */; };
+		C0DE50600000000000000008 /* CMUXContextAgent in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50600000000000000006 /* CMUXContextAgent */; };
+		C0DE50700000000000000007 /* CMUXAssistant in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50700000000000000006 /* CMUXAssistant */; };
+		C0DE50700000000000000008 /* CMUXAssistant in Frameworks */ = {isa = PBXBuildFile; productRef = C0DE50700000000000000006 /* CMUXAssistant */; };
 		5A4D435053444B0000000004 /* MCP in Frameworks */ = {isa = PBXBuildFile; productRef = 5A4D435053444B0000000002 /* MCP */; };
 		FEED0000000000000000F002 /* FeedCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEED0000000000000000F001 /* FeedCoordinator.swift */; };
 		FEED0000000000000000F005 /* FeedPanelView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEED0000000000000000F004 /* FeedPanelView.swift */; };
@@ -120,6 +130,30 @@
 		FEED0000000000000000F011 /* FeedPanelViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEED0000000000000000F010 /* FeedPanelViewModel.swift */; };
 		FEED0000000000000000F015 /* SortAssistantMascotView.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEED0000000000000000F014 /* SortAssistantMascotView.swift */; };
 		5A5100000000000000000002 /* SortAssistantFeature.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000001 /* SortAssistantFeature.swift */; };
+		5A5100000000000000000008 /* SortAssistantContextContracts.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000007 /* SortAssistantContextContracts.swift */; };
+		5A5100000000000000000010 /* WorkspaceSnapshotStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000009 /* WorkspaceSnapshotStore.swift */; };
+		5A5100000000000000000012 /* ContextAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000011 /* ContextAgent.swift */; };
+		5A510000000000000000003C /* SuggestionRankingEngines.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000003B /* SuggestionRankingEngines.swift */; };
+		5A510000000000000000003E /* ContextAgentInspectorWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000003D /* ContextAgentInspectorWindowController.swift */; };
+		5A5100000000000000000014 /* SemanticActionGateway.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000013 /* SemanticActionGateway.swift */; };
+		5A5100000000000000000016 /* SortAssistantRoutingPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000015 /* SortAssistantRoutingPolicy.swift */; };
+		5A5100000000000000000018 /* SortAssistantRouteModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000017 /* SortAssistantRouteModels.swift */; };
+		5A510000000000000000001A /* SortAssistantResultModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000019 /* SortAssistantResultModels.swift */; };
+		5A510000000000000000001C /* SortAssistantCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000001B /* SortAssistantCommands.swift */; };
+		5A510000000000000000001E /* SortAssistantMemoryPersistence.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000001D /* SortAssistantMemoryPersistence.swift */; };
+		5A5100000000000000000020 /* SortAssistantRuntimeSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000001F /* SortAssistantRuntimeSupport.swift */; };
+		5A5100000000000000000022 /* SortAssistantMCPModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000021 /* SortAssistantMCPModels.swift */; };
+		5A5100000000000000000024 /* SortAssistantSortModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000023 /* SortAssistantSortModels.swift */; };
+		5A5100000000000000000026 /* SortAssistantSorting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000025 /* SortAssistantSorting.swift */; };
+		5A5100000000000000000028 /* SortAssistantIntentRouter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000027 /* SortAssistantIntentRouter.swift */; };
+		5A510000000000000000002A /* SortAssistantMCPClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000029 /* SortAssistantMCPClient.swift */; };
+		5A510000000000000000002C /* SortAssistantCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000002B /* SortAssistantCoordinator.swift */; };
+		5A510000000000000000002E /* SortAssistantAccessibility.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000002D /* SortAssistantAccessibility.swift */; };
+		5A5100000000000000000032 /* SortAssistantWorkspaceMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000031 /* SortAssistantWorkspaceMonitor.swift */; };
+		5A5100000000000000000034 /* SortAssistantMessageViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000033 /* SortAssistantMessageViews.swift */; };
+		5A5100000000000000000036 /* SortAssistantInputViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000035 /* SortAssistantInputViews.swift */; };
+		5A5100000000000000000038 /* SortAssistantCompletionModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000037 /* SortAssistantCompletionModel.swift */; };
+		5A510000000000000000003A /* SortAssistantThreadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000039 /* SortAssistantThreadView.swift */; };
 		5A5100000000000000000004 /* SortAssistantFloatingHost.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000003 /* SortAssistantFloatingHost.swift */; };
 		5A5100000000000000000006 /* SortAssistantPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000005 /* SortAssistantPlugin.swift */; };
 		FEED0000000000000000F00B /* FeedPreviewWindowController.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEED0000000000000000F00A /* FeedPreviewWindowController.swift */; };
@@ -433,6 +467,8 @@
 		B9000064A1B2C3D4E5F60719 /* CMUXCLI+Events.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000065A1B2C3D4E5F60719 /* CMUXCLI+Events.swift */; };
 		B9000054A1B2C3D4E5F60719 /* CMUXCLI+Process.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000055A1B2C3D4E5F60719 /* CMUXCLI+Process.swift */; };
 		B9000012A1B2C3D4E5F60719 /* AutomationSocketUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000011A1B2C3D4E5F60719 /* AutomationSocketUITests.swift */; };
+		5A5100000000000000000030 /* SpriteAssistantUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000002F /* SpriteAssistantUITests.swift */; };
+		5A5100000000000000000040 /* ScreenshotAssert.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000003F /* ScreenshotAssert.swift */; };
 		FEED0000000000000000F009 /* FeedSidebarUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEED0000000000000000F008 /* FeedSidebarUITests.swift */; };
 		B9000014A1B2C3D4E5F60719 /* JumpToUnreadUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000013A1B2C3D4E5F60719 /* JumpToUnreadUITests.swift */; };
 		B9000015A1B2C3D4E5F60719 /* MultiWindowNotificationsUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B9000016A1B2C3D4E5F60719 /* MultiWindowNotificationsUITests.swift */; };
@@ -644,6 +680,30 @@
 		FEED0000000000000000F010 /* FeedPanelViewModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FeedPanelViewModel.swift; sourceTree = "<group>"; };
 		FEED0000000000000000F014 /* SortAssistantMascotView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantMascotView.swift; sourceTree = "<group>"; };
 		5A5100000000000000000001 /* SortAssistantFeature.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantFeature.swift; sourceTree = "<group>"; };
+		5A5100000000000000000007 /* SortAssistantContextContracts.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantContextContracts.swift; sourceTree = "<group>"; };
+		5A5100000000000000000009 /* WorkspaceSnapshotStore.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/WorkspaceSnapshotStore.swift; sourceTree = "<group>"; };
+		5A5100000000000000000011 /* ContextAgent.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/ContextAgent.swift; sourceTree = "<group>"; };
+		5A510000000000000000003B /* SuggestionRankingEngines.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SuggestionRankingEngines.swift; sourceTree = "<group>"; };
+		5A510000000000000000003D /* ContextAgentInspectorWindowController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/ContextAgentInspectorWindowController.swift; sourceTree = "<group>"; };
+		5A5100000000000000000013 /* SemanticActionGateway.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SemanticActionGateway.swift; sourceTree = "<group>"; };
+		5A5100000000000000000015 /* SortAssistantRoutingPolicy.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantRoutingPolicy.swift; sourceTree = "<group>"; };
+		5A5100000000000000000017 /* SortAssistantRouteModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantRouteModels.swift; sourceTree = "<group>"; };
+		5A5100000000000000000019 /* SortAssistantResultModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantResultModels.swift; sourceTree = "<group>"; };
+		5A510000000000000000001B /* SortAssistantCommands.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantCommands.swift; sourceTree = "<group>"; };
+		5A510000000000000000001D /* SortAssistantMemoryPersistence.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantMemoryPersistence.swift; sourceTree = "<group>"; };
+		5A510000000000000000001F /* SortAssistantRuntimeSupport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantRuntimeSupport.swift; sourceTree = "<group>"; };
+		5A5100000000000000000021 /* SortAssistantMCPModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantMCPModels.swift; sourceTree = "<group>"; };
+		5A5100000000000000000023 /* SortAssistantSortModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantSortModels.swift; sourceTree = "<group>"; };
+		5A5100000000000000000025 /* SortAssistantSorting.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantSorting.swift; sourceTree = "<group>"; };
+		5A5100000000000000000027 /* SortAssistantIntentRouter.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantIntentRouter.swift; sourceTree = "<group>"; };
+		5A5100000000000000000029 /* SortAssistantMCPClient.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantMCPClient.swift; sourceTree = "<group>"; };
+		5A510000000000000000002B /* SortAssistantCoordinator.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantCoordinator.swift; sourceTree = "<group>"; };
+		5A510000000000000000002D /* SortAssistantAccessibility.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantAccessibility.swift; sourceTree = "<group>"; };
+		5A5100000000000000000031 /* SortAssistantWorkspaceMonitor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantWorkspaceMonitor.swift; sourceTree = "<group>"; };
+		5A5100000000000000000033 /* SortAssistantMessageViews.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantMessageViews.swift; sourceTree = "<group>"; };
+		5A5100000000000000000035 /* SortAssistantInputViews.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantInputViews.swift; sourceTree = "<group>"; };
+		5A5100000000000000000037 /* SortAssistantCompletionModel.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantCompletionModel.swift; sourceTree = "<group>"; };
+		5A5100000000000000000039 /* SortAssistantThreadView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantThreadView.swift; sourceTree = "<group>"; };
 		5A5100000000000000000003 /* SortAssistantFloatingHost.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantFloatingHost.swift; sourceTree = "<group>"; };
 		5A5100000000000000000005 /* SortAssistantPlugin.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantPlugin.swift; sourceTree = "<group>"; };
 		FEED0000000000000000F00A /* FeedPreviewWindowController.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = FeedPreviewWindowController.swift; sourceTree = "<group>"; };
@@ -1023,6 +1083,8 @@
 		B9000065A1B2C3D4E5F60719 /* CMUXCLI+Events.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+Events.swift"; sourceTree = "<group>"; };
 		B9000055A1B2C3D4E5F60719 /* CMUXCLI+Process.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CMUXCLI+Process.swift"; sourceTree = "<group>"; };
 		B9000011A1B2C3D4E5F60719 /* AutomationSocketUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AutomationSocketUITests.swift; sourceTree = "<group>"; };
+		5A510000000000000000002F /* SpriteAssistantUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpriteAssistantUITests.swift; sourceTree = "<group>"; };
+		5A510000000000000000003F /* ScreenshotAssert.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenshotAssert.swift; sourceTree = "<group>"; };
 		FEED0000000000000000F008 /* FeedSidebarUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedSidebarUITests.swift; sourceTree = "<group>"; };
 		B9000013A1B2C3D4E5F60719 /* JumpToUnreadUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JumpToUnreadUITests.swift; sourceTree = "<group>"; };
 		B9000016A1B2C3D4E5F60719 /* MultiWindowNotificationsUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiWindowNotificationsUITests.swift; sourceTree = "<group>"; };
@@ -1141,6 +1203,11 @@
 				A5B00003A1B2C3D4E5F60718 /* CMUXAgentLaunch in Frameworks */,
 				C0DE50100000000000000007 /* CMUXPluginAPI in Frameworks */,
 				C0DE50200000000000000007 /* CMUXEnhancementAPI in Frameworks */,
+				C0DE50300000000000000007 /* CMUXActions in Frameworks */,
+				C0DE50400000000000000007 /* CMUXContracts in Frameworks */,
+				C0DE50500000000000000007 /* CMUXOrchestration in Frameworks */,
+				C0DE50600000000000000007 /* CMUXContextAgent in Frameworks */,
+				C0DE50700000000000000007 /* CMUXAssistant in Frameworks */,
 				A5354303A5354303A5354303 /* CMUXSocketPathDomain in Frameworks */,
 				F20F85FC5900550685FA33AD /* StackAuth in Frameworks */,
 				5A4D435053444B0000000004 /* MCP in Frameworks */,
@@ -1178,6 +1245,11 @@
 			files = (
 				C0DE50100000000000000008 /* CMUXPluginAPI in Frameworks */,
 				C0DE50200000000000000008 /* CMUXEnhancementAPI in Frameworks */,
+				C0DE50300000000000000008 /* CMUXActions in Frameworks */,
+				C0DE50400000000000000008 /* CMUXContracts in Frameworks */,
+				C0DE50500000000000000008 /* CMUXOrchestration in Frameworks */,
+				C0DE50600000000000000008 /* CMUXContextAgent in Frameworks */,
+				C0DE50700000000000000008 /* CMUXAssistant in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -1239,6 +1311,8 @@
 			isa = PBXGroup;
 			children = (
 				B9000011A1B2C3D4E5F60719 /* AutomationSocketUITests.swift */,
+				5A510000000000000000003F /* ScreenshotAssert.swift */,
+				5A510000000000000000002F /* SpriteAssistantUITests.swift */,
 				FEED0000000000000000F008 /* FeedSidebarUITests.swift */,
 				B9000013A1B2C3D4E5F60719 /* JumpToUnreadUITests.swift */,
 				B9000022A1B2C3D4E5F60719 /* CloseWorkspaceCmdDUITests.swift */,
@@ -1311,6 +1385,30 @@
 				A5001011 /* cmuxApp.swift */,
 				C0DE50100000000000000002 /* CMUXPluginSystem.swift */,
 				5A5100000000000000000001 /* SortAssistantFeature.swift */,
+				5A5100000000000000000007 /* SortAssistantContextContracts.swift */,
+				5A5100000000000000000009 /* WorkspaceSnapshotStore.swift */,
+				5A5100000000000000000011 /* ContextAgent.swift */,
+				5A510000000000000000003B /* SuggestionRankingEngines.swift */,
+				5A510000000000000000003D /* ContextAgentInspectorWindowController.swift */,
+				5A5100000000000000000013 /* SemanticActionGateway.swift */,
+				5A5100000000000000000015 /* SortAssistantRoutingPolicy.swift */,
+				5A5100000000000000000017 /* SortAssistantRouteModels.swift */,
+				5A5100000000000000000019 /* SortAssistantResultModels.swift */,
+				5A510000000000000000001B /* SortAssistantCommands.swift */,
+				5A510000000000000000001D /* SortAssistantMemoryPersistence.swift */,
+				5A510000000000000000001F /* SortAssistantRuntimeSupport.swift */,
+				5A5100000000000000000021 /* SortAssistantMCPModels.swift */,
+				5A5100000000000000000023 /* SortAssistantSortModels.swift */,
+				5A5100000000000000000025 /* SortAssistantSorting.swift */,
+				5A5100000000000000000027 /* SortAssistantIntentRouter.swift */,
+				5A5100000000000000000029 /* SortAssistantMCPClient.swift */,
+				5A510000000000000000002B /* SortAssistantCoordinator.swift */,
+				5A510000000000000000002D /* SortAssistantAccessibility.swift */,
+				5A5100000000000000000031 /* SortAssistantWorkspaceMonitor.swift */,
+				5A5100000000000000000033 /* SortAssistantMessageViews.swift */,
+				5A5100000000000000000035 /* SortAssistantInputViews.swift */,
+				5A5100000000000000000037 /* SortAssistantCompletionModel.swift */,
+				5A5100000000000000000039 /* SortAssistantThreadView.swift */,
 				5A5100000000000000000003 /* SortAssistantFloatingHost.swift */,
 				FEED0000000000000000F014 /* SortAssistantMascotView.swift */,
 				5A5100000000000000000005 /* SortAssistantPlugin.swift */,
@@ -1827,6 +1925,11 @@
 				A500D013A1B2C3D4E5F60718 /* CMUXDebugLog */,
 				C0DE50100000000000000006 /* CMUXPluginAPI */,
 				C0DE50200000000000000006 /* CMUXEnhancementAPI */,
+				C0DE50300000000000000006 /* CMUXActions */,
+				C0DE50400000000000000006 /* CMUXContracts */,
+				C0DE50500000000000000006 /* CMUXOrchestration */,
+				C0DE50600000000000000006 /* CMUXContextAgent */,
+				C0DE50700000000000000006 /* CMUXAssistant */,
 				A8BD195031FC4B82B4354297 /* StackAuth */,
 				5A4D435053444B0000000002 /* MCP */,
 			);
@@ -1926,6 +2029,11 @@
 				A5B00002A1B2C3D4E5F60718 /* CMUXAgentLaunch */,
 				C0DE50100000000000000006 /* CMUXPluginAPI */,
 				C0DE50200000000000000006 /* CMUXEnhancementAPI */,
+				C0DE50300000000000000006 /* CMUXActions */,
+				C0DE50400000000000000006 /* CMUXContracts */,
+				C0DE50500000000000000006 /* CMUXOrchestration */,
+				C0DE50600000000000000006 /* CMUXContextAgent */,
+				C0DE50700000000000000006 /* CMUXAssistant */,
 			);
 			productName = cmuxTests;
 			productReference = F1000002A1B2C3D4E5F60718 /* cmuxTests.xctest */;
@@ -1982,6 +2090,11 @@
 				A500D012A1B2C3D4E5F60718 /* XCLocalSwiftPackageReference "CMUXDebugLog" */,
 				C0DE50100000000000000005 /* XCLocalSwiftPackageReference "CMUXPluginAPI" */,
 				C0DE50200000000000000005 /* XCLocalSwiftPackageReference "CMUXEnhancementAPI" */,
+				C0DE50300000000000000005 /* XCLocalSwiftPackageReference "CMUXActions" */,
+				C0DE50400000000000000005 /* XCLocalSwiftPackageReference "CMUXContracts" */,
+				C0DE50500000000000000005 /* XCLocalSwiftPackageReference "CMUXOrchestration" */,
+				C0DE50600000000000000005 /* XCLocalSwiftPackageReference "CMUXContextAgent" */,
+				C0DE50700000000000000005 /* XCLocalSwiftPackageReference "CMUXAssistant" */,
 				A5354304A5354304A5354304 /* XCLocalSwiftPackageReference "CMUXSocketPathDomain" */,
 				28B798BB9086C8E6B60C3355 /* XCLocalSwiftPackageReference "stack-auth-swift-sdk-prerelease" */,
 				5A4D435053444B0000000003 /* XCRemoteSwiftPackageReference "swift-sdk" */,
@@ -2402,6 +2515,30 @@
 				FEED0000000000000000F013 /* FeedPermissionActionPolicy.swift in Sources */,
 				FEED0000000000000000F011 /* FeedPanelViewModel.swift in Sources */,
 				5A5100000000000000000002 /* SortAssistantFeature.swift in Sources */,
+				5A5100000000000000000008 /* SortAssistantContextContracts.swift in Sources */,
+				5A5100000000000000000010 /* WorkspaceSnapshotStore.swift in Sources */,
+				5A5100000000000000000012 /* ContextAgent.swift in Sources */,
+				5A510000000000000000003C /* SuggestionRankingEngines.swift in Sources */,
+				5A510000000000000000003E /* ContextAgentInspectorWindowController.swift in Sources */,
+				5A5100000000000000000014 /* SemanticActionGateway.swift in Sources */,
+				5A5100000000000000000016 /* SortAssistantRoutingPolicy.swift in Sources */,
+				5A5100000000000000000018 /* SortAssistantRouteModels.swift in Sources */,
+				5A510000000000000000001A /* SortAssistantResultModels.swift in Sources */,
+				5A510000000000000000001C /* SortAssistantCommands.swift in Sources */,
+				5A510000000000000000001E /* SortAssistantMemoryPersistence.swift in Sources */,
+				5A5100000000000000000020 /* SortAssistantRuntimeSupport.swift in Sources */,
+				5A5100000000000000000022 /* SortAssistantMCPModels.swift in Sources */,
+				5A5100000000000000000024 /* SortAssistantSortModels.swift in Sources */,
+				5A5100000000000000000026 /* SortAssistantSorting.swift in Sources */,
+				5A5100000000000000000028 /* SortAssistantIntentRouter.swift in Sources */,
+				5A510000000000000000002A /* SortAssistantMCPClient.swift in Sources */,
+				5A510000000000000000002C /* SortAssistantCoordinator.swift in Sources */,
+				5A510000000000000000002E /* SortAssistantAccessibility.swift in Sources */,
+				5A5100000000000000000032 /* SortAssistantWorkspaceMonitor.swift in Sources */,
+				5A5100000000000000000034 /* SortAssistantMessageViews.swift in Sources */,
+				5A5100000000000000000036 /* SortAssistantInputViews.swift in Sources */,
+				5A5100000000000000000038 /* SortAssistantCompletionModel.swift in Sources */,
+				5A510000000000000000003A /* SortAssistantThreadView.swift in Sources */,
 				5A5100000000000000000004 /* SortAssistantFloatingHost.swift in Sources */,
 				FEED0000000000000000F015 /* SortAssistantMascotView.swift in Sources */,
 				5A5100000000000000000006 /* SortAssistantPlugin.swift in Sources */,
@@ -2463,6 +2600,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				B9000012A1B2C3D4E5F60719 /* AutomationSocketUITests.swift in Sources */,
+				5A5100000000000000000040 /* ScreenshotAssert.swift in Sources */,
+				5A5100000000000000000030 /* SpriteAssistantUITests.swift in Sources */,
 				FEED0000000000000000F009 /* FeedSidebarUITests.swift in Sources */,
 				B9000014A1B2C3D4E5F60719 /* JumpToUnreadUITests.swift in Sources */,
 				B900001AA1B2C3D4E5F60719 /* CloseWorkspaceConfirmDialogUITests.swift in Sources */,
@@ -3105,6 +3244,26 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/CMUXEnhancementAPI;
 		};
+		C0DE50300000000000000005 /* XCLocalSwiftPackageReference "CMUXActions" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CMUXActions;
+		};
+		C0DE50400000000000000005 /* XCLocalSwiftPackageReference "CMUXContracts" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CMUXContracts;
+		};
+		C0DE50500000000000000005 /* XCLocalSwiftPackageReference "CMUXOrchestration" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CMUXOrchestration;
+		};
+		C0DE50600000000000000005 /* XCLocalSwiftPackageReference "CMUXContextAgent" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CMUXContextAgent;
+		};
+		C0DE50700000000000000005 /* XCLocalSwiftPackageReference "CMUXAssistant" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CMUXAssistant;
+		};
 		A5354304A5354304A5354304 /* XCLocalSwiftPackageReference "CMUXSocketPathDomain" */ = {
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/CMUXSocketPathDomain;
@@ -3203,6 +3362,31 @@
 			isa = XCSwiftPackageProductDependency;
 			package = C0DE50200000000000000005 /* XCLocalSwiftPackageReference "CMUXEnhancementAPI" */;
 			productName = CMUXEnhancementAPI;
+		};
+		C0DE50300000000000000006 /* CMUXActions */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C0DE50300000000000000005 /* XCLocalSwiftPackageReference "CMUXActions" */;
+			productName = CMUXActions;
+		};
+		C0DE50400000000000000006 /* CMUXContracts */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C0DE50400000000000000005 /* XCLocalSwiftPackageReference "CMUXContracts" */;
+			productName = CMUXContracts;
+		};
+		C0DE50500000000000000006 /* CMUXOrchestration */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C0DE50500000000000000005 /* XCLocalSwiftPackageReference "CMUXOrchestration" */;
+			productName = CMUXOrchestration;
+		};
+		C0DE50600000000000000006 /* CMUXContextAgent */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C0DE50600000000000000005 /* XCLocalSwiftPackageReference "CMUXContextAgent" */;
+			productName = CMUXContextAgent;
+		};
+		C0DE50700000000000000006 /* CMUXAssistant */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = C0DE50700000000000000005 /* XCLocalSwiftPackageReference "CMUXAssistant" */;
+			productName = CMUXAssistant;
 		};
 		A5354305A5354305A5354305 /* CMUXSocketPathDomain */ = {
 			isa = XCSwiftPackageProductDependency;

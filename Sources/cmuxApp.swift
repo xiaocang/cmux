@@ -32,6 +32,13 @@ struct cmuxApp: App {
     init() {
         StartupBreadcrumbLog.append("app.init.begin")
         UITestLaunchManifest.applyIfPresent()
+        CmuxRuntimeMode.applyLaunchArgumentsIfPresent()
+        if CmuxRuntimeTestStateReset.applyIfRequested() {
+            StartupBreadcrumbLog.append("app.init.uiTestState.reset")
+        }
+        if CmuxRuntimeAppearanceOverride.applyIfRequested() {
+            StartupBreadcrumbLog.append("app.init.uiTestAppearance.applied")
+        }
         BrowserTextInputCorrectionDefaults.register()
         StartupBreadcrumbLog.append("app.init.uiTestManifest.applied")
 
@@ -399,6 +406,14 @@ struct cmuxApp: App {
                         )
                     ) {
                         BrowserProfilePopoverDebugWindowController.shared.show()
+                    }
+                    Button(
+                        String(
+                            localized: "debug.menu.contextAgentInspector",
+                            defaultValue: "Context Agent Inspector…"
+                        )
+                    ) {
+                        ContextAgentInspectorWindowController.shared.show()
                     }
                     Button("Debug Window Controls…") {
                         DebugWindowControlsWindowController.shared.show()
@@ -1167,6 +1182,7 @@ struct cmuxApp: App {
         BrowserProfilePopoverDebugWindowController.shared.show()
         AboutTitlebarDebugWindowController.shared.show()
         SidebarDebugWindowController.shared.show()
+        ContextAgentInspectorWindowController.shared.show()
         BackgroundDebugWindowController.shared.show()
         StartupAppearanceDebugWindowController.shared.show()
         MenuBarExtraDebugWindowController.shared.show()

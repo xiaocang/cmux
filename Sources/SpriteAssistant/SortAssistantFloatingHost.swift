@@ -24,7 +24,7 @@ struct SortAssistantFloatingHost: View {
             isPresented = true
         }
         .onChange(of: coordinator.presentationToggleSequence) { _, _ in
-            isPresented.toggle()
+            isPresented = true
         }
     }
 }
@@ -531,7 +531,7 @@ final class SortAssistantFloatingPanelHostView: NSView {
 
     private func findInputField(in root: NSView) -> NSTextField? {
         if let field = root as? NSTextField,
-           field.accessibilityIdentifier() == "SortAssistantInputField" {
+           field.accessibilityIdentifier() == SortAssistantAccessibility.inputField {
             return field
         }
         for subview in root.subviews {
@@ -555,12 +555,14 @@ final class SortAssistantFloatingPanelHostView: NSView {
         panel.hasShadow = false
         panel.hidesOnDeactivate = false
         panel.ignoresMouseEvents = false
+        panel.setAccessibilityIdentifier(SortAssistantAccessibility.floatingPanel)
         panel.becomesKeyOnlyIfNeeded = false
         panel.isMovable = false
         panel.isMovableByWindowBackground = false
         panel.collectionBehavior = [.fullScreenAuxiliary]
         panel.identifier = NSUserInterfaceItemIdentifier("cmux.sortAssistantFloatingPet")
         if let hostingView {
+            hostingView.setAccessibilityIdentifier(SortAssistantAccessibility.floatingPanel)
             panel.contentView = hostingView
         }
         parentWindow.addChildWindow(panel, ordered: .above)
@@ -1161,26 +1163,33 @@ private struct SortAssistantFloatingPetContent: View {
     private let widgetSpacing: CGFloat = 10
 
     var body: some View {
+        let isBubbleVisible = coordinator.isConversationBubblePresented && !coordinator.isPanelEdgeRecovery
         VStack(spacing: 0) {
-            Color.clear
-                .frame(height: Self.topOverlayReserveHeight)
-                .allowsHitTesting(false)
+            if isBubbleVisible {
+                Color.clear
+                    .frame(height: Self.topOverlayReserveHeight)
+                    .allowsHitTesting(false)
+            }
             HStack(alignment: .bottom, spacing: widgetSpacing) {
                 mascot
-                conversationBubble
-                    .opacity(coordinator.isPanelEdgeRecovery ? 0 : 1)
-                    .allowsHitTesting(!coordinator.isPanelEdgeRecovery)
-                    .accessibilityHidden(coordinator.isPanelEdgeRecovery)
+                if isBubbleVisible {
+                    conversationBubble
+                        .transition(.opacity)
+                }
             }
         }
         .fixedSize(horizontal: false, vertical: true)
-        .accessibilityIdentifier("SortAssistantFloatingPanel")
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(SortAssistantAccessibility.floatingPanel)
 #if DEBUG
         .onAppear {
-            cmuxDebugLog("sprite.render appear edgeRecovery=\(coordinator.isPanelEdgeRecovery) color=\(String(describing: coordinator.spriteColor))")
+            cmuxDebugLog("sprite.render appear bubble=\(coordinator.isConversationBubblePresented) edgeRecovery=\(coordinator.isPanelEdgeRecovery) color=\(String(describing: coordinator.spriteColor))")
         }
         .onChange(of: coordinator.isPanelEdgeRecovery) { _, active in
-            cmuxDebugLog("sprite.render edgeRecovery=\(active) color=\(String(describing: coordinator.spriteColor))")
+            cmuxDebugLog("sprite.render edgeRecovery=\(active) bubble=\(coordinator.isConversationBubblePresented) color=\(String(describing: coordinator.spriteColor))")
+        }
+        .onChange(of: coordinator.isConversationBubblePresented) { _, active in
+            cmuxDebugLog("sprite.render bubble=\(active) edgeRecovery=\(coordinator.isPanelEdgeRecovery) color=\(String(describing: coordinator.spriteColor))")
         }
 #endif
     }
@@ -1194,13 +1203,23 @@ private struct SortAssistantFloatingPetContent: View {
             // so it lands on top of the visible recovery hotspot at the
             // screen edge.
             if coordinator.isPanelEdgeRecovery {
-                recoveryMiniSprite
-                    .frame(width: avatarSize, height: avatarSize)
+                Button {
+                    coordinator.toggleConversationBubble(reason: "floatingMascot")
+                } label: {
+                    recoveryMiniSprite
+                        .frame(width: avatarSize, height: avatarSize)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(String(localized: "sortAssistant.mascot.open", defaultValue: "Open sort assistant"))
+                .help(String(localized: "sortAssistant.mascot.open", defaultValue: "Open sort assistant"))
             } else {
-                SortAssistantMascotAvatar(
-                    size: avatarSize,
+                SortAssistantMascotButton(
+                    presentation: .floating,
                     isActive: coordinator.isSorting,
-                    state: coordinator.mascotState
+                    state: coordinator.mascotState,
+                    action: {
+                        coordinator.toggleConversationBubble(reason: "floatingMascot")
+                    }
                 )
             }
         }

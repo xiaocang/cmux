@@ -1918,10 +1918,11 @@ final class BrowserDeveloperToolsConfigurationTests: XCTestCase {
             )
         )
 
-        panel.webView.debugSetPageTextInputState(canPaste: true, hasSelection: false)
+        let webView = try XCTUnwrap(panel.webView as? CmuxWebView)
+        webView.debugSetPageTextInputState(canPaste: true, hasSelection: false)
 
         XCTAssertTrue(
-            panel.webView.shouldLetSelectedPageTextHandleHorizontalArrowKey(event),
+            webView.shouldLetSelectedPageTextHandleHorizontalArrowKey(event),
             "Selected page URL inputs should bypass browser arrow pre-forwarding even if the async native cache is stale"
         )
     }
@@ -1940,7 +1941,8 @@ final class BrowserDeveloperToolsConfigurationTests: XCTestCase {
             }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        return try XCTUnwrap(try await autocompleteDisabledState(panel: panel))
+        let state = try await autocompleteDisabledState(panel: panel)
+        return try XCTUnwrap(state)
     }
 
     private func waitForBrowserPageSelectedText(
@@ -1954,7 +1956,8 @@ final class BrowserDeveloperToolsConfigurationTests: XCTestCase {
             }
             try await Task.sleep(nanoseconds: 10_000_000)
         }
-        XCTAssertTrue(try await browserPageHasSelectedText(panel: panel))
+        let hasSelectedText = try await browserPageHasSelectedText(panel: panel)
+        XCTAssertTrue(hasSelectedText)
     }
 
     private func browserPageHasSelectedText(panel: BrowserPanel) async throws -> Bool {

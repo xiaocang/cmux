@@ -1341,6 +1341,85 @@ class TabManager: ObservableObject {
     private var uiTestCancellables = Set<AnyCancellable>()
 #endif
 
+    private static func uiTestFixtureForInitialState(
+        initialWorkspaceTitle: String?,
+        initialWorkingDirectory: String?,
+        initialTerminalInput: String?
+    ) -> CmuxUITestWorkspaceFixture? {
+        guard initialWorkspaceTitle == nil,
+              initialWorkingDirectory == nil,
+              initialTerminalInput == nil else {
+            return nil
+        }
+        return CmuxUITestWorkspaceFixture.current()
+    }
+
+    private func applyUITestWorkspaceFixture(_ fixture: CmuxUITestWorkspaceFixture) {
+        guard !fixture.entries.isEmpty else { return }
+
+        if let firstWorkspace = tabs.first,
+           let firstEntry = fixture.entries.first {
+            applyUITestWorkspaceFixtureEntry(firstEntry, to: firstWorkspace)
+        }
+
+        for entry in fixture.entries.dropFirst() {
+            let workspace = addWorkspace(
+                title: entry.title,
+                workingDirectory: entry.workingDirectory,
+                inheritWorkingDirectory: false,
+                select: false,
+                eagerLoadTerminal: false,
+                placementOverride: .end,
+                autoWelcomeIfNeeded: false
+            )
+            applyUITestWorkspaceFixtureEntry(entry, to: workspace)
+        }
+    }
+
+    private func applyUITestWorkspaceFixtureEntry(
+        _ entry: CmuxUITestWorkspaceFixture.Entry,
+        to workspace: Workspace
+    ) {
+        workspace.setCustomTitle(entry.title)
+        workspace.setCustomDescription(entry.description)
+        workspace.setCustomColor(entry.color)
+        if let status = entry.status {
+            let timestamp = CmuxRuntimeMode.current().fixedNow ?? Date()
+            workspace.statusEntries["ui_test.fixture.status"] = SidebarStatusEntry(
+                key: "ui_test.fixture.status",
+                value: status,
+                icon: "sparkles",
+                color: entry.color,
+                priority: 100,
+                timestamp: timestamp
+            )
+        }
+        if let pullRequest = entry.pullRequest,
+           let panelId = workspace.focusedPanelId,
+           let url = URL(string: pullRequest.url) {
+            workspace.updatePanelPullRequest(
+                panelId: panelId,
+                number: pullRequest.number,
+                label: pullRequest.label,
+                url: url,
+                status: Self.uiTestPullRequestStatus(pullRequest.status),
+                branch: pullRequest.branch,
+                isStale: pullRequest.isStale
+            )
+        }
+    }
+
+    private static func uiTestPullRequestStatus(_ rawValue: String) -> SidebarPullRequestStatus {
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case SidebarPullRequestStatus.merged.rawValue:
+            return .merged
+        case SidebarPullRequestStatus.closed.rawValue:
+            return .closed
+        default:
+            return .open
+        }
+    }
+
     init(
         initialWorkspaceTitle: String? = nil,
         initialWorkingDirectory: String? = nil,
@@ -1354,12 +1433,21 @@ class TabManager: ObservableObject {
             ghprContextRefresher.requestGHPRContextRefresh(workspaceId: workspaceId)
         }
         self.enhancementSystem = enhancementSystem
-        addWorkspace(
-            title: initialWorkspaceTitle,
-            workingDirectory: initialWorkingDirectory,
-            initialTerminalInput: initialTerminalInput,
-            autoWelcomeIfNeeded: autoWelcomeIfNeeded
+        let uiTestFixture = Self.uiTestFixtureForInitialState(
+            initialWorkspaceTitle: initialWorkspaceTitle,
+            initialWorkingDirectory: initialWorkingDirectory,
+            initialTerminalInput: initialTerminalInput
         )
+        let initialFixtureEntry = uiTestFixture?.entries.first
+        addWorkspace(
+            title: initialWorkspaceTitle ?? initialFixtureEntry?.title,
+            workingDirectory: initialWorkingDirectory ?? initialFixtureEntry?.workingDirectory,
+            initialTerminalInput: initialTerminalInput,
+            autoWelcomeIfNeeded: autoWelcomeIfNeeded && uiTestFixture == nil
+        )
+        if let uiTestFixture {
+            applyUITestWorkspaceFixture(uiTestFixture)
+        }
         observers.append(NotificationCenter.default.addObserver(
             forName: .ghosttyDidSetTitle,
             object: nil,
@@ -2689,6 +2777,9 @@ class TabManager: ObservableObject {
         reason: String,
         delays: [TimeInterval] = [0]
     ) {
+        if Self.shouldPreserveUITestFixtureMetadata() {
+            return
+        }
         let key = WorkspaceGitProbeKey(workspaceId: workspaceId, panelId: panelId)
         guard sidebarGitMetadataWatchEnabled else {
             clearWorkspaceGitMetadata(for: key)
@@ -2707,6 +2798,12 @@ class TabManager: ObservableObject {
             delays: delays,
             reason: reason
         )
+    }
+
+    private static func shouldPreserveUITestFixtureMetadata(
+        mode: CmuxRuntimeMode = CmuxRuntimeMode.current()
+    ) -> Bool {
+        mode.isUITest && mode.fixtureName != nil
     }
 
     func wireClosedBrowserTracking(for workspace: Workspace) {

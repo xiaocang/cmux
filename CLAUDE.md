@@ -267,11 +267,11 @@ The app has a **Debug** menu in the macOS menu bar (only in DEBUG builds). Use i
 
 ## Testing policy
 
-**Never run tests locally.** All tests (E2E, UI, python socket tests) run via GitHub Actions or on the VM.
+Local tests are allowed in the local development environment when they are useful for validating a change. Prefer the narrowest relevant test target first, then broaden only when the change risk warrants it.
 
-- **E2E / UI tests:** trigger via `gh workflow run test-e2e.yml` (see cmuxterm-hq CLAUDE.md for details)
-- **Unit tests:** `xcodebuild -scheme cmux-unit` is safe (no app launch), but prefer CI
-- **Python socket tests (tests_v2/):** these connect to a running cmux instance's socket. Never launch an untagged `cmux DEV.app` to run them. If you must test locally, use a tagged build's socket (`/tmp/cmux-debug-<tag>.sock`) with `CMUX_SOCKET_PATH=/tmp/cmux-debug-<tag>.sock`
+- **E2E / UI tests:** local runs are allowed when needed. Use a tagged Debug build and keep the run isolated from the user's main app. CI can still be triggered via `gh workflow run test-e2e.yml` when remote proof is needed.
+- **Unit tests:** local unit tests are allowed. Use the relevant scheme/package target, such as `xcodebuild -scheme cmux-unit` or SwiftPM package tests for touched packages.
+- **Python socket tests (tests_v2/):** these connect to a running cmux instance's socket. Never launch an untagged `cmux DEV.app` to run them. For local runs, use a tagged build's socket (`/tmp/cmux-debug-<tag>.sock`) with `CMUX_SOCKET_PATH=/tmp/cmux-debug-<tag>.sock`
 - **Never `open` an untagged `cmux DEV.app`** from DerivedData. It conflicts with the user's running debug instance.
 
 ## Ghostty submodule workflow

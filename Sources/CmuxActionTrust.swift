@@ -11,6 +11,10 @@ struct CmuxActionTrustDescriptor: Codable, Sendable {
     var configPath: String?
     var projectRoot: String?
     var iconFingerprint: String?
+    var workspaceId: String? = nil
+    var assistantRoute: String? = nil
+    var normalizedArgumentsHash: String? = nil
+    var contextSnapshotHash: String? = nil
 
     var fingerprint: String {
         let encoder = JSONEncoder()
@@ -19,7 +23,7 @@ struct CmuxActionTrustDescriptor: Codable, Sendable {
         return Self.sha256Hex(data)
     }
 
-    private static func sha256Hex(_ data: Data) -> String {
+    static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 }

@@ -7430,6 +7430,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         )
     }
 
+    static func uiTestMainWindowContentSize(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> NSSize? {
+        guard environment["CMUX_UI_TEST_MODE"] == "1" else {
+            return nil
+        }
+        guard let rawValue = environment["CMUX_UI_TEST_WINDOW_SIZE"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            !rawValue.isEmpty else {
+            return nil
+        }
+
+        let parts = rawValue
+            .split { $0 == "x" || $0 == "X" || $0 == "," || $0 == " " || $0 == "\t" }
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard parts.count == 2,
+              let width = Double(parts[0]),
+              let height = Double(parts[1]),
+              width.isFinite,
+              height.isFinite,
+              width >= SessionPersistencePolicy.minimumWindowWidth,
+              height >= SessionPersistencePolicy.minimumWindowHeight else {
+            return nil
+        }
+
+        return NSSize(width: width, height: height)
+    }
+
     @discardableResult
     func createMainWindow(
         initialWorkspaceTitle: String? = nil,
@@ -7520,8 +7548,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         let persistedGeometryFrame = (restoredFrame == nil && sourceWindow == nil)
             ? resolvedPersistedWindowGeometryFrame()
             : nil
+        let uiTestContentSize = Self.uiTestMainWindowContentSize()
         let initialRect: NSRect
-        if restoredFrame == nil, let existingFrame {
+        if let uiTestContentSize {
+            initialRect = NSRect(origin: .zero, size: uiTestContentSize)
+        } else if restoredFrame == nil, let existingFrame {
             // Convert frame rect to content rect so the new window matches the
             // source window's actual size (frame includes titlebar insets).
             initialRect = NSWindow.contentRect(forFrameRect: existingFrame, styleMask: styleMask)
@@ -7551,9 +7582,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         // restoration so the OS cannot resurrect stale duplicate main windows.
         window.isRestorable = false
         configureCmuxMainWindowDragBehavior(window)
-        let explicitInitialFrame = restoredFrame ?? persistedGeometryFrame
+        let explicitInitialFrame = uiTestContentSize == nil ? (restoredFrame ?? persistedGeometryFrame) : nil
         if let explicitInitialFrame {
             window.setFrame(explicitInitialFrame, display: false)
+        } else if uiTestContentSize != nil {
+            window.center()
         } else if let sourceWindow {
             positionNewMainWindow(window, relativeTo: sourceWindow)
         } else {

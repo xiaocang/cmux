@@ -290,6 +290,27 @@ extension CmuxEventBus {
         )
     }
 
+    func publishAssistantQueryStarted(
+        workspaceId: UUID,
+        targetWorkspaceId: UUID?,
+        source: String,
+        queryCharacterCount: Int,
+        reason: String
+    ) {
+        publish(
+            name: "assistant.query_started",
+            category: "assistant",
+            source: source,
+            workspaceId: workspaceId.uuidString,
+            payload: [
+                "workspace_id": workspaceId.uuidString,
+                "target_workspace_id": targetWorkspaceId?.uuidString ?? NSNull(),
+                "query_character_count": max(0, queryCharacterCount),
+                "reason": reason
+            ]
+        )
+    }
+
     func publishNotificationChanges(oldValue: [TerminalNotification], newValue: [TerminalNotification]) {
         let oldById = Dictionary(uniqueKeysWithValues: oldValue.map { ($0.id, $0) })
         let newIds = Set(newValue.map(\.id))

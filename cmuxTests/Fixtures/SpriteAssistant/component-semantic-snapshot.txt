@@ -1,0 +1,42 @@
+SortAssistant component semantic snapshot v1
+
+message-row assistant
+  identifier: SortAssistantMessage.11111111-1111-1111-1111-111111111111
+  kind: assistant
+  collapsible: true
+  collapsedLineLimit: 6
+  copyAction: true
+  expandAction: true
+  text: CI failed on the API workspace. | The failing check is unit-tests. | The agent has already produced a patch. | Review the diff before applying. | Provider freshness is stale for github_context. | Use the snapshot age warning in the assistant panel. | This final line keeps the bubble collapsed by default.
+
+message-row user
+  identifier: SortAssistantMessage.22222222-2222-2222-2222-222222222222
+  kind: user
+  collapsible: false
+  copyAction: false
+  expandAction: false
+  text: What needs attention?
+
+suggestion-card
+  listIdentifier: SortAssistantSuggestionList
+  cardIdentifier: SortAssistantSuggestionCard.review_agent_waiting_user.44444444-4444-4444-4444-444444444444
+  openIdentifier: SortAssistantSuggestionOpen.33333333-3333-3333-3333-333333333333
+  dismissIdentifier: SortAssistantSuggestionDismiss.33333333-3333-3333-3333-333333333333
+  type: review_agent_waiting_user
+  title: Review agent output
+  reason: Agent is waiting for your decision.
+  confidence: 0.92
+
+semantic-confirmation
+  identifier: SortAssistantSemanticActionConfirmation
+  confirmIdentifier: SortAssistantSemanticActionConfirm
+  cancelIdentifier: SortAssistantSemanticActionCancel
+  title: Review before accepting suggestion
+  message: This changes the selected workspace.
+  actionName: Accept suggestion
+  reasons: Snapshot evidence is stale | Action targets a different workspace
+
+input
+  containerIdentifier: SortAssistantInput
+  fieldIdentifier: SortAssistantInputField
+  sendIdentifier: SortAssistantSendButton

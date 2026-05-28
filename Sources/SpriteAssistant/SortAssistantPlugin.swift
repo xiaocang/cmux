@@ -4,7 +4,7 @@ import Foundation
 final class CMUXSpriteAssistantPlugin: CMUXPlugin {
     let manifest = CMUXPluginManifest(
         id: CMUXBuiltinPluginID.spriteAssistant,
-        name: "cmux Sprite Assistant",
+        name: String(localized: "sortAssistant.plugin.name", defaultValue: "cmux Sprite Assistant"),
         version: "0.1.0",
         activation: ["onAppStart"],
         permissions: [
@@ -32,7 +32,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.windowOverlays.registerWindowOverlay(
                 CMUXWindowOverlayContribution(
                     id: CMUXBuiltinWindowOverlayID.spriteAssistant,
-                    title: "Sprite Assistant",
+                    title: String(localized: "sortAssistant.plugin.overlay.title", defaultValue: "Sprite Assistant"),
                     placement: .windowRootFloating,
                     priority: 100,
                     metadata: [
@@ -48,7 +48,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "memory.query",
-                    title: "Query Free Sort Memories"
+                    title: String(localized: "sortAssistant.plugin.command.memoryQuery", defaultValue: "Query Free Sort Memories")
                 ) { _ in
                     runOnMainSync {
                         .ok(SortAssistantCoordinator.shared.socketMemoryQuery())
@@ -61,12 +61,12 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "memory.write_candidate",
-                    title: "Create Free Sort Memory Candidate"
+                    title: String(localized: "sortAssistant.plugin.command.memoryWriteCandidate", defaultValue: "Create Free Sort Memory Candidate")
                 ) { input in
                     guard let text = CMUXPluginParams.string(input.params, "text", "memory") else {
                         throw CMUXSocketCommandError(
                             code: "invalid_params",
-                            message: "memory.write_candidate requires params.text"
+                            message: String(localized: "sortAssistant.plugin.error.memoryWriteCandidateText", defaultValue: "memory.write_candidate requires params.text")
                         )
                     }
                     return runOnMainSync {
@@ -83,7 +83,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "memory.forget",
-                    title: "Forget Free Sort Memory"
+                    title: String(localized: "sortAssistant.plugin.command.memoryForget", defaultValue: "Forget Free Sort Memory")
                 ) { input in
                     runOnMainSync {
                         .ok(SortAssistantCoordinator.shared.socketForgetMemory(
@@ -99,7 +99,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "sprite.memory.query",
-                    title: "Query Sprite Workspace Memory"
+                    title: String(localized: "sortAssistant.plugin.command.spriteMemoryQuery", defaultValue: "Query Sprite Workspace Memory")
                 ) { input in
                     runOnMainSync {
                         .ok(SortAssistantCoordinator.shared.socketSpriteMemoryQuery(
@@ -114,12 +114,12 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "sprite.memory.write",
-                    title: "Write Sprite Workspace Memory"
+                    title: String(localized: "sortAssistant.plugin.command.spriteMemoryWrite", defaultValue: "Write Sprite Workspace Memory")
                 ) { input in
                     guard let text = CMUXPluginParams.string(input.params, "text", "memory") else {
                         throw CMUXSocketCommandError(
                             code: "invalid_params",
-                            message: "sprite.memory.write requires params.text"
+                            message: String(localized: "sortAssistant.plugin.error.spriteMemoryWriteText", defaultValue: "sprite.memory.write requires params.text")
                         )
                     }
                     return runOnMainSync {
@@ -137,12 +137,12 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "sprite.memory.write_candidate",
-                    title: "Write Sprite Workspace Memory"
+                    title: String(localized: "sortAssistant.plugin.command.spriteMemoryWrite", defaultValue: "Write Sprite Workspace Memory")
                 ) { input in
                     guard let text = CMUXPluginParams.string(input.params, "text", "memory") else {
                         throw CMUXSocketCommandError(
                             code: "invalid_params",
-                            message: "sprite.memory.write_candidate requires params.text"
+                            message: String(localized: "sortAssistant.plugin.error.spriteMemoryWriteCandidateText", defaultValue: "sprite.memory.write_candidate requires params.text")
                         )
                     }
                     return runOnMainSync {
@@ -160,7 +160,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "sprite.memory.forget",
-                    title: "Forget Sprite Workspace Memory"
+                    title: String(localized: "sortAssistant.plugin.command.spriteMemoryForget", defaultValue: "Forget Sprite Workspace Memory")
                 ) { input in
                     runOnMainSync {
                         .ok(SortAssistantCoordinator.shared.socketForgetSpriteMemory(
@@ -177,7 +177,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "sort.context",
-                    title: "Sprite Sort Context"
+                    title: String(localized: "sortAssistant.plugin.command.sortContext", defaultValue: "Sprite Sort Context")
                 ) { input in
                     try runOnMainSyncThrowing {
                         guard let payload = SortAssistantCoordinator.shared.socketSortContext(
@@ -195,7 +195,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "sort.preview",
-                    title: "Preview Sprite Sort Patch"
+                    title: String(localized: "sortAssistant.plugin.command.sortPreview", defaultValue: "Preview Sprite Sort Patch")
                 ) { input in
                     try runOnMainSyncThrowing {
                         guard let payload = SortAssistantCoordinator.shared.socketSortPreview(
@@ -214,7 +214,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "sort.apply",
-                    title: "Apply Sprite Sort Patch"
+                    title: String(localized: "sortAssistant.plugin.command.sortApply", defaultValue: "Apply Sprite Sort Patch")
                 ) { input in
                     try runOnMainSyncThrowing {
                         guard let payload = SortAssistantCoordinator.shared.socketSortApply(
@@ -233,13 +233,13 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "sort.undo",
-                    title: "Undo Sprite Sort"
+                    title: String(localized: "sortAssistant.plugin.command.sortUndo", defaultValue: "Undo Sprite Sort")
                 ) { _ in
                     try runOnMainSyncThrowing {
                         guard let payload = SortAssistantCoordinator.shared.socketSortUndo() else {
                             throw CMUXSocketCommandError(
                                 code: "not_found",
-                                message: "No assistant sort is available to undo"
+                                message: String(localized: "sortAssistant.plugin.error.noSortToUndo", defaultValue: "No assistant sort is available to undo")
                             )
                         }
                         return .ok(payload)
@@ -252,7 +252,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "sort.explain",
-                    title: "Explain Sprite Sort"
+                    title: String(localized: "sortAssistant.plugin.command.sortExplain", defaultValue: "Explain Sprite Sort")
                 ) { _ in
                     runOnMainSync {
                         .ok(SortAssistantCoordinator.shared.socketSortExplain())
@@ -265,7 +265,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "list.state",
-                    title: "Sprite Sort List State"
+                    title: String(localized: "sortAssistant.plugin.command.listState", defaultValue: "Sprite Sort List State")
                 ) { _ in
                     try runOnMainSyncThrowing {
                         guard let payload = SortAssistantCoordinator.shared.socketListState() else {
@@ -280,8 +280,136 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
         disposables.append(
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
+                    id: "assistant.working_context.get",
+                    title: String(localized: "sortAssistant.plugin.command.assistantWorkingContext", defaultValue: "Sprite Assistant Working Context")
+                ) { _ in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketAssistantWorkingContext() else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "workspace.snapshot.get",
+                    title: String(localized: "sortAssistant.plugin.command.workspaceSnapshot", defaultValue: "Sprite Workspace Snapshot")
+                ) { input in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketWorkspaceSnapshot(
+                            workspaceId: CMUXPluginParams.string(input.params, "workspaceId", "workspace_id")
+                        ) else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "context.freshness.get",
+                    title: String(localized: "sortAssistant.plugin.command.contextFreshness", defaultValue: "Sprite Context Freshness")
+                ) { input in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketContextFreshness(
+                            workspaceId: CMUXPluginParams.string(input.params, "workspaceId", "workspace_id")
+                        ) else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "suggestions.active.get",
+                    title: String(localized: "sortAssistant.plugin.command.activeSuggestions", defaultValue: "Sprite Active Suggestions")
+                ) { _ in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketActiveSuggestions() else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "suggestion.accept",
+                    title: String(localized: "sortAssistant.plugin.command.suggestionAccept", defaultValue: "Accept Sprite Suggestion")
+                ) { input in
+                    guard let suggestionId = Self.uuid(input.params["suggestionId"] ?? input.params["suggestion_id"]) else {
+                        throw CMUXSocketCommandError(
+                            code: "invalid_params",
+                            message: String(localized: "sortAssistant.plugin.error.suggestionAcceptId", defaultValue: "suggestion.accept requires params.suggestionId")
+                        )
+                    }
+                    return try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketAcceptSuggestion(suggestionId: suggestionId) else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "suggestion.dismiss",
+                    title: String(localized: "sortAssistant.plugin.command.suggestionDismiss", defaultValue: "Dismiss Sprite Suggestion")
+                ) { input in
+                    guard let suggestionId = Self.uuid(input.params["suggestionId"] ?? input.params["suggestion_id"]) else {
+                        throw CMUXSocketCommandError(
+                            code: "invalid_params",
+                            message: String(localized: "sortAssistant.plugin.error.suggestionDismissId", defaultValue: "suggestion.dismiss requires params.suggestionId")
+                        )
+                    }
+                    return try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketDismissSuggestion(suggestionId: suggestionId) else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "ranking.latest.get",
+                    title: String(localized: "sortAssistant.plugin.command.latestRanking", defaultValue: "Sprite Latest Ranking")
+                ) { _ in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketLatestRanking() else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
                     id: "github.context",
-                    title: "Sprite GitHub Context"
+                    title: String(localized: "sortAssistant.plugin.command.githubContext", defaultValue: "Sprite GitHub Context")
                 ) { input in
                     try runOnMainSyncThrowing {
                         guard let payload = SortAssistantCoordinator.shared.socketGitHubContext(
@@ -299,13 +427,75 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
         disposables.append(
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
+                    id: "sprite.workspace_color.get",
+                    title: String(localized: "sortAssistant.plugin.command.workspaceColorGet", defaultValue: "Sprite Workspace Color Get")
+                ) { input in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketWorkspaceColorGet(
+                            workspaceId: CMUXPluginParams.string(input.params, "workspaceId", "workspace_id"),
+                            includePalette: CMUXPluginParams.bool(input.params["includePalette"] ?? input.params["include_palette"]) ?? false
+                        ) else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "sprite.workspace_color.set",
+                    title: String(localized: "sortAssistant.plugin.command.workspaceColorSet", defaultValue: "Sprite Workspace Color Set")
+                ) { input in
+                    guard let color = CMUXPluginParams.string(input.params, "color") else {
+                        throw CMUXSocketCommandError(
+                            code: "invalid_params",
+                            message: String(localized: "sortAssistant.plugin.error.workspaceColorSetColor", defaultValue: "sprite.workspace_color.set requires params.color")
+                        )
+                    }
+                    return try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketWorkspaceColorSet(
+                            workspaceId: CMUXPluginParams.string(input.params, "workspaceId", "workspace_id"),
+                            color: color
+                        ) else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "sprite.workspace_color.clear",
+                    title: String(localized: "sortAssistant.plugin.command.workspaceColorClear", defaultValue: "Sprite Workspace Color Clear")
+                ) { input in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketWorkspaceColorClear(
+                            workspaceId: CMUXPluginParams.string(input.params, "workspaceId", "workspace_id")
+                        ) else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
                     id: "list.lock",
-                    title: "Lock Sprite Sort List Item"
+                    title: String(localized: "sortAssistant.plugin.command.listLock", defaultValue: "Lock Sprite Sort List Item")
                 ) { input in
                     guard let itemId = Self.uuid(input.params["itemId"] ?? input.params["item_id"]) else {
                         throw CMUXSocketCommandError(
                             code: "invalid_params",
-                            message: "list.lock requires params.itemId"
+                            message: String(localized: "sortAssistant.plugin.error.listLockItemId", defaultValue: "list.lock requires params.itemId")
                         )
                     }
                     let locked = CMUXPluginParams.bool(input.params["locked"]) ?? true
@@ -320,12 +510,12 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
                     id: "list.pin",
-                    title: "Pin Sprite Sort List Item"
+                    title: String(localized: "sortAssistant.plugin.command.listPin", defaultValue: "Pin Sprite Sort List Item")
                 ) { input in
                     guard let itemId = Self.uuid(input.params["itemId"] ?? input.params["item_id"]) else {
                         throw CMUXSocketCommandError(
                             code: "invalid_params",
-                            message: "list.pin requires params.itemId"
+                            message: String(localized: "sortAssistant.plugin.error.listPinItemId", defaultValue: "list.pin requires params.itemId")
                         )
                     }
                     return try runOnMainSyncThrowing {
@@ -373,7 +563,7 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
     private static func unavailable() -> CMUXSocketCommandError {
         CMUXSocketCommandError(
             code: "unavailable",
-            message: "Sprite assistant needs an attached workspace sidebar before this tool can run"
+            message: String(localized: "sortAssistant.plugin.error.unavailable", defaultValue: "Sprite assistant needs an attached workspace sidebar before this tool can run")
         )
     }
 }

@@ -1,0 +1,13 @@
+import CMUXContracts
+
+typealias NormalizedWorkspaceContext = CMUXContracts.NormalizedWorkspaceContext
+typealias DerivedWorkspaceState = CMUXContracts.DerivedWorkspaceState
+typealias WorkspaceDigest = CMUXContracts.WorkspaceDigest
+typealias WorkspaceDigestUpdatePolicy = CMUXContracts.WorkspaceDigestUpdatePolicy
+typealias ProviderFreshness = CMUXContracts.ProviderFreshness
+typealias ContextFreshness = CMUXContracts.ContextFreshness
+typealias WorkspaceSnapshot = CMUXContracts.WorkspaceSnapshot
+typealias RankingSnapshot = CMUXContracts.RankingSnapshot
+typealias ProactiveSuggestion = CMUXContracts.ProactiveSuggestion
+typealias AssistantWorkingContext = CMUXContracts.AssistantWorkingContext
+typealias AssistantContextReadable = CMUXContracts.AssistantContextReadable
