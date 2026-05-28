@@ -44,6 +44,7 @@ final class SortAssistantCoordinator: ObservableObject {
     @Published private(set) var presentationSequence = 0
     @Published private(set) var presentationToggleSequence = 0
     @Published private(set) var isConversationBubblePresented = false
+    @Published private(set) var conversationBubbleSide: SortAssistantFloatingConversationBubbleSide = .right
     @Published private(set) var externalGoalSequence = 0
     @Published private(set) var entryFocusSequence = 0
     @Published private(set) var floatingLayoutRevision = 0
@@ -417,6 +418,14 @@ final class SortAssistantCoordinator: ObservableObject {
 #if DEBUG
         cmuxDebugLog("sprite.coordinator conversationBubble=\(presented ? 1 : 0) reason=\(reason)")
 #endif
+    }
+
+    var isFloatingConversationBubbleVisible: Bool {
+        isConversationBubblePresented && !isPanelEdgeRecovery
+    }
+
+    var effectiveConversationBubbleSide: SortAssistantFloatingConversationBubbleSide {
+        isFloatingConversationBubbleVisible ? conversationBubbleSide : .right
     }
 
     func drainExternalGoal(
@@ -4934,6 +4943,15 @@ final class SortAssistantCoordinator: ObservableObject {
         cmuxDebugLog("sprite.coordinator isPanelEdgeRecovery: \(isPanelEdgeRecovery) → \(active)")
 #endif
         isPanelEdgeRecovery = active
+    }
+
+    func setConversationBubbleSide(_ side: SortAssistantFloatingConversationBubbleSide, reason: String) {
+        guard conversationBubbleSide != side else { return }
+#if DEBUG
+        cmuxDebugLog("sprite.coordinator conversationBubbleSide: \(conversationBubbleSide.rawValue) → \(side.rawValue) reason=\(reason)")
+#endif
+        conversationBubbleSide = side
+        invalidateFloatingLayout(reason: "conversationBubbleSide.\(reason).\(side.rawValue)")
     }
 
 #if DEBUG

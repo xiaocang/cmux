@@ -29,6 +29,11 @@ struct SortAssistantFloatingHost: View {
     }
 }
 
+enum SortAssistantFloatingConversationBubbleSide: String {
+    case right
+    case left
+}
+
 private struct SortAssistantFloatingPanelBridge: NSViewRepresentable {
     @Binding var isPresented: Bool
     let layoutRevision: Int
@@ -311,21 +316,41 @@ enum SortAssistantVisibleScreenRange {
 enum SortAssistantFloatingPanelMetrics {
     static let avatarSize: CGFloat = 56
     static let avatarBottomPadding: CGFloat = 8
-    static let avatarVisualFrame = NSRect(
-        x: 0,
-        y: avatarBottomPadding,
-        width: avatarSize,
-        height: avatarSize
-    )
-    static let avatarDragHotspot = NSRect(x: 4, y: 10, width: 48, height: 52)
+    static let conversationWidth: CGFloat = 360
+    static let widgetSpacing: CGFloat = 10
+    static let connectorSize = CGSize(width: 18, height: 24)
+    static let avatarVisualFrame = avatarVisualFrame(side: .right)
+    static let avatarDragHotspot = avatarDragHotspot(side: .right)
     static let spriteEdgeRecoveryOverflowThreshold: CGFloat = 0.5
     static let recoveryMiniSpriteDiameter: CGFloat = 28
+    static var conversationHorizontalExtent: CGFloat {
+        conversationWidth + widgetSpacing
+    }
+
+    static func avatarVisualFrame(side: SortAssistantFloatingConversationBubbleSide) -> NSRect {
+        NSRect(
+            x: avatarSlotMinX(side: side),
+            y: avatarBottomPadding,
+            width: avatarSize,
+            height: avatarSize
+        )
+    }
+
+    static func avatarDragHotspot(side: SortAssistantFloatingConversationBubbleSide) -> NSRect {
+        let base = NSRect(x: 4, y: 10, width: 48, height: 52)
+        return base.offsetBy(dx: avatarSlotMinX(side: side), dy: 0)
+    }
+
     static var minimumVisibleDragHotspotSize: NSSize {
         NSSize(width: recoveryMiniSpriteDiameter, height: recoveryMiniSpriteDiameter)
     }
 
     static var avatarDragRecoveryHotspot: NSRect {
-        let hotspot = avatarDragHotspot
+        avatarDragRecoveryHotspot(side: .right)
+    }
+
+    static func avatarDragRecoveryHotspot(side: SortAssistantFloatingConversationBubbleSide) -> NSRect {
+        let hotspot = avatarDragHotspot(side: side)
         let size = minimumVisibleDragHotspotSize
         return NSRect(
             x: hotspot.midX - size.width * 0.5,
@@ -333,6 +358,37 @@ enum SortAssistantFloatingPanelMetrics {
             width: size.width,
             height: size.height
         )
+    }
+
+    static func conversationBubbleHitFrame(
+        side: SortAssistantFloatingConversationBubbleSide,
+        in bounds: NSRect
+    ) -> NSRect {
+        switch side {
+        case .right:
+            return NSRect(
+                x: avatarSize + widgetSpacing,
+                y: bounds.minY,
+                width: max(0, bounds.maxX - avatarSize - widgetSpacing),
+                height: bounds.height
+            )
+        case .left:
+            return NSRect(
+                x: bounds.minX,
+                y: bounds.minY,
+                width: min(conversationWidth, bounds.width),
+                height: bounds.height
+            )
+        }
+    }
+
+    private static func avatarSlotMinX(side: SortAssistantFloatingConversationBubbleSide) -> CGFloat {
+        switch side {
+        case .right:
+            return 0
+        case .left:
+            return conversationHorizontalExtent
+        }
     }
 }
 
@@ -379,6 +435,12 @@ final class SortAssistantFloatingPanelHostView: NSView {
     private let topOverlayReserveHeight = SortAssistantFloatingPetContent.topOverlayReserveHeight
     fileprivate var isPanelEdgeRecoveryActive: Bool {
         attachedCoordinator?.isPanelEdgeRecovery ?? false
+    }
+    fileprivate var isConversationBubbleVisibleForHitTesting: Bool {
+        attachedCoordinator?.isFloatingConversationBubbleVisible ?? false
+    }
+    fileprivate var effectiveConversationBubbleSide: SortAssistantFloatingConversationBubbleSide {
+        attachedCoordinator?.effectiveConversationBubbleSide ?? .right
     }
 
     override init(frame frameRect: NSRect) {
@@ -629,7 +691,11 @@ final class SortAssistantFloatingPanelHostView: NSView {
             // the recovery clamp so content growth can keep the panel's natural
             // size while the mini-sprite drag hotspot remains visible at the
             // recoverable screen edge.
-            let rectOnScreen = clampToCurrentLayoutMode(desiredRectOnScreen, relativeTo: parentWindow)
+            let rectOnScreen = resolveConversationBubbleSide(
+                for: clampToCurrentLayoutMode(desiredRectOnScreen, relativeTo: parentWindow),
+                relativeTo: parentWindow,
+                source: "syncChildFrame.preserve"
+            )
 #if DEBUG
             let visibleFrame = automaticPanelVisibleFrame(for: rectOnScreen, parentWindow: parentWindow)
             cmuxDebugLog(
@@ -651,7 +717,11 @@ final class SortAssistantFloatingPanelHostView: NSView {
                     return
                 }
                 let desiredRect = NSRect(origin: rectOnScreen.origin, size: childWindow.frame.size)
-                let rect = self.clampToCurrentLayoutMode(desiredRect, relativeTo: parentWindow)
+                let rect = self.resolveConversationBubbleSide(
+                    for: self.clampToCurrentLayoutMode(desiredRect, relativeTo: parentWindow),
+                    relativeTo: parentWindow,
+                    source: "syncChildFrame.async"
+                )
 #if DEBUG
                 let visibleFrame = self.automaticPanelVisibleFrame(for: rect, parentWindow: parentWindow)
                 cmuxDebugLog(
@@ -726,10 +796,22 @@ final class SortAssistantFloatingPanelHostView: NSView {
             )
             origin = resolvedOrigin
         }
+        rectOnScreen = resolveConversationBubbleSide(
+            for: rectOnScreen,
+            relativeTo: parentWindow,
+            preferredScreenPoint: preferredScreenPoint,
+            source: source
+        )
+        resolvedOrigin = originInContent(
+            fromScreenRect: rectOnScreen,
+            parentWindow: parentWindow,
+            contentView: contentView
+        )
+        origin = resolvedOrigin
 #if DEBUG
         let visibleFrame = automaticPanelVisibleFrame(for: rectOnScreen, parentWindow: parentWindow)
         cmuxDebugLog(
-            "sprite.frameResolve source=\(source) preferredOrigin=\(preferredOrigin) resolvedOrigin=\(resolvedOrigin) panelSize=\(size) rect=\(rectOnScreen) visible=\(String(describing: visibleFrame)) clampParent=\(clampToParentArea) clampScreen=\(clampToScreenArea) keepHotspot=\(keepDragHotspotVisible) userPositioned=\(hasUserPositioned) activeDrag=\(dragSession != nil)"
+            "sprite.frameResolve source=\(source) preferredOrigin=\(preferredOrigin) resolvedOrigin=\(resolvedOrigin) panelSize=\(size) rect=\(rectOnScreen) visible=\(String(describing: visibleFrame)) bubbleSide=\(effectiveConversationBubbleSide.rawValue) clampParent=\(clampToParentArea) clampScreen=\(clampToScreenArea) keepHotspot=\(keepDragHotspotVisible) userPositioned=\(hasUserPositioned) activeDrag=\(dragSession != nil)"
         )
 #endif
         lastResolvedScreenOrigin = rectOnScreen.origin
@@ -768,13 +850,14 @@ final class SortAssistantFloatingPanelHostView: NSView {
     // window/content viewport is also not a boundary; only the physical display
     // visible frame can trigger edge recovery.
     private func updatePanelEdgeRecoveryState(for rectOnScreen: NSRect, source: String) {
+        let bubbleSide = effectiveConversationBubbleSide
         let avatarSpriteOnScreen = SortAssistantFloatingPanelScreenClamp.hotspotRect(
             in: rectOnScreen,
-            hotspot: SortAssistantFloatingPanelMetrics.avatarVisualFrame
+            hotspot: SortAssistantFloatingPanelMetrics.avatarVisualFrame(side: bubbleSide)
         )
         let avatarHotspotOnScreen = SortAssistantFloatingPanelScreenClamp.hotspotRect(
             in: rectOnScreen,
-            hotspot: SortAssistantFloatingPanelMetrics.avatarDragHotspot
+            hotspot: SortAssistantFloatingPanelMetrics.avatarDragHotspot(side: bubbleSide)
         )
         guard let parentWindow = window else {
 #if DEBUG
@@ -797,7 +880,7 @@ final class SortAssistantFloatingPanelHostView: NSView {
         }
         let recoveryHotspotOnScreen = SortAssistantFloatingPanelScreenClamp.hotspotRect(
             in: rectOnScreen,
-            hotspot: SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot
+            hotspot: SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot(side: bubbleSide)
         )
         let panelEdges = overflowEdges(of: rectOnScreen, outside: referenceFrame)
         let spriteEdges = overflowEdges(of: avatarSpriteOnScreen, outside: referenceFrame)
@@ -876,6 +959,70 @@ final class SortAssistantFloatingPanelHostView: NSView {
             bottom: max(0, frame.minY - rect.minY),
             top: max(0, rect.maxY - frame.maxY)
         )
+    }
+
+    private func resolveConversationBubbleSide(
+        for rect: NSRect,
+        relativeTo parentWindow: NSWindow,
+        preferredScreenPoint: CGPoint? = nil,
+        source: String
+    ) -> NSRect {
+        guard let coordinator = attachedCoordinator,
+              coordinator.isFloatingConversationBubbleVisible,
+              dragSession == nil else {
+            return rect
+        }
+
+        let currentSide = coordinator.effectiveConversationBubbleSide
+        let currentAvatarFrame = SortAssistantFloatingPanelMetrics.avatarVisualFrame(side: currentSide)
+        let avatarOnScreen = SortAssistantFloatingPanelScreenClamp.hotspotRect(
+            in: rect,
+            hotspot: currentAvatarFrame
+        )
+        guard let visibleFrame = automaticPanelVisibleFrame(
+            for: avatarOnScreen,
+            parentWindow: parentWindow,
+            preferredScreenPoint: preferredScreenPoint
+        ) else {
+            return rect
+        }
+
+        let preferredSide = preferredConversationBubbleSide(
+            avatarOnScreen: avatarOnScreen,
+            visibleFrame: visibleFrame
+        )
+        guard preferredSide != coordinator.conversationBubbleSide else {
+            return rect
+        }
+
+        let preferredAvatarFrame = SortAssistantFloatingPanelMetrics.avatarVisualFrame(side: preferredSide)
+        var resolved = rect
+        resolved.origin.x += currentAvatarFrame.minX - preferredAvatarFrame.minX
+        coordinator.setConversationBubbleSide(preferredSide, reason: source)
+        resolved = manualDragScreenRect(
+            resolved,
+            relativeTo: parentWindow,
+            preferredScreenPoint: preferredScreenPoint
+        )
+#if DEBUG
+        cmuxDebugLog(
+            "sprite.bubbleSide source=\(source) current=\(currentSide.rawValue) preferred=\(preferredSide.rawValue) avatar=\(avatarOnScreen) visible=\(visibleFrame) before=\(rect) after=\(resolved)"
+        )
+#endif
+        return resolved
+    }
+
+    private func preferredConversationBubbleSide(
+        avatarOnScreen: NSRect,
+        visibleFrame: NSRect
+    ) -> SortAssistantFloatingConversationBubbleSide {
+        let requiredSpace = SortAssistantFloatingPanelMetrics.conversationHorizontalExtent
+        let rightAvailable = visibleFrame.maxX - edgePadding - avatarOnScreen.maxX
+        let leftAvailable = avatarOnScreen.minX - visibleFrame.minX - edgePadding
+        guard rightAvailable < requiredSpace else {
+            return .right
+        }
+        return leftAvailable > rightAvailable ? .left : .right
     }
 
     private func defaultOrigin(panelSize: NSSize, in containerSize: NSSize) -> CGPoint {
@@ -988,7 +1135,7 @@ final class SortAssistantFloatingPanelHostView: NSView {
     ) -> NSRect {
         let hotspotRect = SortAssistantFloatingPanelScreenClamp.hotspotRect(
             in: rect,
-            hotspot: SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot
+            hotspot: SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot(side: effectiveConversationBubbleSide)
         )
         guard let visibleFrame = automaticPanelVisibleFrame(
             for: hotspotRect,
@@ -1005,14 +1152,14 @@ final class SortAssistantFloatingPanelHostView: NSView {
             visibleFrame: visibleFrame,
             edgePadding: edgePadding,
             mode: .manualDrag(
-                hotspot: SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot,
+                hotspot: SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot(side: effectiveConversationBubbleSide),
                 minimumVisibleSize: SortAssistantFloatingPanelMetrics.minimumVisibleDragHotspotSize
             )
         )
 #if DEBUG
         let resolvedHotspot = SortAssistantFloatingPanelScreenClamp.hotspotRect(
             in: resolved,
-            hotspot: SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot
+            hotspot: SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot(side: effectiveConversationBubbleSide)
         )
         cmuxDebugLog(
             "sprite.clamp.manual requested=\(rect) visible=\(visibleFrame) recoveryHotspotBefore=\(hotspotRect) visibleBefore=\(hotspotRect.intersection(visibleFrame)) resolved=\(resolved) recoveryHotspotAfter=\(resolvedHotspot) visibleAfter=\(resolvedHotspot.intersection(visibleFrame)) minVisible=\(SortAssistantFloatingPanelMetrics.minimumVisibleDragHotspotSize) preferredScreenPoint=\(String(describing: preferredScreenPoint))"
@@ -1093,7 +1240,16 @@ final class SortAssistantFloatingPanelHostView: NSView {
         )
 #endif
         dragSession = nil
-        if let finalFrame {
+        if childWindow != nil,
+           let size = childWindow?.frame.size {
+            repositionChildWindow(
+                panelSize: size,
+                clampToParentArea: false,
+                clampToScreenArea: false,
+                keepDragHotspotVisible: true,
+                source: "drag.end"
+            )
+        } else if let finalFrame {
             updatePanelEdgeRecoveryState(for: finalFrame, source: "drag.end")
         }
     }
@@ -1156,14 +1312,15 @@ private struct SortAssistantFloatingPetContent: View {
     @ObservedObject var tabManager: TabManager
     @ObservedObject var workspaceTabStore: WorkspaceTabStore
 
-    private let conversationWidth: CGFloat = 360
+    private let conversationWidth = SortAssistantFloatingPanelMetrics.conversationWidth
     private let avatarSize = SortAssistantFloatingPanelMetrics.avatarSize
     private let avatarBottomPadding = SortAssistantFloatingPanelMetrics.avatarBottomPadding
-    private let connectorSize = CGSize(width: 18, height: 24)
-    private let widgetSpacing: CGFloat = 10
+    private let connectorSize = SortAssistantFloatingPanelMetrics.connectorSize
+    private let widgetSpacing = SortAssistantFloatingPanelMetrics.widgetSpacing
 
     var body: some View {
         let isBubbleVisible = coordinator.isConversationBubblePresented && !coordinator.isPanelEdgeRecovery
+        let bubbleSide = coordinator.effectiveConversationBubbleSide
         VStack(spacing: 0) {
             if isBubbleVisible {
                 Color.clear
@@ -1171,9 +1328,13 @@ private struct SortAssistantFloatingPetContent: View {
                     .allowsHitTesting(false)
             }
             HStack(alignment: .bottom, spacing: widgetSpacing) {
+                if isBubbleVisible && bubbleSide == .left {
+                    conversationBubble(side: bubbleSide)
+                        .transition(.opacity)
+                }
                 mascot
-                if isBubbleVisible {
-                    conversationBubble
+                if isBubbleVisible && bubbleSide == .right {
+                    conversationBubble(side: bubbleSide)
                         .transition(.opacity)
                 }
             }
@@ -1258,7 +1419,7 @@ private struct SortAssistantFloatingPetContent: View {
         NSColor.controlBackgroundColor
     }
 
-    private var conversationBubble: some View {
+    private func conversationBubble(side: SortAssistantFloatingConversationBubbleSide) -> some View {
         SortAssistantThreadView(
             coordinator: coordinator,
             tabManager: tabManager,
@@ -1276,14 +1437,7 @@ private struct SortAssistantFloatingPetContent: View {
         .overlay(conversationInnerHighlight)
         .overlay(conversationInnerLowlight)
         .overlay(alignment: .topLeading) {
-            GeometryReader { proxy in
-                conversationConnector
-                    .offset(
-                        x: -12,
-                        y: connectorTopOffset(forBubbleHeight: proxy.size.height)
-                    )
-            }
-            .allowsHitTesting(false)
+            conversationConnectorOverlay(side: side)
         }
     }
 
@@ -1341,6 +1495,23 @@ private struct SortAssistantFloatingPetContent: View {
             .allowsHitTesting(false)
     }
 
+    private func conversationConnectorOverlay(side: SortAssistantFloatingConversationBubbleSide) -> some View {
+        GeometryReader { proxy in
+            conversationConnector
+                .scaleEffect(x: side == .left ? -1 : 1, y: 1, anchor: .center)
+                .offset(
+                    x: side == .left ? 12 : -12,
+                    y: connectorTopOffset(forBubbleHeight: proxy.size.height)
+                )
+                .frame(
+                    width: proxy.size.width,
+                    height: proxy.size.height,
+                    alignment: side == .left ? .topTrailing : .topLeading
+                )
+        }
+        .allowsHitTesting(false)
+    }
+
     private func connectorTopOffset(forBubbleHeight bubbleHeight: CGFloat) -> CGFloat {
         let spriteCenterY = bubbleHeight - avatarBottomPadding - avatarSize * 0.5
         let centeredTop = spriteCenterY - connectorSize.height * 0.5
@@ -1355,7 +1526,6 @@ private final class SortAssistantFloatingPanelWindow: NSPanel {
     private var pendingDragStartPoint: CGPoint?
     private var isDraggingPet = false
     private var isForwardingMouseEventsToParent = false
-    private let bubbleHitMinX: CGFloat = 66
     private let dragThresholdSquared: CGFloat = 9
 
     override var canBecomeKey: Bool { true }
@@ -1459,9 +1629,10 @@ private final class SortAssistantFloatingPanelWindow: NSPanel {
     }
 
     private func isInAvatarDragHotspot(_ point: CGPoint) -> Bool {
+        let side = dragOwner?.effectiveConversationBubbleSide ?? .right
         let rect = dragOwner?.isPanelEdgeRecoveryActive == true
-            ? SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot
-            : SortAssistantFloatingPanelMetrics.avatarDragHotspot
+            ? SortAssistantFloatingPanelMetrics.avatarDragRecoveryHotspot(side: side)
+            : SortAssistantFloatingPanelMetrics.avatarDragHotspot(side: side)
         guard rect.contains(point) else { return false }
         let dx = (point.x - rect.midX) / max(rect.width * 0.5, 1)
         let dy = (point.y - rect.midY) / max(rect.height * 0.5, 1)
@@ -1479,11 +1650,15 @@ private final class SortAssistantFloatingPanelWindow: NSPanel {
         if dragOwner?.isPanelEdgeRecoveryActive == true {
             return false
         }
+        guard dragOwner?.isConversationBubbleVisibleForHitTesting == true else {
+            return false
+        }
         let bounds = contentView?.bounds ?? NSRect(origin: .zero, size: frame.size)
-        return point.x >= bubbleHitMinX &&
-            point.x <= bounds.maxX &&
-            point.y >= bounds.minY &&
-            point.y <= bounds.maxY
+        let bubbleFrame = SortAssistantFloatingPanelMetrics.conversationBubbleHitFrame(
+            side: dragOwner?.effectiveConversationBubbleSide ?? .right,
+            in: bounds
+        )
+        return bubbleFrame.contains(point)
     }
 
     private func forwardMouseEventToParent(_ event: NSEvent) {

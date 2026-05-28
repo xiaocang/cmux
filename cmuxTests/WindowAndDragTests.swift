@@ -6959,6 +6959,8 @@ final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
         )
         parentWindow.isReleasedWhenClosed = false
         parentWindow.setFrame(parentFrame, display: false)
+        SortAssistantCoordinator.shared.setPanelEdgeRecovery(false)
+        SortAssistantCoordinator.shared.setConversationBubbleSide(.right, reason: "testSetup")
         tabManager = TabManager()
         workspaceTabStore = WorkspaceTabStore()
         hostView = SortAssistantFloatingPanelHostView()
@@ -7000,6 +7002,20 @@ final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
             tabManager: tabManager,
             workspaceTabStore: workspaceTabStore
         )
+    }
+
+    private func drainFloatingPanelLayout() {
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+    }
+
+    private func restoreSpriteBubbleState(presented: Bool, side: SortAssistantFloatingConversationBubbleSide) {
+        let coordinator = SortAssistantCoordinator.shared
+        if coordinator.conversationBubbleSide != side {
+            coordinator.setConversationBubbleSide(side, reason: "testRestore")
+        }
+        if coordinator.isConversationBubblePresented != presented {
+            _ = coordinator.toggleConversationBubble(reason: "testRestore")
+        }
     }
 
     func testPanelOriginTracksCursorDeltaExactly() throws {
@@ -7288,6 +7304,75 @@ final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
         )
     }
 
+    func testConversationBubbleSwitchesToLeftNearRightScreenEdge() throws {
+        guard let mainVisible = NSScreen.main?.visibleFrame else {
+            throw XCTSkip("Requires a screen")
+        }
+        let coordinator = SortAssistantCoordinator.shared
+        let previousPresented = coordinator.isConversationBubblePresented
+        let previousSide = coordinator.conversationBubbleSide
+        defer {
+            restoreSpriteBubbleState(presented: previousPresented, side: previousSide)
+        }
+
+        coordinator.setPanelEdgeRecovery(false)
+        coordinator.setConversationBubbleSide(.right, reason: "testSetup")
+        if !coordinator.isConversationBubblePresented {
+            coordinator.openConversationBubble(reason: "testSetup")
+        }
+
+        present()
+        drainFloatingPanelLayout()
+        guard let initial = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel before right-edge drag")
+            return
+        }
+
+        let initialAvatar = SortAssistantFloatingPanelScreenClamp.hotspotRect(
+            in: initial,
+            hotspot: SortAssistantFloatingPanelMetrics.avatarVisualFrame(side: .right)
+        )
+        let start = NSPoint(x: floor(initialAvatar.midX), y: floor(initialAvatar.midY))
+        hostView.beginDrag(screenPoint: start)
+        hostView.updateDrag(screenPoint: NSPoint(x: mainVisible.maxX - 100, y: start.y))
+        hostView.endDrag()
+
+        XCTAssertEqual(
+            coordinator.conversationBubbleSide,
+            .left,
+            "The sprite bubble should move to the left when a right-side bubble would cross the visible screen edge"
+        )
+        XCTAssertFalse(
+            coordinator.isPanelEdgeRecovery,
+            "Flipping the bubble side should keep the full sprite visible instead of entering edge recovery"
+        )
+
+        guard let after = hostView.debugChildPanelScreenFrame else {
+            XCTFail("Expected child panel after right-edge layout")
+            return
+        }
+        let avatar = SortAssistantFloatingPanelScreenClamp.hotspotRect(
+            in: after,
+            hotspot: SortAssistantFloatingPanelMetrics.avatarVisualFrame(side: .left)
+        )
+        let bubble = NSRect(
+            x: after.minX,
+            y: after.minY,
+            width: SortAssistantFloatingPanelMetrics.conversationWidth,
+            height: after.height
+        )
+
+        XCTAssertTrue(mainVisible.contains(avatar),
+                      "The sprite itself should remain visible after the bubble flips left")
+        XCTAssertLessThanOrEqual(
+            bubble.maxX,
+            avatar.minX - SortAssistantFloatingPanelMetrics.widgetSpacing + 0.5,
+            "Left-side conversation bubble should sit to the left of the sprite"
+        )
+        XCTAssertLessThanOrEqual(after.maxX, mainVisible.maxX + 0.5,
+                                 "The left-side layout should not push the sprite edge past the screen")
+    }
+
     // The cmux parent content viewport is not a sprite boundary. The user can
     // drag the floating assistant outside the app window while it remains
     // visible on the physical display; that must not activate mini mode.
@@ -7295,6 +7380,7 @@ final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
         guard let mainVisible = NSScreen.main?.visibleFrame else {
             throw XCTSkip("Requires a screen")
         }
+        drainFloatingPanelLayout()
         guard let initial = hostView.debugChildPanelScreenFrame,
               let parentContentFrame = parentContentFrameOnScreen() else {
             XCTFail("Expected child panel and parent content frame after presenting")
@@ -7397,6 +7483,7 @@ final class SortAssistantFloatingPanelDragTrackingTests: XCTestCase {
 
         hostView.debugSetUserPositioned(false)
         present()
+        drainFloatingPanelLayout()
 
         XCTAssertTrue(
             SortAssistantCoordinator.shared.isPanelEdgeRecovery,
