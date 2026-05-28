@@ -73,7 +73,6 @@ struct SortAssistantMascotButton: View {
     let state: SortAssistantMascotState
     let action: () -> Void
 
-    @State private var isHovered = false
     @State private var bobbing = false
 
     init(
@@ -92,7 +91,6 @@ struct SortAssistantMascotButton: View {
             SortAssistantMascotView(
                 size: presentation.size,
                 state: state,
-                isHovered: isHovered,
                 bobbing: bobbing
             )
             .padding(presentation == .modeBar ? 2 : 0)
@@ -101,7 +99,6 @@ struct SortAssistantMascotButton: View {
         .buttonStyle(.plain)
         .accessibilityLabel(String(localized: "sortAssistant.mascot.open", defaultValue: "Open sort assistant"))
         .help(String(localized: "sortAssistant.mascot.open", defaultValue: "Open sort assistant"))
-        .onHover { isHovered = $0 }
         .onAppear {
             startAnimation()
         }
@@ -172,7 +169,6 @@ struct SortAssistantMascotAvatar: View {
         SortAssistantMascotView(
             size: size,
             state: state ?? (isActive ? .review : .idle),
-            isHovered: false,
             bobbing: false
         )
         .accessibilityHidden(true)
@@ -182,18 +178,12 @@ struct SortAssistantMascotAvatar: View {
 private struct SortAssistantMascotView: View {
     let size: CGFloat
     let state: SortAssistantMascotState
-    let isHovered: Bool
     let bobbing: Bool
 
     private static let frameWidth: CGFloat = 192
     private static let frameHeight: CGFloat = 208
     private static let columns: CGFloat = 8
     private static let rows: CGFloat = 9
-
-    private var spriteState: SortAssistantMascotState {
-        if isHovered { return .waving }
-        return state
-    }
 
     private var spriteWidth: CGFloat {
         size * 0.84
@@ -204,21 +194,19 @@ private struct SortAssistantMascotView: View {
     }
 
     private var lift: CGFloat {
-        if isHovered { return -2 }
         return bobbing ? -1.5 : 1
     }
 
     var body: some View {
-        let state = spriteState
+        let renderedState = state
         ZStack {
             shadow
-            TimelineView(.animation(minimumInterval: state.duration / Double(state.frames))) { context in
-                sprite(state: state, frame: frameIndex(state: state, at: context.date))
+            TimelineView(.animation(minimumInterval: renderedState.duration / Double(renderedState.frames))) { context in
+                sprite(state: renderedState, frame: frameIndex(state: renderedState, at: context.date))
             }
                 .offset(y: lift)
         }
         .frame(width: size, height: size)
-        .animation(.easeInOut(duration: 0.18), value: isHovered)
     }
 
     private var shadow: some View {
@@ -244,7 +232,7 @@ private struct SortAssistantMascotView: View {
             )
             .frame(width: spriteWidth, height: spriteHeight, alignment: .topLeading)
             .clipped()
-            .shadow(color: Color.black.opacity(isHovered ? 0.22 : 0.14), radius: isHovered ? 4 : 2, x: 0, y: 2)
+            .shadow(color: Color.black.opacity(0.14), radius: 2, x: 0, y: 2)
     }
 
     private func frameIndex(state: SortAssistantMascotState, at date: Date) -> Int {
