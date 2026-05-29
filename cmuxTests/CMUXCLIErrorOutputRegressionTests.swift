@@ -51,6 +51,33 @@ final class CMUXCLIErrorOutputRegressionTests: XCTestCase {
         }
     }
 
+    func testClaudeWrapperOnlyAddsBlockingPermissionHookWhenExplicitlyEnabled() throws {
+        let defaultArgs = try runStagedClaudeWrapper(arguments: ["summarize this"])
+        let defaultSettings = try settingsArgument(in: defaultArgs)
+
+        XCTAssertFalse(defaultSettings.contains(#""PermissionRequest""#), defaultSettings)
+        XCTAssertFalse(defaultSettings.contains(#""timeout":125"#), defaultSettings)
+        XCTAssertTrue(defaultSettings.contains(#""PostToolUseFailure""#), defaultSettings)
+
+        let enabledArgs = try runStagedClaudeWrapper(
+            arguments: ["summarize this"],
+            extraEnvironment: ["CMUX_CLAUDE_PERMISSION_REQUEST_HOOK": "1"]
+        )
+        let enabledSettings = try settingsArgument(in: enabledArgs)
+
+        XCTAssertTrue(enabledSettings.contains(#""PermissionRequest""#), enabledSettings)
+        XCTAssertTrue(enabledSettings.contains(#""timeout":125"#), enabledSettings)
+
+        let enabledPrintArgs = try runStagedClaudeWrapper(
+            arguments: ["-p", "summarize this"],
+            extraEnvironment: ["CMUX_CLAUDE_PERMISSION_REQUEST_HOOK": "1"]
+        )
+        let enabledPrintSettings = try settingsArgument(in: enabledPrintArgs)
+
+        XCTAssertFalse(enabledPrintSettings.contains(#""PermissionRequest""#), enabledPrintSettings)
+        XCTAssertFalse(enabledPrintSettings.contains(#""timeout":125"#), enabledPrintSettings)
+    }
+
     func testBundledCLIInTaggedDebugAppPrefersItsOwnSocketWithoutEnvironmentOverride() throws {
         let cliPath = try bundledCLIPath()
         let tagSlug = "cli-socket-\(UUID().uuidString.lowercased())"
@@ -864,6 +891,95 @@ final class CMUXCLIErrorOutputRegressionTests: XCTestCase {
         }
 
         throw XCTSkip("Bundled cmux CLI not found in \(appBundleURL.path)")
+    }
+
+    private func bundledClaudeWrapperPath() throws -> String {
+        let cliURL = URL(fileURLWithPath: try bundledCLIPath())
+        let wrapperURL = cliURL.deletingLastPathComponent().appendingPathComponent("claude", isDirectory: false)
+        guard FileManager.default.fileExists(atPath: wrapperURL.path) else {
+            throw XCTSkip("Bundled claude wrapper not found next to \(cliURL.path)")
+        }
+        return wrapperURL.path
+    }
+
+    private func runStagedClaudeWrapper(
+        arguments: [String],
+        extraEnvironment: [String: String] = [:]
+    ) throws -> [String] {
+        let fileManager = FileManager.default
+        let root = fileManager.temporaryDirectory
+            .appendingPathComponent("cmux-claude-wrapper-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fileManager.removeItem(at: root) }
+
+        let wrapperDir = root.appendingPathComponent("wrapper-bin", isDirectory: true)
+        let realDir = root.appendingPathComponent("real-bin", isDirectory: true)
+        try fileManager.createDirectory(at: wrapperDir, withIntermediateDirectories: true)
+        try fileManager.createDirectory(at: realDir, withIntermediateDirectories: true)
+
+        let wrapperURL = wrapperDir.appendingPathComponent("claude", isDirectory: false)
+        try fileManager.copyItem(atPath: try bundledClaudeWrapperPath(), toPath: wrapperURL.path)
+        try fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wrapperURL.path)
+
+        try writeExecutableScript(
+            """
+            #!/bin/sh
+            exit 0
+            """,
+            to: wrapperDir.appendingPathComponent("cmux", isDirectory: false)
+        )
+        try writeExecutableScript(
+            """
+            #!/bin/sh
+            for arg do
+                printf '%s\\n' "$arg"
+            done
+            """,
+            to: realDir.appendingPathComponent("claude", isDirectory: false)
+        )
+
+        let socketPath = "/tmp/cmux-claude-wrapper-\(UUID().uuidString).sock"
+        let responder = try UnixSocketResponder(path: socketPath, response: "{}")
+        defer { responder.stop() }
+
+        var environment = ProcessInfo.processInfo.environment
+        for key in Array(environment.keys) where key.hasPrefix("CMUX_") {
+            environment.removeValue(forKey: key)
+        }
+        environment["CMUX_SURFACE_ID"] = "surface:wrapper-test"
+        environment["CMUX_SOCKET_PATH"] = socketPath
+        environment["HOME"] = root.path
+        environment["TMPDIR"] = root.path
+        environment["PATH"] = "\(realDir.path):/usr/bin:/bin"
+        for (key, value) in extraEnvironment {
+            environment[key] = value
+        }
+
+        let result = runProcess(
+            executablePath: wrapperURL.path,
+            arguments: arguments,
+            environment: environment,
+            timeout: 5
+        )
+
+        XCTAssertFalse(result.timedOut, result.stdout)
+        XCTAssertEqual(result.status, 0, result.stdout)
+        return result.stdout
+            .components(separatedBy: .newlines)
+            .filter { !$0.isEmpty }
+    }
+
+    private func writeExecutableScript(_ contents: String, to url: URL) throws {
+        try contents.write(to: url, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+    }
+
+    private func settingsArgument(in arguments: [String]) throws -> String {
+        let index = try XCTUnwrap(arguments.firstIndex(of: "--settings"), arguments.joined(separator: "\n"))
+        guard index + 1 < arguments.count else {
+            XCTFail("Missing --settings value in arguments:\n\(arguments.joined(separator: "\n"))")
+            return ""
+        }
+        return arguments[index + 1]
     }
 
     private func stableSocketURL() throws -> URL {

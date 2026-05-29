@@ -69,6 +69,29 @@ final class GhosttyTerminalStartupEnvironmentTests: XCTestCase {
         XCTAssertEqual(merged["CMUX_NO_GIT_WATCH"], "")
     }
 
+    func testApplyManagedClaudePermissionRequestHookEnvironmentEnablesInteractiveApprovalHook() {
+        var environment: [String: String] = [:]
+        var protectedKeys: Set<String> = []
+
+        TerminalSurface.applyManagedClaudePermissionRequestHookEnvironment(
+            to: &environment,
+            protectedKeys: &protectedKeys
+        )
+        let merged = TerminalSurface.mergedStartupEnvironment(
+            base: environment,
+            protectedKeys: protectedKeys,
+            additionalEnvironment: [
+                TerminalSurface.claudePermissionRequestHookEnvironmentKey: "0"
+            ],
+            initialEnvironmentOverrides: [
+                TerminalSurface.claudePermissionRequestHookEnvironmentKey: "0"
+            ]
+        )
+
+        XCTAssertEqual(merged[TerminalSurface.claudePermissionRequestHookEnvironmentKey], "1")
+        XCTAssertTrue(protectedKeys.contains(TerminalSurface.claudePermissionRequestHookEnvironmentKey))
+    }
+
     func testMergedStartupEnvironmentAllowsSessionReplayAndInitialEnvCMUXKeys() {
         let replayPath = "/tmp/cmux-replay-\(UUID().uuidString)"
         let merged = TerminalSurface.mergedStartupEnvironment(

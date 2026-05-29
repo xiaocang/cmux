@@ -6111,6 +6111,10 @@ final class TerminalSurface: Identifiable, ObservableObject {
         if !claudeHooksEnabled {
             setManagedEnvironmentValue("CMUX_CLAUDE_HOOKS_DISABLED", "1")
         }
+        Self.applyManagedClaudePermissionRequestHookEnvironment(
+            to: &env,
+            protectedKeys: &protectedStartupEnvironmentKeys
+        )
         if let customClaudePath = ClaudeCodeIntegrationSettings.customClaudePath() {
             setManagedEnvironmentValue("CMUX_CUSTOM_CLAUDE_PATH", customClaudePath)
         }

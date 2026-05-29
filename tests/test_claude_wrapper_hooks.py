@@ -46,6 +46,7 @@ def run_wrapper(
     node_options: str | None = None,
     tmpdir: str | None = None,
     hooks_disabled: bool = False,
+    permission_request_hook: bool = False,
 ) -> tuple[int, list[str], list[str], str, str, str, str, str, str, str]:
     with tempfile.TemporaryDirectory(prefix="cmux-claude-wrapper-test-") as td:
         tmp = Path(td)
@@ -183,6 +184,10 @@ exit 0
             env["CMUX_CLAUDE_HOOKS_DISABLED"] = "1"
         else:
             env.pop("CMUX_CLAUDE_HOOKS_DISABLED", None)
+        if permission_request_hook:
+            env["CMUX_CLAUDE_PERMISSION_REQUEST_HOOK"] = "1"
+        else:
+            env.pop("CMUX_CLAUDE_PERMISSION_REQUEST_HOOK", None)
         env.pop("NODE_OPTIONS", None)
         if tmpdir is not None:
             env["TMPDIR"] = tmpdir
@@ -250,6 +255,7 @@ def run_wrapper_terminal_env_probe(
         fingerprint_env = {
             "CMUX_BUNDLE_ID": "com.cmuxterm.app.debug.envprobe",
             "CMUX_BUNDLED_CLI_PATH": str(wrapper_dir / "cmux"),
+            "CMUX_CLAUDE_PERMISSION_REQUEST_HOOK": "1",
             "CMUX_LOAD_GHOSTTY_ZSH_INTEGRATION": "1",
             "CMUX_PANEL_ID": "panel:test",
             "CMUX_PORT": "9170",
@@ -463,6 +469,7 @@ def test_live_socket_injects_supported_hooks_without_unlocking_bypass(failures: 
     code, real_argv, cmux_log, stderr, claudecode, node_options, runtime_node_options, child_node_options, hook_cmux_bin, _ = run_wrapper(
         socket_state="live",
         argv=["hello"],
+        permission_request_hook=True,
     )
     expect(code == 0, f"live socket: wrapper exited {code}: {stderr}", failures)
     expect("--settings" in real_argv, f"live socket: missing --settings in args: {real_argv}", failures)
@@ -595,6 +602,31 @@ def test_live_socket_injects_supported_hooks_without_unlocking_bypass(failures: 
         f"SessionEnd hook should have short timeout, got {session_end_hooks}",
         failures,
     )
+
+
+def test_live_socket_omits_permission_request_hook_without_explicit_opt_in(failures: list[str]) -> None:
+    code, real_argv, _, stderr, _, _, _, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+    )
+    expect(code == 0, f"default PermissionRequest omission: wrapper exited {code}: {stderr}", failures)
+    settings = parse_settings_arg(real_argv)
+    hooks = settings.get("hooks", {})
+    expect("PostToolUseFailure" in hooks, f"default PermissionRequest omission: expected normal hooks, got {hooks}", failures)
+    expect("PermissionRequest" not in hooks, f"default PermissionRequest omission: unexpected PermissionRequest hook in {hooks}", failures)
+
+
+def test_print_mode_omits_permission_request_hook_even_when_explicitly_enabled(failures: list[str]) -> None:
+    code, real_argv, _, stderr, _, _, _, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["-p", "summarize this"],
+        permission_request_hook=True,
+    )
+    expect(code == 0, f"print mode PermissionRequest omission: wrapper exited {code}: {stderr}", failures)
+    settings = parse_settings_arg(real_argv)
+    hooks = settings.get("hooks", {})
+    expect("PostToolUseFailure" in hooks, f"print mode PermissionRequest omission: expected normal hooks, got {hooks}", failures)
+    expect("PermissionRequest" not in hooks, f"print mode PermissionRequest omission: unexpected PermissionRequest hook in {hooks}", failures)
 
 
 def test_plain_claude_launch_argv_has_no_empty_argument(failures: list[str]) -> None:
@@ -1128,6 +1160,8 @@ def test_stale_socket_skips_hook_injection(failures: list[str]) -> None:
 def main() -> int:
     failures: list[str] = []
     test_live_socket_injects_supported_hooks_without_unlocking_bypass(failures)
+    test_live_socket_omits_permission_request_hook_without_explicit_opt_in(failures)
+    test_print_mode_omits_permission_request_hook_even_when_explicitly_enabled(failures)
     test_plain_claude_launch_argv_has_no_empty_argument(failures)
     test_command_like_invocations_bypass_hook_injection(failures)
     test_passthrough_flags_bypass_hook_injection(failures)

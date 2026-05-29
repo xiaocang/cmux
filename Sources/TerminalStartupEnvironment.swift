@@ -5,6 +5,7 @@ extension TerminalSurface {
     static let managedTerminalType = "xterm-256color"
     static let managedTerminalProgram = "ghostty"
     static let managedColorTerm = "truecolor"
+    static let claudePermissionRequestHookEnvironmentKey = "CMUX_CLAUDE_PERMISSION_REQUEST_HOOK"
 
     private static let inheritedClaudeAuthSelectionEnvironmentKeys: Set<String> = [
         "ANTHROPIC_API_KEY",
@@ -33,6 +34,14 @@ extension TerminalSurface {
     ) {
         environment["CMUX_NO_GIT_WATCH"] = watchGitStatusEnabled ? "" : "1"
         protectedKeys.insert("CMUX_NO_GIT_WATCH")
+    }
+
+    static func applyManagedClaudePermissionRequestHookEnvironment(
+        to environment: inout [String: String],
+        protectedKeys: inout Set<String>
+    ) {
+        environment[claudePermissionRequestHookEnvironmentKey] = "1"
+        protectedKeys.insert(claudePermissionRequestHookEnvironmentKey)
     }
 
     static func mergedStartupEnvironment(
