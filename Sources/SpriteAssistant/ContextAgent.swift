@@ -64,17 +64,18 @@ extension ContextAgent {
         from eventBus: CmuxEventBus = .shared,
         afterSequence: Int64? = nil,
         pollTimeout: TimeInterval = 1,
-        batchMaxJobs: Int = 16
+        batchMaxJobs: Int = 16,
+        onBatch: (@Sendable (ContextAgentBatchResult) async -> Void)? = nil
     ) -> Task<Void, Never> {
         let snapshot = eventBus.subscribe(
             afterSequence: afterSequence,
             names: [],
             categories: Self.eventCategories
         )
-        return Task.detached { [snapshot, eventBus] in
+        return Task.detached { [snapshot, eventBus, onBatch] in
             defer { eventBus.unsubscribe(snapshot.subscription) }
             for rawEvent in snapshot.replay {
-                await self.handleAndDrain(rawEvent, maxJobs: batchMaxJobs)
+                await self.handleAndDrain(rawEvent, maxJobs: batchMaxJobs, onBatch: onBatch)
             }
             while !Task.isCancelled {
                 guard let rawEvent = snapshot.subscription.next(timeout: pollTimeout) else {
@@ -83,17 +84,27 @@ extension ContextAgent {
                     }
                     continue
                 }
-                await self.handleAndDrain(rawEvent, maxJobs: batchMaxJobs)
+                await self.handleAndDrain(rawEvent, maxJobs: batchMaxJobs, onBatch: onBatch)
             }
         }
     }
 
-    private func handleAndDrain(_ rawEvent: [String: Any], maxJobs: Int) async {
+    private func handleAndDrain(
+        _ rawEvent: [String: Any],
+        maxJobs: Int,
+        onBatch: (@Sendable (ContextAgentBatchResult) async -> Void)?
+    ) async {
         guard let event = ContextAgentEvent(cmuxEvent: rawEvent),
               !event.affectedWorkspaceIds.isEmpty else {
             return
         }
         await handle(event)
-        _ = await runScheduledBatch(maxJobs: maxJobs)
+        let result = await runScheduledBatch(maxJobs: maxJobs)
+        // Notify the consumer only when something actually changed or failed, so we
+        // never wake the main actor on empty poll-cadence drains. The batch already
+        // merged snapshots into the store; this callback is a pure notification hook.
+        if let onBatch, !result.updatedWorkspaceIds.isEmpty || !result.failures.isEmpty {
+            await onBatch(result)
+        }
     }
 }

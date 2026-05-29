@@ -28899,6 +28899,64 @@
         }
       }
     },
+    "command.spriteNextWorkspace.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Go to Next Workspace (by Attention)"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "次に見るワークスペースへ(注目度順)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "前往下一个工作区(按关注度)"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "前往下一個工作區(按關注度)"
+          }
+        }
+      }
+    },
+    "command.spriteNextWorkspace.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sprite Proactive"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スプライト能動"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "精灵主动"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "精靈主動"
+          }
+        }
+      }
+    },
     "command.nextWorkspace.title": {
       "extractionState": "manual",
       "localizations": {
@@ -79955,6 +80013,180 @@
           "stringUnit": {
             "state": "translated",
             "value": "Перейменування в палітрі команд починає з виділення всього тексту."
+          }
+        }
+      }
+    },
+    "settings.app.proactiveSpriteSuggestions": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proactive Sprite Suggestions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スプライトの能動的な提案"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "精灵主动建议"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "精靈主動建議"
+          }
+        }
+      }
+    },
+    "settings.app.proactiveSpriteSuggestions.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Let the sprite proactively surface what to look at next based on workspace context."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースの状況に基づき、次に確認すべき項目をスプライトが能動的に提示します。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "让精灵根据工作区上下文主动提示下一步该看什么。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "讓精靈根據工作區內容主動提示下一步該看什麼。"
+          }
+        }
+      }
+    },
+    "settings.app.proactiveAutoBubble": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proactive Sprite Auto-Bubble"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "スプライトの自動バブル"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "精灵自动气泡"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "精靈自動氣泡"
+          }
+        }
+      }
+    },
+    "settings.app.proactiveAutoBubble.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When proactive suggestions are on, let the sprite pop a compact bubble for high-priority items. Off by default."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "能動的な提案が有効なとき、優先度の高い項目でスプライトがコンパクトなバブルを表示します。既定はオフ。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当主动建议开启时,让精灵为高优先级项弹出紧凑气泡。默认关闭。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "當主動建議開啟時,讓精靈為高優先項目彈出精簡氣泡。預設關閉。"
+          }
+        }
+      }
+    },
+    "settings.app.proactiveSuggestionNotifications": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proactive Suggestion Notifications"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "能動的な提案の通知"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "主动建议通知"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "主動建議通知"
+          }
+        }
+      }
+    },
+    "settings.app.proactiveSuggestionNotifications.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When proactive suggestions are on, post a desktop notification for new high-priority items while cmux is in the background. Off by default."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "能動的な提案が有効なとき、cmux がバックグラウンドにある間、優先度の高い新規項目をデスクトップ通知します。既定はオフ。"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当主动建议开启时,在 cmux 处于后台时为高优先级的新项发送桌面通知。默认关闭。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "當主動建議開啟時,在 cmux 處於背景時為高優先的新項目發送桌面通知。預設關閉。"
           }
         }
       }
@@ -134879,6 +135111,93 @@
           "stringUnit": {
             "state": "translated",
             "value": "並び替えアシスタントを開く"
+          }
+        }
+      }
+    },
+    "sortAssistant.autoBubble.fallbackTitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Something needs your attention"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "確認が必要な項目があります"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有需要你关注的项"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有需要你關注的項目"
+          }
+        }
+      }
+    },
+    "sortAssistant.autoBubble.openHint": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tap to open"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "タップして開く"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "点按打开"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "點按開啟"
+          }
+        }
+      }
+    },
+    "sortAssistant.mascot.attention": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proactive suggestions available"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "能動的な提案があります"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有主动建议"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有主動建議"
           }
         }
       }

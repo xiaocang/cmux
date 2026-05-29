@@ -26,6 +26,12 @@ struct SortAssistantFloatingHost: View {
         .onChange(of: coordinator.presentationToggleSequence) { _, _ in
             isPresented = true
         }
+        .onChange(of: coordinator.isFloatingSpriteVisible) { _, visible in
+            isPresented = visible
+        }
+        .onAppear {
+            isPresented = coordinator.isFloatingSpriteVisible
+        }
     }
 }
 
@@ -1456,6 +1462,7 @@ private struct SortAssistantFloatingPetContent: View {
                     presentation: .floating,
                     isActive: coordinator.isSorting,
                     state: coordinator.mascotState,
+                    attentionBadgeCount: coordinator.proactiveAttentionCount,
                     action: {
                         coordinator.toggleConversationBubble(reason: "floatingMascot")
                     }
@@ -1497,15 +1504,53 @@ private struct SortAssistantFloatingPetContent: View {
         NSColor.controlBackgroundColor
     }
 
+    private var compactAutoBubble: some View {
+        let suggestion = coordinator.compactAutoBubbleSuggestion
+        return Button {
+            coordinator.openEntry()
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(suggestion?.title ?? String(
+                    localized: "sortAssistant.autoBubble.fallbackTitle",
+                    defaultValue: "Something needs your attention"
+                ))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                if let reason = suggestion?.reason, !reason.isEmpty {
+                    Text(reason)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(String(localized: "sortAssistant.autoBubble.openHint", defaultValue: "Tap to open"))
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("SortAssistantAutoBubble")
+    }
+
     private func conversationBubble(side: SortAssistantFloatingConversationBubbleSide) -> some View {
-        SortAssistantThreadView(
-            coordinator: coordinator,
-            tabManager: tabManager,
-            workspaceTabStore: workspaceTabStore,
-            showsHeader: false,
-            showsAssistantMessageAvatar: false,
-            completionLayout: .overlay
-        )
+        Group {
+            if coordinator.isCompactAutoBubble {
+                compactAutoBubble
+            } else {
+                SortAssistantThreadView(
+                    coordinator: coordinator,
+                    tabManager: tabManager,
+                    workspaceTabStore: workspaceTabStore,
+                    showsHeader: false,
+                    showsAssistantMessageAvatar: false,
+                    completionLayout: .overlay
+                )
+            }
+        }
         .frame(width: conversationWidth, alignment: .topLeading)
         .background(alignment: .bottomTrailing) {
             conversationShadow

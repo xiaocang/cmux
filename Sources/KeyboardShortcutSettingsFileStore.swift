@@ -423,6 +423,15 @@ final class CmuxSettingsFileStore {
         if let value = jsonBool(section["reorderOnNotification"]) {
             snapshot.managedUserDefaults[WorkspaceAutoReorderSettings.key] = .bool(value)
         }
+        if let value = jsonBool(section["proactiveSpriteSuggestions"]) {
+            snapshot.managedUserDefaults[ProactiveSpriteSuggestionsSettings.key] = .bool(value)
+        }
+        if let value = jsonBool(section["proactiveAutoBubble"]) {
+            snapshot.managedUserDefaults[ProactiveAutoBubbleSettings.key] = .bool(value)
+        }
+        if let value = jsonBool(section["proactiveSuggestionNotifications"]) {
+            snapshot.managedUserDefaults[ProactiveSuggestionNotificationsSettings.key] = .bool(value)
+        }
         if let value = jsonBool(section["iMessageMode"]) {
             snapshot.managedUserDefaults[IMessageModeSettings.key] = .bool(value)
         }

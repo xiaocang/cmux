@@ -103,6 +103,21 @@
           "default": true,
           "description": "Move workspaces with new notifications toward the top."
         },
+        "proactiveSpriteSuggestions": {
+          "type": "boolean",
+          "default": false,
+          "description": "Let the sprite assistant proactively surface what to look at next (review/ci/merge suggestions) based on workspace context. Disabled by default."
+        },
+        "proactiveAutoBubble": {
+          "type": "boolean",
+          "default": false,
+          "description": "When proactiveSpriteSuggestions is on, auto-present a compact sprite bubble for new high-priority suggestions. Disabled by default."
+        },
+        "proactiveSuggestionNotifications": {
+          "type": "boolean",
+          "default": false,
+          "description": "When proactiveSpriteSuggestions is on, post a desktop notification for new high-priority suggestions while cmux is backgrounded. Disabled by default."
+        },
         "sendAnonymousTelemetry": {
           "type": "boolean",
           "default": true,

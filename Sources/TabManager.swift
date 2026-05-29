@@ -182,6 +182,51 @@ enum WorkspaceAutoReorderSettings {
     }
 }
 
+// Gate for the proactive sprite suggestion surfaces (mascot badge, auto bubble,
+// sidebar suggestion badge, suggestion-driven notifications). Default OFF: when
+// disabled the sprite stays reactive and behaves exactly as before. See
+// suggestion-sprint-plan.md (Phase 0 gate; consumed from Phase 1 onward).
+enum ProactiveSpriteSuggestionsSettings {
+    static let key = "sprite.proactiveSuggestions"
+    static let defaultValue = false
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: key) == nil {
+            return defaultValue
+        }
+        return defaults.bool(forKey: key)
+    }
+}
+
+// Tier 2 opt-in: when on (and the parent flag is on), a NEW high-confidence
+// suggestion auto-presents a compact, non-activating speech bubble on the sprite.
+// Default OFF — the badge (Tier 1) is the non-intrusive default surface.
+enum ProactiveAutoBubbleSettings {
+    static let key = "sprite.proactiveAutoBubble"
+    static let defaultValue = false
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: key) == nil {
+            return defaultValue
+        }
+        return defaults.bool(forKey: key)
+    }
+}
+
+// Phase 4 opt-in: when on (and the parent flag is on), post a desktop notification
+// for new high-confidence suggestions while cmux is backgrounded. Default OFF.
+enum ProactiveSuggestionNotificationsSettings {
+    static let key = "sprite.proactiveSuggestions.notifications"
+    static let defaultValue = false
+
+    static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: key) == nil {
+            return defaultValue
+        }
+        return defaults.bool(forKey: key)
+    }
+}
+
 enum WorkspaceSummaryPrioritySettings {
     static let enabledKey = "workspaceTab.summaryPriority.enabled"
     static let defaultEnabled = true

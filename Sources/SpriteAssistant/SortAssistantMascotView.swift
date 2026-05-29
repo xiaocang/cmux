@@ -71,6 +71,7 @@ struct SortAssistantMascotButton: View {
 
     let presentation: Presentation
     let state: SortAssistantMascotState
+    let attentionBadgeCount: Int
     let action: () -> Void
 
     @State private var bobbing = false
@@ -79,10 +80,12 @@ struct SortAssistantMascotButton: View {
         presentation: Presentation,
         isActive: Bool = false,
         state: SortAssistantMascotState? = nil,
+        attentionBadgeCount: Int = 0,
         action: @escaping () -> Void
     ) {
         self.presentation = presentation
         self.state = state ?? (isActive ? .review : .idle)
+        self.attentionBadgeCount = attentionBadgeCount
         self.action = action
     }
 
@@ -95,12 +98,35 @@ struct SortAssistantMascotButton: View {
             )
             .padding(presentation == .modeBar ? 2 : 0)
             .contentShape(Rectangle())
+            .overlay(alignment: .topTrailing) {
+                attentionBadge
+            }
         }
         .buttonStyle(.plain)
         .accessibilityLabel(String(localized: "sortAssistant.mascot.open", defaultValue: "Open sort assistant"))
         .help(String(localized: "sortAssistant.mascot.open", defaultValue: "Open sort assistant"))
         .onAppear {
             startAnimation()
+        }
+    }
+
+    @ViewBuilder
+    private var attentionBadge: some View {
+        if attentionBadgeCount > 0 {
+            Text(attentionBadgeCount > 9 ? "9+" : "\(attentionBadgeCount)")
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 4)
+                .frame(minWidth: 15, minHeight: 15)
+                .background(Capsule().fill(Color.red))
+                .overlay(Capsule().stroke(Color.white.opacity(0.9), lineWidth: 1))
+                .offset(x: 5, y: -3)
+                // The button below owns taps; the badge is a passive indicator.
+                .allowsHitTesting(false)
+                .accessibilityIdentifier(SortAssistantAccessibility.mascotAttentionBadge)
+                .accessibilityLabel(
+                    String(localized: "sortAssistant.mascot.attention", defaultValue: "Proactive suggestions available")
+                )
         }
     }
 

@@ -383,6 +383,10 @@ struct cmuxApp: App {
                     appDelegate.openDebugStressWorkspacesWithLoadedSurfaces(nil)
                 }
 
+                Button("Inject Test Proactive Suggestion (4s delay — turn on the sprite flags first)") {
+                    SortAssistantCoordinator.shared.debugInjectTestProactiveSuggestion(afterDelay: 4)
+                }
+
                 Divider()
                 Menu("Debug Windows") {
                     Button("Background Debug…") {
@@ -5788,6 +5792,9 @@ struct SettingsView: View {
     @AppStorage(LiveShellSettings.key)
     private var terminalShellBackendRaw = LiveShellSettings.defaultBackend.rawValue
     @AppStorage(WorkspaceAutoReorderSettings.key) private var workspaceAutoReorder = WorkspaceAutoReorderSettings.defaultValue
+    @AppStorage(ProactiveSpriteSuggestionsSettings.key) private var proactiveSpriteSuggestions = ProactiveSpriteSuggestionsSettings.defaultValue
+    @AppStorage(ProactiveAutoBubbleSettings.key) private var proactiveAutoBubble = ProactiveAutoBubbleSettings.defaultValue
+    @AppStorage(ProactiveSuggestionNotificationsSettings.key) private var proactiveSuggestionNotifications = ProactiveSuggestionNotificationsSettings.defaultValue
     @AppStorage(IMessageModeSettings.key) private var iMessageMode = IMessageModeSettings.defaultValue
     @AppStorage(SidebarWorkspaceDetailSettings.hideAllDetailsKey)
     private var sidebarHideAllDetails = SidebarWorkspaceDetailSettings.defaultHideAllDetails
@@ -7415,6 +7422,42 @@ struct SettingsView: View {
                             subtitle: String(localized: "settings.app.reorderOnNotification.subtitle", defaultValue: "Move workspaces to the top when they receive a notification. Disable for stable shortcut positions.")
                         ) {
                             Toggle("", isOn: $workspaceAutoReorder)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("app.proactiveSpriteSuggestions"),
+                            String(localized: "settings.app.proactiveSpriteSuggestions", defaultValue: "Proactive Sprite Suggestions"),
+                            subtitle: String(localized: "settings.app.proactiveSpriteSuggestions.subtitle", defaultValue: "Let the sprite proactively surface what to look at next based on workspace context.")
+                        ) {
+                            Toggle("", isOn: $proactiveSpriteSuggestions)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("app.proactiveAutoBubble"),
+                            String(localized: "settings.app.proactiveAutoBubble", defaultValue: "Proactive Sprite Auto-Bubble"),
+                            subtitle: String(localized: "settings.app.proactiveAutoBubble.subtitle", defaultValue: "When proactive suggestions are on, let the sprite pop a compact bubble for high-priority items. Off by default.")
+                        ) {
+                            Toggle("", isOn: $proactiveAutoBubble)
+                                .labelsHidden()
+                                .controlSize(.small)
+                        }
+
+                        SettingsCardDivider()
+
+                        SettingsCardRow(
+                            configurationReview: .json("app.proactiveSuggestionNotifications"),
+                            String(localized: "settings.app.proactiveSuggestionNotifications", defaultValue: "Proactive Suggestion Notifications"),
+                            subtitle: String(localized: "settings.app.proactiveSuggestionNotifications.subtitle", defaultValue: "When proactive suggestions are on, post a desktop notification for new high-priority items while cmux is in the background. Off by default.")
+                        ) {
+                            Toggle("", isOn: $proactiveSuggestionNotifications)
                                 .labelsHidden()
                                 .controlSize(.small)
                         }
@@ -9438,6 +9481,9 @@ struct SettingsView: View {
         defaults.removeObject(forKey: LiveShellSettings.liveshExecutableKey)
         defaults.removeObject(forKey: LiveShellSettings.liveshctlExecutableKey)
         workspaceAutoReorder = WorkspaceAutoReorderSettings.defaultValue
+        proactiveSpriteSuggestions = ProactiveSpriteSuggestionsSettings.defaultValue
+        proactiveAutoBubble = ProactiveAutoBubbleSettings.defaultValue
+        proactiveSuggestionNotifications = ProactiveSuggestionNotificationsSettings.defaultValue
         iMessageMode = IMessageModeSettings.defaultValue
         sidebarHideAllDetails = SidebarWorkspaceDetailSettings.defaultHideAllDetails
         sidebarShowWorkspaceDescription = SidebarWorkspaceDetailSettings.defaultShowWorkspaceDescription

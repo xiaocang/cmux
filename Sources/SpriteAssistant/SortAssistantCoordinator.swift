@@ -4,6 +4,16 @@ import CMUXWorkstream
 import Combine
 import Foundation
 
+/// Immutable, render-ready sidebar badge value resolved at the boundary from a
+/// ProactiveSuggestion. Lives in the app module so the sidebar (ContentView) can
+/// render it without importing the contracts/orchestration packages, and so row
+/// subtrees receive a plain value (snapshot-boundary rule).
+struct WorkspaceProactiveSuggestionBadge: Equatable, Sendable {
+    let type: String
+    let glyph: String
+    let helpText: String
+}
+
 @MainActor
 final class SortAssistantCoordinator: ObservableObject {
     static let shared = SortAssistantCoordinator()
@@ -48,6 +58,13 @@ final class SortAssistantCoordinator: ObservableObject {
     @Published private(set) var externalGoalSequence = 0
     @Published private(set) var entryFocusSequence = 0
     @Published private(set) var floatingLayoutRevision = 0
+    // Master visibility of the floating sprite (avatar). Toggle Sprite Assistant
+    // flips this for a true on/off; the host hides the panel entirely when false.
+    @Published private(set) var isFloatingSpriteVisible = false
+    // Phase 2 Tier 2: when the auto-bubble surfaces a suggestion unprompted, the
+    // bubble renders a compact suggestion card (not the full thread). Default off.
+    @Published private(set) var isCompactAutoBubble = false
+    @Published private(set) var compactAutoBubbleSuggestion: ProactiveSuggestion?
 
     private static let workstreamId = "cmux-sort-assistant"
     private static let memoryToolName = "cmux.sort_memory"
@@ -63,6 +80,39 @@ final class SortAssistantCoordinator: ObservableObject {
     private let rankingEngine = RankingEngine()
     private let suggestionEngine = SuggestionEngine()
     private var dismissedSuggestionIds: Set<UUID> = []
+    // Phase 1 closed-loop recompute (gated by ProactiveSpriteSuggestionsSettings):
+    // coalesces bursts of ContextAgent batches into a single trailing recompute.
+    private var proactiveSuggestionRecomputePending = false
+    private var proactiveSuggestionRecomputeTask: Task<Void, Never>?
+    private var proactiveSuggestionRecomputeDebounceNanos: UInt64 {
+        #if DEBUG
+        if let override = Self.debugProactiveSuggestionRecomputeDebounceOverrideNanos {
+            return override
+        }
+        #endif
+        return 250_000_000
+    }
+    #if DEBUG
+    static var debugProactiveSuggestionRecomputeDebounceOverrideNanos: UInt64?
+    #endif
+    // Phase 2 surfacing thresholds (see suggestion-sprint-plan.md decision 5).
+    // Badge shows all three actionable types (floor 0.85 == "the suggestion exists");
+    // the auto bubble / notification only fire for high-attention items (0.90).
+    static let proactiveBadgeConfidenceFloor = 0.85
+    static let proactiveAutoSurfaceConfidenceFloor = 0.90
+    private static let proactiveBadgeSuggestionTypes: Set<String> = [
+        ProactiveSuggestionTypes.reviewAgentWaitingUser,
+        ProactiveSuggestionTypes.fixCIFailure,
+        ProactiveSuggestionTypes.mergeReady,
+    ]
+    // Phase 2 Tier 2 auto-bubble state (default-off sub-flag ProactiveAutoBubbleSettings).
+    private var autoBubbleSeenSuggestionIds: Set<UUID> = []
+    private var lastAutoBubbleSurfacedAt: Date?
+    private var autoBubbleDismissTask: Task<Void, Never>?
+    private static let autoBubbleMinInterval: TimeInterval = 90
+    private static let autoBubbleAutoDismissNanos: UInt64 = 12_000_000_000
+    // Phase 4: dedup-by-id for suggestion-driven OS notifications (default-off sub-flag).
+    private var notifiedProactiveSuggestionIds: Set<UUID> = []
     private let mcpClient = SortAssistantMCPClient()
     private var pendingExternalGoal: (goal: String, forceApply: Bool)?
     private var pendingPreviewPatch: SortPatch?
@@ -99,7 +149,7 @@ final class SortAssistantCoordinator: ObservableObject {
     private var debugEphemeralFreeSortMemoryIds: Set<UUID> = []
 #endif
     private var sessionGeneration = UUID()
-    private let workspaceSnapshotStore: WorkspaceSnapshotStore
+    let workspaceSnapshotStore: WorkspaceSnapshotStore
     private let assistantRuntime: AssistantRuntime
     private let contextScheduler: ContextScheduler
     private let contextProviderRunStore: ProviderRunStore
@@ -227,7 +277,93 @@ final class SortAssistantCoordinator: ObservableObject {
                     coordinator: self
                 ))
             }
-            self.contextAgentEventTask = self.contextAgent.startEventStream()
+            self.contextAgentEventTask = self.contextAgent.startEventStream(
+                onBatch: { [weak self] result in
+                    await self?.handleContextAgentBatch(result)
+                }
+            )
+        }
+    }
+
+    /// Consumes a ContextAgent batch result produced by background snapshot
+    /// refresh (off the user turn). Phase 0 records DEBUG telemetry only and makes
+    /// no behavior change. Phase 1 will, gated by `ProactiveSpriteSuggestionsSettings`,
+    /// debounce a `refreshVisibleSuggestions()` recompute here so suggestions track
+    /// context changes without the panel being open. The snapshots are already
+    /// merged into `workspaceSnapshotStore` by the agent; this is a notification hook.
+    func handleContextAgentBatch(_ result: ContextAgentBatchResult) async {
+        let shouldRecompute = ProactiveSpriteSuggestionsSettings.isEnabled()
+            && !result.updatedWorkspaceIds.isEmpty
+        #if DEBUG
+        recordContextAgentBatchTelemetry(result, triggeredRecompute: shouldRecompute)
+        #endif
+        guard shouldRecompute else { return }
+        scheduleProactiveSuggestionRecompute()
+    }
+
+    /// Coalesces a burst of batches into a single trailing recompute. The first
+    /// batch arms the debounce window; later batches inside the window only flip
+    /// `pending` (no reschedule, so a steady event stream can't starve the flush).
+    private func scheduleProactiveSuggestionRecompute() {
+        proactiveSuggestionRecomputePending = true
+        guard proactiveSuggestionRecomputeTask == nil else { return }
+        proactiveSuggestionRecomputeTask = Task { @MainActor [weak self] in
+            let debounce = self?.proactiveSuggestionRecomputeDebounceNanos ?? 0
+            if debounce > 0 {
+                try? await Task.sleep(nanoseconds: debounce)
+            }
+            guard let self else { return }
+            self.proactiveSuggestionRecomputeTask = nil
+            guard self.proactiveSuggestionRecomputePending else { return }
+            self.proactiveSuggestionRecomputePending = false
+            await self.runProactiveSuggestionRecompute()
+        }
+    }
+
+    private func runProactiveSuggestionRecompute() async {
+        // Re-check the gate: the user may have toggled it off during the debounce window.
+        guard ProactiveSpriteSuggestionsSettings.isEnabled() else { return }
+        // Read the snapshots the ContextAgent just merged so suggestions track
+        // background context changes without the panel being open. The panel-open
+        // path (attach()) keeps computing from live state for an immediate refresh;
+        // the store catches up as the agent collects, and the two converge.
+        let snapshots = await workspaceSnapshotStore.assistantWorkingContext().snapshots
+        let start = CFAbsoluteTimeGetCurrent()
+        let updated = activeSuggestions(now: Date(), snapshots: snapshots, updateVisible: true, publish: true)
+        #if DEBUG
+        let durationMs = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        lastContextAgentBatchTelemetry?.recomputeDurationMs = durationMs
+        #endif
+        maybeNotifyProactiveSuggestions(from: updated)
+    }
+
+    /// Phase 4: fire a deduped, rate-limited OS notification for a NEW high-confidence
+    /// suggestion while the app is backgrounded. Gated by both the parent flag and the
+    /// default-off ProactiveSuggestionNotificationsSettings sub-flag. Focus-safe:
+    /// addNotification only posts a banner and never activates the app.
+    private func maybeNotifyProactiveSuggestions(from suggestions: [ProactiveSuggestion]) {
+        guard ProactiveSpriteSuggestionsSettings.isEnabled(),
+              ProactiveSuggestionNotificationsSettings.isEnabled() else { return }
+        guard !AppFocusState.isAppActive() else { return }
+        // Bound the dedup set and let a genuinely re-appearing suggestion notify again.
+        notifiedProactiveSuggestionIds.formIntersection(Set(suggestions.map(\.id)))
+        for suggestion in suggestions
+        where Self.proactiveBadgeSuggestionTypes.contains(suggestion.type)
+            && suggestion.confidence >= Self.proactiveAutoSurfaceConfidenceFloor
+            && !notifiedProactiveSuggestionIds.contains(suggestion.id) {
+            notifiedProactiveSuggestionIds.insert(suggestion.id)
+            let workspaceTitle = lastTabManager?.tabs
+                .first(where: { $0.id == suggestion.workspaceId })?.displayTitle ?? ""
+            TerminalNotificationStore.shared.addNotification(
+                tabId: suggestion.workspaceId,
+                surfaceId: nil,
+                title: workspaceTitle.isEmpty ? suggestion.title : workspaceTitle,
+                subtitle: workspaceTitle.isEmpty ? "" : suggestion.title,
+                body: suggestion.reason ?? "",
+                source: .monitor,
+                cooldownKey: "sprite.proactive.\(suggestion.id.uuidString)",
+                cooldownInterval: 300
+            )
         }
     }
 
@@ -239,6 +375,81 @@ final class SortAssistantCoordinator: ObservableObject {
             || semanticActionConfirmation != nil
             || memoryCandidate != nil
             || isSorting
+    }
+
+    /// Number of high-confidence, actionable proactive suggestions to surface as
+    /// an attention badge on the collapsed mascot. Always 0 unless the feature
+    /// flag is enabled, so the closed sprite stays silent when proactive mode is off.
+    var proactiveAttentionCount: Int {
+        guard ProactiveSpriteSuggestionsSettings.isEnabled() else { return 0 }
+        return visibleSuggestions.reduce(into: 0) { count, suggestion in
+            if Self.proactiveBadgeSuggestionTypes.contains(suggestion.type),
+               suggestion.confidence >= Self.proactiveBadgeConfidenceFloor {
+                count += 1
+            }
+        }
+    }
+
+    /// One actionable proactive suggestion badge per workspace, deduped by a fixed
+    /// type priority (review > ci > merge, tie-break by confidence) and filtered to
+    /// the badge confidence floor. Empty unless the feature flag is on. Resolved at
+    /// the sidebar boundary so rows never read the coordinator (snapshot-boundary rule).
+    func proactiveBadgeByWorkspaceId() -> [UUID: WorkspaceProactiveSuggestionBadge] {
+        guard ProactiveSpriteSuggestionsSettings.isEnabled() else { return [:] }
+        var best: [UUID: ProactiveSuggestion] = [:]
+        for suggestion in visibleSuggestions
+        where Self.proactiveBadgeSuggestionTypes.contains(suggestion.type)
+            && suggestion.confidence >= Self.proactiveBadgeConfidenceFloor {
+            if let existing = best[suggestion.workspaceId] {
+                let candidatePriority = Self.proactiveBadgePriority(suggestion.type)
+                let existingPriority = Self.proactiveBadgePriority(existing.type)
+                if candidatePriority > existingPriority
+                    || (candidatePriority == existingPriority && suggestion.confidence > existing.confidence) {
+                    best[suggestion.workspaceId] = suggestion
+                }
+            } else {
+                best[suggestion.workspaceId] = suggestion
+            }
+        }
+        return best.mapValues(Self.makeProactiveBadge(from:))
+    }
+
+    private static func proactiveBadgePriority(_ type: String) -> Int {
+        switch type {
+        case ProactiveSuggestionTypes.reviewAgentWaitingUser: return 3
+        case ProactiveSuggestionTypes.fixCIFailure: return 2
+        case ProactiveSuggestionTypes.mergeReady: return 1
+        default: return 0
+        }
+    }
+
+    private static func makeProactiveBadge(from suggestion: ProactiveSuggestion) -> WorkspaceProactiveSuggestionBadge {
+        let glyph: String
+        switch suggestion.type {
+        case ProactiveSuggestionTypes.reviewAgentWaitingUser:
+            glyph = "exclamationmark.bubble.fill"
+        case ProactiveSuggestionTypes.fixCIFailure:
+            glyph = "xmark.octagon.fill"
+        case ProactiveSuggestionTypes.mergeReady:
+            glyph = "checkmark.seal.fill"
+        default:
+            glyph = "sparkles"
+        }
+        let title = suggestion.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return WorkspaceProactiveSuggestionBadge(
+            type: suggestion.type,
+            glyph: glyph,
+            helpText: title.isEmpty ? suggestion.type : title
+        )
+    }
+
+    /// The next workspace to look at by attention ranking (skips locked/pinned,
+    /// wraps past the active one). Nil unless the feature flag is on. Backs the
+    /// "Go to Next Workspace (by Attention)" command-palette command.
+    func nextWorkspaceByAttention() -> UUID? {
+        guard ProactiveSpriteSuggestionsSettings.isEnabled() else { return nil }
+        let context = buildAssistantWorkingContext(now: Date())
+        return NextWorkspaceService.default.nextWorkspace(in: context)?.workspaceId
     }
 
     var mascotState: SortAssistantMascotState {
@@ -266,6 +477,28 @@ final class SortAssistantCoordinator: ObservableObject {
     }
 
 #if DEBUG
+    private var lastContextAgentBatchTelemetry: ContextAgentBatchTelemetry?
+
+    private func recordContextAgentBatchTelemetry(
+        _ result: ContextAgentBatchResult,
+        triggeredRecompute: Bool,
+        now: Date = Date()
+    ) {
+        lastContextAgentBatchTelemetry = ContextAgentBatchTelemetry(
+            occurredAt: now,
+            updatedWorkspaceIds: result.updatedWorkspaceIds,
+            failureCount: result.failures.count,
+            triggeredRecompute: triggeredRecompute,
+            recomputeDurationMs: nil
+        )
+    }
+
+    /// Test seam: awaits the in-flight debounced recompute (if any) so tests can
+    /// deterministically observe `visibleSuggestions` after a batch.
+    func debugAwaitProactiveSuggestionRecompute() async {
+        await proactiveSuggestionRecomputeTask?.value
+    }
+
     func debugContextAgentInspectorSnapshot(now: Date = Date()) async -> ContextAgentInspectorSnapshot {
         let context = makeAssistantWorkingContext(now: now)
         await workspaceSnapshotStore.replace(context)
@@ -273,8 +506,65 @@ final class SortAssistantCoordinator: ObservableObject {
             capturedAt: now,
             workingContext: await workspaceSnapshotStore.assistantWorkingContext(),
             agentDiagnostics: await contextAgent.diagnostics(),
-            auditEntries: semanticActionAuditTrail
+            auditEntries: semanticActionAuditTrail,
+            lastBatchTelemetry: lastContextAgentBatchTelemetry
         )
+    }
+
+    /// Debug-only: inject a confidence=1.0 proactive suggestion for the selected
+    /// workspace and drive the real recompute path so the mascot/sidebar badge,
+    /// auto-bubble, and notification surfaces fire (each still subject to its own
+    /// feature flag). A delay lets you background the app to also exercise the
+    /// backgrounded notification, or close the panel to see the auto-bubble.
+    func debugInjectTestProactiveSuggestion(afterDelay delay: TimeInterval = 0) {
+        guard let tabManager = lastTabManager,
+              let workspaceId = tabManager.selectedTabId,
+              let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) else {
+            cmuxDebugLog("sprite.debug inject skipped: no selected workspace (open the sprite once first)")
+            return
+        }
+        let nativeOrder = tabManager.tabs.firstIndex(where: { $0.id == workspaceId }) ?? 0
+        let snapshot = WorkspaceSnapshot(
+            workspaceId: workspaceId,
+            version: 9_999,
+            updatedAt: Date(),
+            context: NormalizedWorkspaceContext(
+                title: workspace.title,
+                selected: true,
+                directory: nil,
+                listRevision: 0,
+                nativeOrder: nativeOrder,
+                pinned: false,
+                locked: false,
+                customColor: nil,
+                panelCount: 0,
+                pullRequestCount: 0,
+                stalePullRequestCount: 0
+            ),
+            derived: DerivedWorkspaceState(
+                status: "waiting_user",
+                priorityScore: 100,
+                rankReason: "Debug-injected high-priority suggestion",
+                nextAction: "Review the debug-injected suggestion",
+                userAttentionNeeded: 1.0
+            ),
+            digest: nil,
+            freshness: ContextFreshness(providers: [], overallConfidence: 1.0),
+            contextHash: "debug-inject-\(UUID().uuidString)"
+        )
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            if delay > 0 {
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            }
+            await self.workspaceSnapshotStore.write(snapshot)
+            await self.handleContextAgentBatch(
+                ContextAgentBatchResult(updatedWorkspaceIds: [workspaceId], failures: [])
+            )
+            if !ProactiveSpriteSuggestionsSettings.isEnabled() {
+                cmuxDebugLog("sprite.debug inject: ProactiveSpriteSuggestions is OFF — enable it in Settings to see the surfaces")
+            }
+        }
     }
 
     func debugResetMemoryState() {
@@ -369,13 +659,20 @@ final class SortAssistantCoordinator: ObservableObject {
     }
 
     func activateEntry() {
-        prepareEntryMessageIfNeeded()
-        if togglePresentation() {
-            entryFocusSequence += 1
+        // True on/off: hide the whole floating sprite when it is showing; otherwise
+        // show it (avatar + conversation) and focus the input.
+        if isFloatingSpriteVisible {
+            hideFloatingSprite()
+            return
         }
+        prepareEntryMessageIfNeeded()
+        requestPresentation()
+        openConversationBubble(reason: "activateEntry")
+        entryFocusSequence += 1
     }
 
     func openEntry() {
+        exitCompactAutoBubble()
         prepareEntryMessageIfNeeded()
         requestPresentation()
         openConversationBubble(reason: "openEntry")
@@ -392,7 +689,21 @@ final class SortAssistantCoordinator: ObservableObject {
     }
 
     func requestPresentation() {
+        setFloatingSpriteVisible(true)
         presentationSequence += 1
+    }
+
+    /// Fully hide the floating sprite (avatar + conversation). Backs the on/off toggle.
+    func hideFloatingSprite() {
+        exitCompactAutoBubble()
+        setConversationBubblePresented(false, reason: "hideSprite")
+        setFloatingSpriteVisible(false)
+    }
+
+    private func setFloatingSpriteVisible(_ visible: Bool) {
+        guard isFloatingSpriteVisible != visible else { return }
+        isFloatingSpriteVisible = visible
+        invalidateFloatingLayout(reason: "spriteVisible.\(visible ? "show" : "hide")")
     }
 
     @discardableResult
@@ -414,10 +725,71 @@ final class SortAssistantCoordinator: ObservableObject {
     private func setConversationBubblePresented(_ presented: Bool, reason: String) {
         guard isConversationBubblePresented != presented else { return }
         isConversationBubblePresented = presented
+        if !presented {
+            // Any close clears compact auto-bubble state so the next open is the full panel.
+            isCompactAutoBubble = false
+            compactAutoBubbleSuggestion = nil
+            autoBubbleDismissTask?.cancel()
+            autoBubbleDismissTask = nil
+        }
         invalidateFloatingLayout(reason: "conversationBubble.\(reason).\(presented ? "open" : "closed")")
 #if DEBUG
         cmuxDebugLog("sprite.coordinator conversationBubble=\(presented ? 1 : 0) reason=\(reason)")
 #endif
+    }
+
+    private func exitCompactAutoBubble() {
+        autoBubbleDismissTask?.cancel()
+        autoBubbleDismissTask = nil
+        if isCompactAutoBubble { isCompactAutoBubble = false }
+        compactAutoBubbleSuggestion = nil
+    }
+
+    private func isUserLikelyTyping() -> Bool {
+        guard let responder = NSApp.keyWindow?.firstResponder else { return false }
+        return responder is NSTextView
+    }
+
+    /// Phase 2 Tier 2: surface a NEW high-confidence suggestion as a compact,
+    /// non-activating speech bubble — at most once per suggestion id, rate-limited,
+    /// never while the panel is already open or the user is typing. Gated by both
+    /// the parent flag and the default-off ProactiveAutoBubbleSettings sub-flag.
+    private func maybeSurfaceAutoBubble(from suggestions: [ProactiveSuggestion]) {
+        guard ProactiveSpriteSuggestionsSettings.isEnabled(),
+              ProactiveAutoBubbleSettings.isEnabled() else { return }
+        // Bound the seen-set and allow a genuinely re-appearing suggestion to fire again.
+        autoBubbleSeenSuggestionIds.formIntersection(Set(suggestions.map(\.id)))
+        guard let candidate = suggestions.first(where: {
+            Self.proactiveBadgeSuggestionTypes.contains($0.type)
+                && $0.confidence >= Self.proactiveAutoSurfaceConfidenceFloor
+                && !autoBubbleSeenSuggestionIds.contains($0.id)
+        }) else { return }
+        // Mark seen before the suppression guards so a suppressed suggestion is not
+        // retried on every debounced recompute.
+        autoBubbleSeenSuggestionIds.insert(candidate.id)
+        guard !isConversationBubblePresented else { return }
+        guard !isUserLikelyTyping() else { return }
+        if let last = lastAutoBubbleSurfacedAt,
+           Date().timeIntervalSince(last) < Self.autoBubbleMinInterval {
+            return
+        }
+        presentAutoBubble(for: candidate)
+    }
+
+    private func presentAutoBubble(for suggestion: ProactiveSuggestion) {
+        compactAutoBubbleSuggestion = suggestion
+        isCompactAutoBubble = true
+        setConversationBubblePresented(true, reason: "autoBubble")
+        // Order the (possibly never-shown) panel front; deliberately NOT entryFocusSequence,
+        // so the bubble appears without stealing key focus from the user.
+        requestPresentation()
+        lastAutoBubbleSurfacedAt = Date()
+        autoBubbleDismissTask?.cancel()
+        autoBubbleDismissTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: Self.autoBubbleAutoDismissNanos)
+            guard let self, !Task.isCancelled, self.isCompactAutoBubble else { return }
+            self.setConversationBubblePresented(false, reason: "autoBubbleTimeout")
+        }
     }
 
     var isFloatingConversationBubbleVisible: Bool {
@@ -5863,6 +6235,9 @@ final class SortAssistantCoordinator: ObservableObject {
         cachedActiveSuggestions = suggestions
         if updateVisible, visibleSuggestions != suggestions {
             visibleSuggestions = suggestions
+        }
+        if updateVisible {
+            maybeSurfaceAutoBubble(from: suggestions)
         }
         if publish {
             Task { await suggestionSnapshotStore.setActiveSuggestions(suggestions) }

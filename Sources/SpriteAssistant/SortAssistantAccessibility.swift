@@ -3,6 +3,7 @@ import Foundation
 enum SortAssistantAccessibility {
     static let thread = "SortAssistantThread"
     static let headerMascotButton = "SortAssistantHeaderMascotButton"
+    static let mascotAttentionBadge = "SortAssistantMascotAttentionBadge"
     static let floatingPanel = "SortAssistantFloatingPanel"
     static let messageList = "SortAssistantMessageList"
     static let input = "SortAssistantInput"

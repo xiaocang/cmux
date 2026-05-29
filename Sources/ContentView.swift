@@ -7392,6 +7392,15 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.spriteNextWorkspace",
+                title: constant(String(localized: "command.spriteNextWorkspace.title", defaultValue: "Go to Next Workspace (by Attention)")),
+                subtitle: constant(String(localized: "command.spriteNextWorkspace.subtitle", defaultValue: "Sprite Proactive")),
+                keywords: ["sprite", "next", "workspace", "attention", "proactive", "suggestion"],
+                when: { $0.bool(CommandPaletteContextKeys.hasWorkspace) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.moveWorkspaceUp",
                 title: constant(String(localized: "contextMenu.moveUp", defaultValue: "Move Up")),
                 subtitle: workspaceSubtitle,
@@ -8402,6 +8411,15 @@ struct ContentView: View {
         }
         registry.register(commandId: "palette.previousWorkspace") {
             tabManager.selectPreviousTab()
+        }
+        registry.register(commandId: "palette.spriteNextWorkspace") {
+            guard ProactiveSpriteSuggestionsSettings.isEnabled(),
+                  let workspaceId = SortAssistantCoordinator.shared.nextWorkspaceByAttention(),
+                  let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) else {
+                NSSound.beep()
+                return
+            }
+            tabManager.selectWorkspace(workspace)
         }
         registry.register(commandId: "palette.moveWorkspaceUp") {
             moveSelectedWorkspace(by: -1)
@@ -10677,6 +10695,9 @@ struct VerticalTabsSidebar: View {
     @StateObject private var tabItemSettingsStore = SidebarTabItemSettingsStore()
     @EnvironmentObject var workspaceTabStore: WorkspaceTabStore
     @ObservedObject private var keyboardShortcutSettingsObserver = KeyboardShortcutSettingsObserver.shared
+    // Observed so the per-workspace proactive suggestion badges recompute when the
+    // sprite's visibleSuggestions change. Rows stay value-only (see boundary build below).
+    @ObservedObject private var sortAssistantCoordinator = SortAssistantCoordinator.shared
     @State private var draggedTabId: UUID?
     @State private var dropIndicator: SidebarDropIndicator?
     @State private var frozenTabItemPresentation: SidebarTabItemPresentationSnapshot?
@@ -10862,6 +10883,7 @@ struct VerticalTabsSidebar: View {
         let allSelectedRemoteContextMenuTargetsDisconnected: Bool
         let workspaceTerminalScrollBarHiddenById: [UUID: Bool]
         let summaryScoreBadgeById: [UUID: WorkspaceSidebarScoreBadge]
+        let proactiveSuggestionBadgeById: [UUID: WorkspaceProactiveSuggestionBadge]
 
         var workspaceIds: [UUID] {
             tabs.map(\.id)
@@ -10892,6 +10914,9 @@ struct VerticalTabsSidebar: View {
                 selectedSort: workspaceTabStore.selectedSort
             )
             : [:]
+        // Boundary build: resolve per-workspace proactive badges to immutable values
+        // here (above the row ForEach). Empty map when the feature flag is off.
+        let proactiveSuggestionBadgeById = sortAssistantCoordinator.proactiveBadgeByWorkspaceId()
         let allSelectedRemoteContextMenuTargetsConnecting = !selectedRemoteContextMenuTargets.isEmpty &&
             selectedRemoteContextMenuTargets.allSatisfy {
                 $0.remoteConnectionState == .connecting || $0.remoteConnectionState == .reconnecting
@@ -10910,7 +10935,8 @@ struct VerticalTabsSidebar: View {
             allSelectedRemoteContextMenuTargetsConnecting: allSelectedRemoteContextMenuTargetsConnecting,
             allSelectedRemoteContextMenuTargetsDisconnected: allSelectedRemoteContextMenuTargetsDisconnected,
             workspaceTerminalScrollBarHiddenById: workspaceTerminalScrollBarHiddenById,
-            summaryScoreBadgeById: summaryScoreBadgeById
+            summaryScoreBadgeById: summaryScoreBadgeById,
+            proactiveSuggestionBadgeById: proactiveSuggestionBadgeById
         )
 
         VStack(spacing: 0) {
@@ -12096,6 +12122,7 @@ struct VerticalTabsSidebar: View {
             hasUnreadMonitorNotification: resolvedPresentation.hasUnreadMonitorNotification,
             latestNotificationText: resolvedPresentation.latestNotificationText,
             summaryScoreBadge: renderContext.summaryScoreBadgeById[tab.id],
+            proactiveSuggestionBadge: renderContext.proactiveSuggestionBadgeById[tab.id],
             rowSpacing: tabRowSpacing,
             layoutRefreshGeneration: workspaceSidebarLayoutMetricsStore.layoutRefreshGeneration,
             setSelectionToTabs: { selection = .tabs },
@@ -17402,6 +17429,7 @@ private struct TabItemView: View, Equatable {
         lhs.hasUnreadMonitorNotification == rhs.hasUnreadMonitorNotification &&
         lhs.latestNotificationText == rhs.latestNotificationText &&
         lhs.summaryScoreBadge == rhs.summaryScoreBadge &&
+        lhs.proactiveSuggestionBadge == rhs.proactiveSuggestionBadge &&
         lhs.rowSpacing == rhs.rowSpacing &&
         lhs.layoutRefreshGeneration == rhs.layoutRefreshGeneration &&
         lhs.showsModifierShortcutHints == rhs.showsModifierShortcutHints &&
@@ -17431,6 +17459,7 @@ private struct TabItemView: View, Equatable {
     let hasUnreadMonitorNotification: Bool
     let latestNotificationText: String?
     let summaryScoreBadge: WorkspaceSidebarScoreBadge?
+    let proactiveSuggestionBadge: WorkspaceProactiveSuggestionBadge?
     let rowSpacing: CGFloat
     let layoutRefreshGeneration: UInt64
     let setSelectionToTabs: () -> Void
@@ -17826,7 +17855,29 @@ private struct TabItemView: View, Equatable {
             if let summaryScoreBadge {
                 summaryScoreBadgeView(summaryScoreBadge)
             }
+
+            if let proactiveSuggestionBadge {
+                proactiveSuggestionBadgeView(proactiveSuggestionBadge)
+            }
         }
+    }
+
+    private func proactiveSuggestionBadgeView(_ badge: WorkspaceProactiveSuggestionBadge) -> some View {
+        Image(systemName: badge.glyph)
+            .font(.system(size: 9, weight: .semibold))
+            .foregroundColor(activeSecondaryColor(usesInvertedActiveForeground ? 0.95 : 0.78))
+            .frame(width: 16, height: 16)
+            .background(
+                Capsule(style: .continuous)
+                    .fill(usesInvertedActiveForeground ? Color.white.opacity(0.14) : Color.primary.opacity(0.07))
+            )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(usesInvertedActiveForeground ? Color.white.opacity(0.18) : Color.primary.opacity(0.08), lineWidth: 1)
+            )
+            .layoutPriority(3)
+            .safeHelp(badge.helpText)
+            .accessibilityIdentifier("sidebarProactiveSuggestionBadge")
     }
 
     @ViewBuilder

@@ -3,11 +3,20 @@ import AppKit
 import CMUXActions
 import SwiftUI
 
+struct ContextAgentBatchTelemetry: Equatable, Sendable {
+    var occurredAt: Date
+    var updatedWorkspaceIds: [UUID]
+    var failureCount: Int
+    var triggeredRecompute: Bool
+    var recomputeDurationMs: Double?
+}
+
 struct ContextAgentInspectorSnapshot: Equatable, Sendable {
     var capturedAt: Date
     var workingContext: AssistantWorkingContext
     var agentDiagnostics: ContextAgentDiagnosticsSnapshot?
     var auditEntries: [SemanticActionAuditEntry]
+    var lastBatchTelemetry: ContextAgentBatchTelemetry?
 }
 
 final class ContextAgentInspectorWindowController: NSWindowController, NSWindowDelegate {
@@ -72,6 +81,10 @@ private struct ContextAgentInspectorView: View {
                     providerFreshnessTable(snapshot.workingContext.snapshots)
                     runtimeDiagnostics(
                         snapshot.agentDiagnostics,
+                        snapshots: snapshot.workingContext.snapshots
+                    )
+                    lastBatchSection(
+                        snapshot.lastBatchTelemetry,
                         snapshots: snapshot.workingContext.snapshots
                     )
                     suggestionAndRanking(snapshot.workingContext)
@@ -343,6 +356,49 @@ private struct ContextAgentInspectorView: View {
                 ],
                 values: values
             )
+        }
+    }
+
+    private func lastBatchSection(
+        _ telemetry: ContextAgentBatchTelemetry?,
+        snapshots: [WorkspaceSnapshot]
+    ) -> some View {
+        section(String(localized: "debug.contextAgentInspector.lastBatch", defaultValue: "Last Context Batch")) {
+            if let telemetry {
+                rows(
+                    columns: [
+                        String(localized: "debug.contextAgentInspector.batchOccurred", defaultValue: "Occurred"),
+                        String(localized: "debug.contextAgentInspector.batchUpdated", defaultValue: "Updated"),
+                        String(localized: "debug.contextAgentInspector.batchFailures", defaultValue: "Failures"),
+                        String(localized: "debug.contextAgentInspector.batchRecomputed", defaultValue: "Recomputed"),
+                        String(localized: "debug.contextAgentInspector.batchDuration", defaultValue: "Recompute (ms)"),
+                    ],
+                    values: [[
+                        Self.shortTime(telemetry.occurredAt),
+                        telemetry.updatedWorkspaceIds.isEmpty
+                            ? String(localized: "debug.contextAgentInspector.none", defaultValue: "None")
+                            : telemetry.updatedWorkspaceIds
+                                .map { workspaceTitle($0, snapshots: snapshots) }
+                                .joined(separator: ", "),
+                        "\(telemetry.failureCount)",
+                        telemetry.triggeredRecompute
+                            ? String(localized: "debug.contextAgentInspector.yes", defaultValue: "Yes")
+                            : String(localized: "debug.contextAgentInspector.no", defaultValue: "No"),
+                        telemetry.recomputeDurationMs.map { String(format: "%.1f", $0) }
+                            ?? String(localized: "debug.contextAgentInspector.none", defaultValue: "None"),
+                    ]]
+                )
+            } else {
+                Text(String(
+                    localized: "debug.contextAgentInspector.noBatchYet",
+                    defaultValue: "No context batch has run yet."
+                ))
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 34, alignment: .leading)
+                .padding(.horizontal, 10)
+                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 6))
+            }
         }
     }
 

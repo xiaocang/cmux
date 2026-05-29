@@ -237,6 +237,17 @@ enum CommandPaletteSettingsToggleCommands {
                 defaultsKey: WorkspaceAutoReorderSettings.key
             ),
             CommandPaletteSettingToggleDescriptor(
+                commandId: commandIdPrefix + "proactiveSpriteSuggestions",
+                settingsKey: "app.proactiveSpriteSuggestions",
+                title: {
+                    String(localized: "settings.app.proactiveSpriteSuggestions", defaultValue: "Proactive Sprite Suggestions")
+                },
+                sectionTitle: app,
+                keywords: ["app.proactiveSpriteSuggestions", "sprite", "proactive", "suggestion", "next", "assistant", "context"],
+                defaultValue: ProactiveSpriteSuggestionsSettings.defaultValue,
+                defaultsKey: ProactiveSpriteSuggestionsSettings.key
+            ),
+            CommandPaletteSettingToggleDescriptor(
                 commandId: commandIdPrefix + "dockBadge",
                 settingsKey: "notifications.dockBadge",
                 title: {
