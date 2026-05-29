@@ -3455,6 +3455,92 @@ final class SortAssistantFloatingPanelScreenClampTests: XCTestCase {
     }
 }
 
+final class SortAssistantConversationBubbleSideTests: XCTestCase {
+    private let visibleFrame = NSRect(x: 0, y: 0, width: 1440, height: 900)
+    private let edgePadding: CGFloat = 12
+
+    private func avatar(atMinX minX: CGFloat) -> NSRect {
+        NSRect(x: minX, y: 100, width: SortAssistantFloatingPanelMetrics.avatarSize, height: SortAssistantFloatingPanelMetrics.avatarSize)
+    }
+
+    // The core regression: once the bubble is opening leftward, drifting the
+    // sprite back toward the center (where the right side regains room) must NOT
+    // snap it back to the right. Sticky mode keeps `.left` as long as the left
+    // still fits.
+    func testStickyKeepsLeftWhenBothSidesHaveRoom() {
+        let side = SortAssistantFloatingPanelMetrics.resolvedConversationBubbleSide(
+            currentSide: .left,
+            avatarOnScreen: avatar(atMinX: 900),
+            visibleFrame: visibleFrame,
+            edgePadding: edgePadding,
+            sticky: true
+        )
+        XCTAssertEqual(side, .left)
+    }
+
+    // Sticky `.left` must still flip to `.right` once the leftward bubble can no
+    // longer fit — i.e. the sprite is dragged near the left screen edge.
+    func testStickyFlipsLeftToRightWhenLeftNoLongerFits() {
+        let side = SortAssistantFloatingPanelMetrics.resolvedConversationBubbleSide(
+            currentSide: .left,
+            avatarOnScreen: avatar(atMinX: 50),
+            visibleFrame: visibleFrame,
+            edgePadding: edgePadding,
+            sticky: true
+        )
+        XCTAssertEqual(side, .right)
+    }
+
+    func testStickyKeepsRightWhenRightHasRoom() {
+        let side = SortAssistantFloatingPanelMetrics.resolvedConversationBubbleSide(
+            currentSide: .right,
+            avatarOnScreen: avatar(atMinX: 200),
+            visibleFrame: visibleFrame,
+            edgePadding: edgePadding,
+            sticky: true
+        )
+        XCTAssertEqual(side, .right)
+    }
+
+    // Sticky `.right` flips to `.left` when the sprite reaches the right edge and
+    // the rightward bubble no longer fits (the original "切到了左边" behavior).
+    func testStickyFlipsRightToLeftWhenRightNoLongerFits() {
+        let side = SortAssistantFloatingPanelMetrics.resolvedConversationBubbleSide(
+            currentSide: .right,
+            avatarOnScreen: avatar(atMinX: 1380),
+            visibleFrame: visibleFrame,
+            edgePadding: edgePadding,
+            sticky: true
+        )
+        XCTAssertEqual(side, .left)
+    }
+
+    // A fresh appearance re-picks the best-fitting side, preferring the default
+    // rightward bubble whenever the right has room — even if the previous side
+    // was `.left`.
+    func testFreshAppearancePrefersRightWhenItFits() {
+        let side = SortAssistantFloatingPanelMetrics.resolvedConversationBubbleSide(
+            currentSide: .left,
+            avatarOnScreen: avatar(atMinX: 900),
+            visibleFrame: visibleFrame,
+            edgePadding: edgePadding,
+            sticky: false
+        )
+        XCTAssertEqual(side, .right)
+    }
+
+    func testFreshAppearancePicksLeftWhenRightDoesNotFit() {
+        let side = SortAssistantFloatingPanelMetrics.resolvedConversationBubbleSide(
+            currentSide: .right,
+            avatarOnScreen: avatar(atMinX: 1380),
+            visibleFrame: visibleFrame,
+            edgePadding: edgePadding,
+            sticky: false
+        )
+        XCTAssertEqual(side, .left)
+    }
+}
+
 final class SortAssistantVisibleScreenRangeTests: XCTestCase {
     func testPointVisibleWhenInsideAnyVisibleScreenFrame() {
         let frames = [

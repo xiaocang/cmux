@@ -390,6 +390,39 @@ enum SortAssistantFloatingPanelMetrics {
             return conversationHorizontalExtent
         }
     }
+
+    /// Decides which side of the avatar the conversation bubble should open on.
+    ///
+    /// - When `sticky` is false (a fresh appearance), pick the best-fitting side,
+    ///   preferring the default rightward bubble whenever the right has room.
+    /// - When `sticky` is true (an ongoing layout while the bubble stays open),
+    ///   keep `currentSide` as long as it still fits on screen, and only flip to
+    ///   the opposite side once the current side can no longer hold the bubble.
+    ///   This stops the bubble from snapping back to the right the instant the
+    ///   sprite drifts away from the right screen edge.
+    static func resolvedConversationBubbleSide(
+        currentSide: SortAssistantFloatingConversationBubbleSide,
+        avatarOnScreen: NSRect,
+        visibleFrame: NSRect,
+        edgePadding: CGFloat,
+        sticky: Bool
+    ) -> SortAssistantFloatingConversationBubbleSide {
+        let requiredSpace = conversationHorizontalExtent
+        let rightAvailable = visibleFrame.maxX - edgePadding - avatarOnScreen.maxX
+        let leftAvailable = avatarOnScreen.minX - visibleFrame.minX - edgePadding
+        guard sticky else {
+            guard rightAvailable < requiredSpace else { return .right }
+            return leftAvailable > rightAvailable ? .left : .right
+        }
+        switch currentSide {
+        case .right:
+            guard rightAvailable < requiredSpace else { return .right }
+            return leftAvailable > rightAvailable ? .left : .right
+        case .left:
+            guard leftAvailable < requiredSpace else { return .left }
+            return rightAvailable > leftAvailable ? .right : .left
+        }
+    }
 }
 
 private struct SortAssistantFloatingEdgeOverflow: CustomStringConvertible {
@@ -422,6 +455,16 @@ final class SortAssistantFloatingPanelHostView: NSView {
     private var isPresented = false
     private var origin: CGPoint?
     private var lastResolvedScreenOrigin: CGPoint?
+    // The effective bubble side used by the last applied frame. Tracked so the
+    // panel origin can be re-anchored on the avatar slot when the effective side
+    // changes (e.g. collapsing the bubble flips the effective side .left → .right
+    // and shrinks the panel) without teleporting the sprite sideways.
+    private var lastResolvedEffectiveSide: SortAssistantFloatingConversationBubbleSide?
+    // Whether the conversation bubble was visible on the previous resolve pass.
+    // A hidden → visible transition is treated as a fresh appearance, which
+    // re-picks the best-fitting side; while the bubble stays open the side is
+    // kept sticky.
+    private var wasFloatingBubbleVisible = false
     private var dragSession: DragSession?
     private var hasUserPositioned = false
     private var lastLayoutRevision = -1
@@ -503,6 +546,8 @@ final class SortAssistantFloatingPanelHostView: NSView {
         childWindow = nil
         hostingView = nil
         lastResolvedScreenOrigin = nil
+        lastResolvedEffectiveSide = nil
+        wasFloatingBubbleVisible = false
         dragSession = nil
         lastLayoutRevision = -1
         lastFocusRevision = 0
@@ -686,7 +731,22 @@ final class SortAssistantFloatingPanelHostView: NSView {
            let contentView = parentWindow.contentView,
            let childWindow,
            origin != nil {
-            let desiredRectOnScreen = NSRect(origin: preservedScreenOrigin, size: size)
+            // Preserve the avatar's on-screen position across effective-side
+            // changes. Collapsing the bubble flips the effective side
+            // (.left → .right) and shrinks the panel, while expanding does the
+            // reverse; the avatar slot's X offset changes with the side, so the
+            // preserved panel origin must shift by that delta or the sprite
+            // jumps sideways by the bubble width.
+            let previousSide = lastResolvedEffectiveSide ?? effectiveConversationBubbleSide
+            let newSide = effectiveConversationBubbleSide
+            let avatarSlotShift =
+                SortAssistantFloatingPanelMetrics.avatarVisualFrame(side: previousSide).minX
+                - SortAssistantFloatingPanelMetrics.avatarVisualFrame(side: newSide).minX
+            let anchoredScreenOrigin = CGPoint(
+                x: preservedScreenOrigin.x + avatarSlotShift,
+                y: preservedScreenOrigin.y
+            )
+            let desiredRectOnScreen = NSRect(origin: anchoredScreenOrigin, size: size)
             // Active drag must remain cursor-tracking. Other layout updates use
             // the recovery clamp so content growth can keep the panel's natural
             // size while the mini-sprite drag hotspot remains visible at the
@@ -833,6 +893,7 @@ final class SortAssistantFloatingPanelHostView: NSView {
         if childWindow.frame != rectOnScreen {
             childWindow.setFrame(rectOnScreen, display: true)
         }
+        lastResolvedEffectiveSide = effectiveConversationBubbleSide
 #if DEBUG
         if previousWindowFrame != rectOnScreen || previousHostingFrame != contentFrame {
             cmuxDebugLog(
@@ -967,11 +1028,24 @@ final class SortAssistantFloatingPanelHostView: NSView {
         preferredScreenPoint: CGPoint? = nil,
         source: String
     ) -> NSRect {
-        guard let coordinator = attachedCoordinator,
-              coordinator.isFloatingConversationBubbleVisible,
-              dragSession == nil else {
+        guard let coordinator = attachedCoordinator else {
+            wasFloatingBubbleVisible = false
             return rect
         }
+        let bubbleVisible = coordinator.isFloatingConversationBubbleVisible
+        guard bubbleVisible, dragSession == nil else {
+            // A live drag keeps the bubble visible, so only a genuine hide should
+            // arm the next fresh-appearance re-pick. Dragging must not be treated
+            // as a disappearance.
+            if !bubbleVisible {
+                wasFloatingBubbleVisible = false
+            }
+            return rect
+        }
+        // First resolve after the bubble (re-)appears: pick the best-fitting side
+        // fresh ("下次精灵出来"). While the bubble stays open, keep the side sticky.
+        let isFreshAppearance = !wasFloatingBubbleVisible
+        wasFloatingBubbleVisible = true
 
         let currentSide = coordinator.effectiveConversationBubbleSide
         let currentAvatarFrame = SortAssistantFloatingPanelMetrics.avatarVisualFrame(side: currentSide)
@@ -988,8 +1062,10 @@ final class SortAssistantFloatingPanelHostView: NSView {
         }
 
         let preferredSide = preferredConversationBubbleSide(
+            currentSide: currentSide,
             avatarOnScreen: avatarOnScreen,
-            visibleFrame: visibleFrame
+            visibleFrame: visibleFrame,
+            sticky: !isFreshAppearance
         )
         guard preferredSide != coordinator.conversationBubbleSide else {
             return rect
@@ -1006,23 +1082,25 @@ final class SortAssistantFloatingPanelHostView: NSView {
         )
 #if DEBUG
         cmuxDebugLog(
-            "sprite.bubbleSide source=\(source) current=\(currentSide.rawValue) preferred=\(preferredSide.rawValue) avatar=\(avatarOnScreen) visible=\(visibleFrame) before=\(rect) after=\(resolved)"
+            "sprite.bubbleSide source=\(source) fresh=\(isFreshAppearance ? 1 : 0) current=\(currentSide.rawValue) preferred=\(preferredSide.rawValue) avatar=\(avatarOnScreen) visible=\(visibleFrame) before=\(rect) after=\(resolved)"
         )
 #endif
         return resolved
     }
 
     private func preferredConversationBubbleSide(
+        currentSide: SortAssistantFloatingConversationBubbleSide,
         avatarOnScreen: NSRect,
-        visibleFrame: NSRect
+        visibleFrame: NSRect,
+        sticky: Bool
     ) -> SortAssistantFloatingConversationBubbleSide {
-        let requiredSpace = SortAssistantFloatingPanelMetrics.conversationHorizontalExtent
-        let rightAvailable = visibleFrame.maxX - edgePadding - avatarOnScreen.maxX
-        let leftAvailable = avatarOnScreen.minX - visibleFrame.minX - edgePadding
-        guard rightAvailable < requiredSpace else {
-            return .right
-        }
-        return leftAvailable > rightAvailable ? .left : .right
+        SortAssistantFloatingPanelMetrics.resolvedConversationBubbleSide(
+            currentSide: currentSide,
+            avatarOnScreen: avatarOnScreen,
+            visibleFrame: visibleFrame,
+            edgePadding: edgePadding,
+            sticky: sticky
+        )
     }
 
     private func defaultOrigin(panelSize: NSSize, in containerSize: NSSize) -> CGPoint {
