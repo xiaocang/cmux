@@ -1,13 +1,24 @@
 import AppKit
+import CmuxSocketControl
+import CmuxSettings
+import CmuxSettingsUI
 import SwiftUI
+import Observation
 import Darwin
 import Bonsplit
 import UniformTypeIdentifiers
 
 @main
 struct cmuxApp: App {
+    /// Dependency container for the new settings packages. Constructed
+    /// once at app launch and injected into the SwiftUI environment via
+    /// `.settingsRuntime(_:)`; descendant views resolve their settings
+    /// through it via the `@LiveSetting` property wrapper.
+    private let settingsRuntime: SettingsRuntime
+
     @StateObject private var tabManager: TabManager
     @StateObject private var notificationStore = TerminalNotificationStore.shared
+    @StateObject var closedItemHistoryStore = ClosedItemHistoryStore.shared
     @StateObject private var sidebarState = SidebarState()
     @StateObject private var keyboardShortcutSettingsObserver = KeyboardShortcutSettingsObserver.shared
     @AppStorage(AppearanceSettings.appearanceModeKey) private var appearanceMode = AppearanceSettings.defaultMode.rawValue
@@ -20,6 +31,7 @@ struct cmuxApp: App {
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
+    @StateObject var focusHistoryMenuInvalidator = FocusHistoryMenuInvalidator()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.openWindow) private var openWindow
     private let pluginSystem: CMUXPluginLifecycleManaging & CMUXPluginSettingsManaging = CMUXPluginSystem.shared
@@ -30,6 +42,68 @@ struct cmuxApp: App {
     }
 
     init() {
+        // Build the settings container once. All injected dependencies
+        // (the catalog, the two stores, the error log) live on this
+        // single struct; nothing in the package or app references a
+        // shared static.
+        let settingsCatalog = SettingCatalog()
+        let configFileURL = CmuxConfigLocation().userConfigFile
+        // Secrets live in their own 0600 files under Application Support/cmux,
+        // the same directory (and `socket-control-password` file) the socket
+        // auth path reads via SocketControlPasswordStore, so the Settings UI
+        // and the listener share one source of truth.
+        let secretBaseDirectory = SocketControlPasswordStore.defaultPasswordFileURL()?
+            .deletingLastPathComponent()
+            ?? FileManager.default
+                .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+                .appendingPathComponent("cmux", isDirectory: true)
+            ?? FileManager.default.temporaryDirectory
+        let secretStore = SecretFileStore(baseDirectory: secretBaseDirectory)
+
+        // Lift any plaintext socket-control password out of `cmux.json` into the
+        // secure store, then scrub it from the config. This runs here, in the App
+        // initializer, on purpose: it completes before the managed-config layer
+        // (`CmuxSettingsFileStore`, loaded later during app launch) reads the
+        // file, so removing the key can never be misread as a removed managed
+        // override that would trigger a restore. The secure file the migration
+        // writes is the same one both the Settings UI (via `secretStore`) and the
+        // socket listener (via `SocketControlPasswordStore`) read.
+        let socketPasswordStore = SocketControlPasswordStore()
+        let secretMigrationTimestamp: String = {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withYear, .withMonth, .withDay, .withTime]
+            return formatter.string(from: Date())
+                .replacingOccurrences(of: ":", with: "")
+                .replacingOccurrences(of: "-", with: "")
+        }()
+        PlaintextSecretMigration.scrub(
+            plaintextKeyPath: ["automation", "socketPassword"],
+            configURL: configFileURL,
+            loadCurrentSecret: { (try? socketPasswordStore.loadPassword()) ?? nil },
+            saveSecret: { try socketPasswordStore.savePassword($0) },
+            backupTimestamp: secretMigrationTimestamp
+        )
+        self.settingsRuntime = SettingsRuntime(
+            catalog: settingsCatalog,
+            userDefaultsStore: UserDefaultsSettingsStore(
+                defaults: .standard,
+                migrating: settingsCatalog.all
+            ),
+            jsonStore: JSONConfigStore(fileURL: configFileURL),
+            secretStore: secretStore,
+            errorLog: SettingsErrorLog(),
+            accountFlow: HostAccountFlow(authManager: .shared),
+            hostActions: HostSettingsActions(configFileURL: configFileURL)
+        )
+
+        // If invoked with CLI-style arguments (e.g. `cmux hooks setup`), exec the
+        // bundled CLI at Contents/Resources/bin/cmux. The GUI binary and the CLI
+        // share the name `cmux`, so if the GUI's Contents/MacOS leaks onto $PATH
+        // (which happens for any shell descended from this process), bare `cmux`
+        // resolves here instead of the CLI. See
+        // https://github.com/manaflow-ai/cmux/issues/4678.
+        CLIForwardingLaunchRouter.forwardToBundledCLIIfNeeded()
+
         StartupBreadcrumbLog.append("app.init.begin")
         UITestLaunchManifest.applyIfPresent()
         CmuxRuntimeMode.applyLaunchArgumentsIfPresent()
@@ -87,7 +161,7 @@ struct cmuxApp: App {
         if !SocketControlSettings.isDebugLikeBundleIdentifier(bundleID)
             && !SocketControlSettings.isStagingBundleIdentifier(bundleID) {
             StartupBreadcrumbLog.append("app.init.keychainMigration.begin")
-            SocketControlPasswordStore.migrateLegacyKeychainPasswordIfNeeded(defaults: defaults)
+            SocketControlPasswordStore().migrateLegacyKeychainPasswordIfNeeded(defaults: defaults)
             StartupBreadcrumbLog.append("app.init.keychainMigration.complete")
         }
         migrateSidebarAppearanceDefaultsIfNeeded(defaults: defaults)
@@ -96,7 +170,7 @@ struct cmuxApp: App {
         // UI tests depend on AppDelegate wiring happening even if SwiftUI view appearance
         // callbacks (e.g. `.onAppear`) are delayed or skipped.
         StartupBreadcrumbLog.append("app.init.delegate.configure.begin")
-        appDelegate.configure(tabManager: tabManager, notificationStore: notificationStore, sidebarState: sidebarState)
+        appDelegate.configure(tabManager: tabManager, notificationStore: notificationStore, sidebarState: sidebarState, settingsRuntime: settingsRuntime)
         StartupBreadcrumbLog.append("app.init.delegate.configured")
     }
 
@@ -110,24 +184,19 @@ struct cmuxApp: App {
 
     private static func configureGhosttyEnvironment() {
         let fileManager = FileManager.default
-        let ghosttyAppResources = "/Applications/Ghostty.app/Contents/Resources/ghostty"
-        let bundledGhosttyURL = Bundle.main.resourceURL?.appendingPathComponent("ghostty")
-        var resolvedResourcesDir: String?
+        let currentResourcesDir = getenv("GHOSTTY_RESOURCES_DIR").flatMap { String(cString: $0) }
+        if let resolvedResourcesDir = resolvedGhosttyResourcesDirectory(
+            currentValue: currentResourcesDir,
+            bundleResourceURL: Bundle.main.resourceURL,
+            fileManager: fileManager
+        ) {
+            setenv("GHOSTTY_RESOURCES_DIR", resolvedResourcesDir, 1)
+        }
 
-        if getenv("GHOSTTY_RESOURCES_DIR") == nil {
-            if let bundledGhosttyURL,
-               fileManager.fileExists(atPath: bundledGhosttyURL.path),
-               fileManager.fileExists(atPath: bundledGhosttyURL.appendingPathComponent("themes").path) {
-                resolvedResourcesDir = bundledGhosttyURL.path
-            } else if fileManager.fileExists(atPath: ghosttyAppResources) {
-                resolvedResourcesDir = ghosttyAppResources
-            } else if let bundledGhosttyURL, fileManager.fileExists(atPath: bundledGhosttyURL.path) {
-                resolvedResourcesDir = bundledGhosttyURL.path
-            }
-
-            if let resolvedResourcesDir {
-                setenv("GHOSTTY_RESOURCES_DIR", resolvedResourcesDir, 1)
-            }
+        if getenv("TERMINFO") == nil,
+           let terminfoURL = Bundle.main.resourceURL?.appendingPathComponent("terminfo"),
+           fileManager.fileExists(atPath: terminfoURL.path) {
+            setenv("TERMINFO", terminfoURL.path, 1)
         }
 
         if getenv("TERM") == nil {
@@ -148,16 +217,49 @@ struct cmuxApp: App {
             let dataDir = resourcesParent.path
             let manDir = resourcesParent.appendingPathComponent("man").path
 
-            appendEnvPathIfMissing(
+            prependEnvPathIfMissing(
                 "XDG_DATA_DIRS",
                 path: dataDir,
                 defaultValue: "/usr/local/share:/usr/share"
             )
-            appendEnvPathIfMissing("MANPATH", path: manDir)
+            prependEnvPathIfMissing("MANPATH", path: manDir)
         }
     }
 
-    private static func appendEnvPathIfMissing(_ key: String, path: String, defaultValue: String? = nil) {
+    static func resolvedGhosttyResourcesDirectory(
+        currentValue: String?,
+        bundleResourceURL: URL?,
+        ghosttyAppResources: String = "/Applications/Ghostty.app/Contents/Resources/ghostty",
+        fileManager: FileManager = .default
+    ) -> String? {
+        let bundledGhosttyURL = bundleResourceURL?.appendingPathComponent("ghostty")
+        // Tagged cmux builds may inherit GHOSTTY_RESOURCES_DIR from another running
+        // cmux instance. Prefer this app's bundled resources when they are present.
+        if let bundledGhosttyURL,
+           fileManager.fileExists(atPath: bundledGhosttyURL.path),
+           fileManager.fileExists(atPath: bundledGhosttyURL.appendingPathComponent("themes").path) {
+            return bundledGhosttyURL.path
+        }
+
+        if let currentValue = currentValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !currentValue.isEmpty,
+           fileManager.fileExists(atPath: currentValue) {
+            return currentValue
+        }
+
+        if fileManager.fileExists(atPath: ghosttyAppResources) {
+            return ghosttyAppResources
+        }
+
+        if let bundledGhosttyURL,
+           fileManager.fileExists(atPath: bundledGhosttyURL.path) {
+            return bundledGhosttyURL.path
+        }
+
+        return nil
+    }
+
+    private static func prependEnvPathIfMissing(_ key: String, path: String, defaultValue: String? = nil) {
         if path.isEmpty { return }
         var current = getenv(key).flatMap { String(cString: $0) } ?? ""
         if current.isEmpty, let defaultValue {
@@ -166,7 +268,7 @@ struct cmuxApp: App {
         if current.split(separator: ":").contains(Substring(path)) {
             return
         }
-        let updated = current.isEmpty ? path : "\(current):\(path)"
+        let updated = current.isEmpty ? path : "\(path):\(current)"
         setenv(key, updated, 1)
     }
 
@@ -221,6 +323,7 @@ struct cmuxApp: App {
     var body: some Scene {
         WindowGroup {
             MainWindowBootstrapView()
+                .settingsRuntime(settingsRuntime)
                 .cmuxAppearanceColorScheme(appearanceMode)
                 .onAppear {
                     SettingsWindowPresenter.configure(
@@ -277,7 +380,10 @@ struct cmuxApp: App {
                     GhosttyApp.shared.openConfigurationInTextEdit()
                 }
                 splitCommandButton(title: String(localized: "menu.app.reloadConfiguration", defaultValue: "Reload Configuration"), shortcut: menuShortcut(for: .reloadConfiguration)) {
-                    GhosttyApp.shared.reloadConfiguration(source: "menu.reload_configuration")
+                    dispatchReloadConfigurationMenuCommand()
+                }
+                Button(String(localized: "menu.app.makeDefaultTerminal", defaultValue: "Make cmux the Default Terminal")) {
+                    DefaultTerminalUserAction.setAsDefault(debugSource: "menu.makeDefaultTerminal")
                 }
             }
 
@@ -460,6 +566,14 @@ struct cmuxApp: App {
                     ) {
                         AboutTitlebarDebugWindowController.shared.show()
                     }
+                    Button(
+                        String(
+                            localized: "debug.menu.titlebarLayoutDebug",
+                            defaultValue: "Titlebar Layout Debug..."
+                        )
+                    ) {
+                        TitlebarLayoutDebugWindowController.shared.show()
+                    }
                     Button("Sidebar Debug…") {
                         SidebarDebugWindowController.shared.show()
                     }
@@ -613,15 +727,6 @@ struct cmuxApp: App {
                     workspaceCommandMenuContent(manager: activeTabManager)
                 }
 
-                splitCommandButton(title: String(localized: "menu.file.reopenPreviousSession", defaultValue: "Reopen Previous Session"), shortcut: menuShortcut(for: .reopenPreviousSession)) {
-                    if AppDelegate.shared?.reopenPreviousSession() != true {
-                        NSSound.beep()
-                    }
-                }
-
-                splitCommandButton(title: String(localized: "menu.file.reopenClosedBrowserPanel", defaultValue: "Reopen Closed Browser Panel"), shortcut: menuShortcut(for: .reopenClosedBrowserPanel)) {
-                    _ = activeTabManager.reopenMostRecentlyClosedBrowserPanel()
-                }
             }
 
             // Find
@@ -673,6 +778,18 @@ struct cmuxApp: App {
                         activeTabManager.searchSelection()
                     }
                     .disabled(!(activeTabManager.canUseSelectionForFind))
+
+                    Divider()
+
+                    splitCommandButton(title: String(localized: "menu.find.sendCtrlFToTerminal", defaultValue: "Send Ctrl-F to Terminal"), shortcut: menuShortcut(for: .sendCtrlFToTerminal)) {
+                        // Restore focus to the terminal if the right sidebar grabbed it, then
+                        // forward a faithfully-encoded Ctrl-F (e.g. Claude Code force-stop).
+                        restoreFindTargetFocus()
+                        if !activeTabManager.sendCtrlFToFocusedTerminal() {
+                            NSSound.beep()
+                        }
+                    }
+                    .disabled(activeTabManager.selectedTerminalPanel == nil)
                 }
             }
 
@@ -680,11 +797,12 @@ struct cmuxApp: App {
         }
 
         Window(String(localized: "settings.title", defaultValue: "Settings"), id: SettingsWindowPresenter.windowID) {
-            SettingsRootView()
-                .cmuxAppearanceColorScheme(appearanceMode)
-                .background(WindowAccessor { window in
+            SettingsWindowRoot(runtime: settingsRuntime)
+                .settingsRuntime(settingsRuntime)
+                .background(WindowAccessor(dedupeByWindow: false) { window in
                     SettingsWindowPresenter.configure(window: window)
                 })
+                .cmuxAppearanceColorScheme(appearanceMode)
         }
         .defaultSize(width: 980, height: 680)
         .windowResizability(.contentMinSize)
@@ -694,6 +812,7 @@ struct cmuxApp: App {
 
         Window(String(localized: "settings.config.windowTitle", defaultValue: "Config"), id: ConfigSettingsView.windowID) {
             ConfigSettingsView()
+                .settingsRuntime(settingsRuntime)
                 .cmuxAppearanceColorScheme(appearanceMode)
         }
     }
@@ -706,6 +825,7 @@ struct cmuxApp: App {
             }
         }
         helpCommands
+        historyCommands
         CommandGroup(after: .toolbar) {
             splitCommandButton(title: String(localized: "menu.view.toggleLeftSidebar", defaultValue: "Toggle Left Sidebar"), shortcut: menuShortcut(for: .toggleSidebar)) {
                 if AppDelegate.shared?.toggleSidebarInActiveMainWindow() != true {
@@ -912,6 +1032,7 @@ struct cmuxApp: App {
 
     private func bootstrapMainWindowScene() {
         appDelegate.scheduleInitialMainWindowBootstrap(debugSource: "swiftUIBootstrap")
+        appDelegate.installReloadConfigurationMenuItemAction()
         applyAppearance()
     }
 
@@ -933,6 +1054,7 @@ struct cmuxApp: App {
             preferredWindow: NSApp.keyWindow ?? NSApp.mainWindow
         ) ?? tabManager
     }
+
     private func notificationMenuItemTitle(for notification: TerminalNotification) -> String {
         let tabTitle = appDelegate.tabTitle(for: notification.tabId)
         return MenuBarNotificationLineFormatter.menuTitle(notification: notification, tabTitle: tabTitle)
@@ -1158,6 +1280,14 @@ struct cmuxApp: App {
         }
     }
 
+    private func dispatchReloadConfigurationMenuCommand() {
+        NSApp.sendAction(
+            #selector(AppDelegate.reloadConfigurationMenuItem(_:)),
+            to: appDelegate,
+            from: nil
+        )
+    }
+
     private func closePanelOrWindow() {
         if let window = NSApp.keyWindow ?? NSApp.mainWindow,
            cmuxWindowShouldOwnCloseShortcut(window) {
@@ -1185,6 +1315,7 @@ struct cmuxApp: App {
         BrowserImportHintDebugWindowController.shared.show()
         BrowserProfilePopoverDebugWindowController.shared.show()
         AboutTitlebarDebugWindowController.shared.show()
+        TitlebarLayoutDebugWindowController.shared.show()
         SidebarDebugWindowController.shared.show()
         ContextAgentInspectorWindowController.shared.show()
         BackgroundDebugWindowController.shared.show()
@@ -1215,6 +1346,7 @@ private struct MainWindowBootstrapView: View {
     }
 }
 
+
 private let cmuxAuxiliaryWindowIdentifiers: Set<String> = [
     "cmux.settings",
     "cmux.about",
@@ -1222,12 +1354,14 @@ private let cmuxAuxiliaryWindowIdentifiers: Set<String> = [
     "cmux.browser-popup",
     "cmux.browserProfilePopoverDebug",
     "cmux.configEditor",
+    "cmux.defaultTerminalRegistrationError",
     "cmux.feedButtonStyleDebug",
     "cmux.feedPreview",
     "cmux.feedTextEditorDebug",
     "cmux.fileExplorerStyleDebug",
     "cmux.folderDragIcon",
     "cmux.pdfPreviewChromeDebug",
+    "cmux.recentlyClosedHistory",
     "cmux.splitButtonLayoutDebug",
     "cmux.tabBarBackdropLab",
     "cmux.taskManager",
@@ -1240,6 +1374,7 @@ private let cmuxAuxiliaryWindowIdentifiers: Set<String> = [
     "cmux.backgroundDebug",
     "cmux.startupAppearanceDebug",
     "cmux.bonsplitTabBarDebug",
+    "cmux.titlebarLayoutDebug",
 ]
 
 /// Returns whether the given window should handle the standard close shortcut
@@ -1680,6 +1815,7 @@ private enum DebugWindowConfigSnapshot {
         sidebarPathLastSegmentOnly=\(boolValue(defaults, key: SidebarPathLastSegmentSettings.key, fallback: SidebarPathLastSegmentSettings.defaultLastSegmentOnly))
         sidebarActiveTabIndicatorStyle=\(stringValue(defaults, key: SidebarActiveTabIndicatorSettings.styleKey, fallback: SidebarActiveTabIndicatorSettings.defaultStyle.rawValue))
         sidebarDevBuildBannerVisible=\(boolValue(defaults, key: DevBuildBannerDebugSettings.sidebarBannerVisibleKey, fallback: DevBuildBannerDebugSettings.defaultShowSidebarBanner))
+        sidebarMinimumWidth=\(String(format: "%.1f", SessionPersistencePolicy.resolvedMinimumSidebarWidth(defaults: defaults)))
         """
 
         let backgroundPayload = """
@@ -1691,10 +1827,14 @@ private enum DebugWindowConfigSnapshot {
 
         let menuBarPayload = MenuBarIconDebugSettings.copyPayload(defaults: defaults)
         let browserDevToolsPayload = BrowserDevToolsButtonDebugSettings.copyPayload(defaults: defaults)
+        let titlebarLayoutPayload = TitlebarLayoutDebugSettingsSnapshot.copyPayload(defaults: defaults)
 
         return """
         # Sidebar Debug
         \(sidebarPayload)
+
+        # Titlebar Layout Debug
+        \(titlebarLayoutPayload)
 
         # Background Debug
         \(backgroundPayload)
@@ -1814,6 +1954,14 @@ private struct DebugWindowControlsView: View {
                         ) {
                             AboutTitlebarDebugWindowController.shared.show()
                         }
+                        Button(
+                            String(
+                                localized: "debug.menu.titlebarLayoutDebug",
+                                defaultValue: "Titlebar Layout Debug..."
+                            )
+                        ) {
+                            TitlebarLayoutDebugWindowController.shared.show()
+                        }
                         Button("Sidebar Debug…") {
                             SidebarDebugWindowController.shared.show()
                         }
@@ -1868,6 +2016,7 @@ private struct DebugWindowControlsView: View {
                             BrowserImportHintDebugWindowController.shared.show()
                             BrowserProfilePopoverDebugWindowController.shared.show()
                             AboutTitlebarDebugWindowController.shared.show()
+                            TitlebarLayoutDebugWindowController.shared.show()
                             SidebarDebugWindowController.shared.show()
                             BackgroundDebugWindowController.shared.show()
                             BonsplitTabBarDebugWindowController.shared.show()
@@ -4208,10 +4357,17 @@ private struct StartupAppearanceDebugView: View {
         applyAppearance(selectedAppearance)
         GhosttyStartupAppearancePreviewState.profile = selectedProfile
         GhosttyConfig.invalidateLoadCache()
-        GhosttyApp.shared.reloadConfiguration(
-            source: "debug.startupAppearancePreview",
-            reloadSettingsFromFile: false
-        )
+        if let appDelegate = AppDelegate.shared {
+            appDelegate.reloadConfiguration(
+                source: "debug.startupAppearancePreview",
+                reloadSettingsFromFile: false
+            )
+        } else {
+            GhosttyApp.shared.reloadConfiguration(
+                source: "debug.startupAppearancePreview",
+                reloadSettingsFromFile: false
+            )
+        }
         lastAppliedProfile = selectedProfile
         lastAppliedAppearance = selectedAppearance
     }
@@ -4222,10 +4378,17 @@ private struct StartupAppearanceDebugView: View {
         applyAppearance(.stored)
         GhosttyStartupAppearancePreviewState.profile = .realUserConfig
         GhosttyConfig.invalidateLoadCache()
-        GhosttyApp.shared.reloadConfiguration(
-            source: "debug.startupAppearanceRestore",
-            reloadSettingsFromFile: false
-        )
+        if let appDelegate = AppDelegate.shared {
+            appDelegate.reloadConfiguration(
+                source: "debug.startupAppearanceRestore",
+                reloadSettingsFromFile: false
+            )
+        } else {
+            GhosttyApp.shared.reloadConfiguration(
+                source: "debug.startupAppearanceRestore",
+                reloadSettingsFromFile: false
+            )
+        }
         lastAppliedProfile = .realUserConfig
         lastAppliedAppearance = .stored
     }
@@ -4959,6 +5122,47 @@ enum SidebarPullRequestShellDebounceSettings {
     }
 }
 
+enum KiroIntegrationSettings {
+    enum NotificationLevel: String, CaseIterable, Identifiable {
+        case minimal
+        case standard
+        case verbose
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .minimal:
+                return String(localized: "settings.automation.kiro.notificationLevel.minimal", defaultValue: "Minimal")
+            case .standard:
+                return String(localized: "settings.automation.kiro.notificationLevel.standard", defaultValue: "Standard")
+            case .verbose:
+                return String(localized: "settings.automation.kiro.notificationLevel.verbose", defaultValue: "Verbose")
+            }
+        }
+    }
+
+    static let hooksEnabledKey = "kiroHooksEnabled"
+    static let defaultHooksEnabled = true
+    static let notificationLevelKey = "kiroNotificationLevel"
+    static let defaultNotificationLevel = NotificationLevel.standard
+
+    static func hooksEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: hooksEnabledKey) == nil {
+            return defaultHooksEnabled
+        }
+        return defaults.bool(forKey: hooksEnabledKey)
+    }
+
+    static func notificationLevel(defaults: UserDefaults = .standard) -> NotificationLevel {
+        guard let raw = defaults.string(forKey: notificationLevelKey),
+              let level = NotificationLevel(rawValue: raw) else {
+            return defaultNotificationLevel
+        }
+        return level
+    }
+}
+
 enum WelcomeSettings {
     static let shownKey = "cmuxWelcomeShown"
 }
@@ -4980,10 +5184,24 @@ enum TelemetrySettings {
 
 enum CmdClickMarkdownRouteSettings {
     static let key = "openMarkdownInCmuxViewer"
-    static let defaultValue = false
+    static let didChangeNotification = Notification.Name("cmux.cmdClickMarkdownRouteDidChange")
+    static let defaultValue = true
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
         defaults.object(forKey: key) == nil ? defaultValue : defaults.bool(forKey: key)
+    }
+
+    static func setEnabled(
+        _ enabled: Bool,
+        defaults: UserDefaults = .standard,
+        notificationCenter: NotificationCenter = .default
+    ) {
+        defaults.set(enabled, forKey: key)
+        notifyDidChange(notificationCenter: notificationCenter)
+    }
+
+    static func notifyDidChange(notificationCenter: NotificationCenter = .default) {
+        notificationCenter.post(name: didChangeNotification, object: nil)
     }
 
     /// Cheap extension check. Safe to call off the main thread before any
@@ -6602,7 +6820,7 @@ struct SettingsView: View {
     }
 
     private var hasSocketPasswordConfigured: Bool {
-        SocketControlPasswordStore.hasConfiguredPassword()
+        SocketControlPasswordStore().hasConfiguredPassword()
     }
 
     private var browserHistorySubtitle: String {
@@ -6934,7 +7152,7 @@ struct SettingsView: View {
         }
 
         do {
-            try SocketControlPasswordStore.savePassword(trimmed)
+            try SocketControlPasswordStore().savePassword(trimmed)
             socketPasswordDraft = ""
             socketPasswordStatusMessage = String(localized: "settings.automation.socketPassword.saved", defaultValue: "Password saved.")
             socketPasswordStatusIsError = false
@@ -6946,7 +7164,7 @@ struct SettingsView: View {
 
     private func clearSocketPassword() {
         do {
-            try SocketControlPasswordStore.clearPassword()
+            try SocketControlPasswordStore().clearPassword()
             socketPasswordDraft = ""
             socketPasswordStatusMessage = String(localized: "settings.automation.socketPassword.cleared", defaultValue: "Password cleared.")
             socketPasswordStatusIsError = false
@@ -10998,6 +11216,78 @@ private class LeaderKeyRecorderNSButton: NSButton {
 
     deinit {
         stopRecording()
+    }
+}
+
+private struct BetaFeaturesSettingsView: View {
+    @Binding var dockEnabled: Bool
+
+    private var dockSubtitle: String {
+        if dockEnabled {
+            return String(
+                localized: "settings.betaFeatures.dock.subtitleOn",
+                defaultValue: "Shows Dock in the right sidebar mode switcher for custom terminal controls."
+            )
+        }
+        return String(
+            localized: "settings.betaFeatures.dock.subtitleOff",
+            defaultValue: "Hides Dock from the right sidebar until you enable it here."
+        )
+    }
+
+    var body: some View {
+        SettingsSectionHeader(title: String(localized: "settings.section.betaFeatures", defaultValue: "Beta Features"))
+            .settingsSearchAnchor(SettingsSearchIndex.sectionID(for: .betaFeatures))
+        SettingsCard {
+            BetaFeaturesWarningNote(
+                String(
+                    localized: "settings.betaFeatures.warning",
+                    defaultValue: "Dock is unstable and may change or break. Enable it only when you are testing it."
+                )
+            )
+
+            SettingsCardDivider()
+
+            SettingsCardRow(
+                configurationReview: .settingsOnly,
+                String(localized: "settings.betaFeatures.dock", defaultValue: "Dock"),
+                subtitle: dockSubtitle,
+                searchAnchorID: SettingsSearchIndex.settingID(for: .betaFeatures, idSuffix: "dock")
+            ) {
+                Toggle("", isOn: $dockEnabled)
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("SettingsBetaDockToggle")
+                    .accessibilityLabel(
+                        String(localized: "settings.betaFeatures.dock", defaultValue: "Dock")
+                    )
+            }
+        }
+    }
+}
+
+private struct BetaFeaturesWarningNote: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.yellow)
+                .accessibilityHidden(true)
+
+            Text(text)
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

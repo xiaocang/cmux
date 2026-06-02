@@ -1,6 +1,7 @@
 import AppKit
 import CMUXActions
 import CMUXWorkstream
+import CmuxSocketControl
 import Combine
 import Foundation
 

@@ -1,4 +1,5 @@
 import AppKit
+import CmuxSocketControl
 import Darwin
 import Foundation
 import CMUXPluginAPI

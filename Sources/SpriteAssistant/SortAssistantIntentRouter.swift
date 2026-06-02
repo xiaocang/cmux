@@ -1,4 +1,5 @@
 import Darwin
+import CmuxSocketControl
 import Foundation
 import MCP
 

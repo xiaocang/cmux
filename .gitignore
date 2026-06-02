@@ -4,6 +4,7 @@ build/
 DerivedData/
 *.xcuserstate
 xcuserdata/
+*.xcworkspace/xcshareddata/
 
 # macOS
 .DS_Store
@@ -55,3 +56,7 @@ tmp-*/
 
 # In-branch refactor progress trackers
 migrate-progress.md
+.iter-logs/*.png
+
+# Local dogfood scratch (screenshots, recordings) - never commit
+artifacts/

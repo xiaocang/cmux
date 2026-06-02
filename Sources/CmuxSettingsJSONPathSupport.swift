@@ -20,6 +20,19 @@ enum SidebarWorkspaceDetailDefaults {
     static let showCustomMetadata = true
 }
 
+enum SidebarWorkspaceTitleWrapSettings {
+    static let key = "sidebarWrapWorkspaceTitles"
+    static let defaultWrap = false
+
+    static func wraps(defaults: UserDefaults = .standard) -> Bool {
+        SidebarWorkspaceDetailDefaults.boolValue(
+            defaults: defaults,
+            key: key,
+            defaultValue: defaultWrap
+        )
+    }
+}
+
 extension SidebarWorkspaceDetailDefaults {
     static func boolValue(defaults: UserDefaults, key: String, defaultValue: Bool) -> Bool {
         if defaults.object(forKey: key) == nil {
@@ -34,6 +47,10 @@ extension SidebarWorkspaceDetailDefaults {
 
     static func watchGitStatusValue(defaults: UserDefaults) -> Bool {
         boolValue(defaults: defaults, key: watchGitStatusKey, defaultValue: watchGitStatus)
+    }
+
+    static func pullRequestPollingEnabled(defaults: UserDefaults) -> Bool {
+        watchGitStatusValue(defaults: defaults) && showPullRequestsValue(defaults: defaults)
     }
 }
 
@@ -73,12 +90,18 @@ extension CmuxSettingsFileStore {
         "app.hideTabCloseButton",
         "app.renameSelectsExistingName",
         "app.commandPaletteSearchesAllSurfaces",
+        "workspaceGroups.newWorkspacePlacement",
         "terminal.showScrollBar",
         "terminal.copyOnSelect",
         "terminal.autoResumeAgentSessions",
         "terminal.shellBackend",
         "terminal.liveshExecutablePath",
         "terminal.liveshctlExecutablePath",
+        "terminal.showTextBoxOnNewTerminals",
+        "terminal.focusTextBoxOnNewTerminals",
+        "terminal.agentHibernation.enabled",
+        "terminal.agentHibernation.idleSeconds",
+        "terminal.agentHibernation.maxLiveTerminals",
         "terminal.textBoxMaxLines",
         "terminal.resumeCommands",
         "notifications.dockBadge",
@@ -91,6 +114,7 @@ extension CmuxSettingsFileStore {
         "notifications.hooks",
         "notifications.hooksMode",
         "sidebar.hideAllDetails",
+        "sidebar.wrapWorkspaceTitles",
         "sidebar.showWorkspaceDescription",
         "sidebar.branchLayout",
         "sidebar.stackBranchDirectory",
@@ -128,6 +152,8 @@ extension CmuxSettingsFileStore {
         "automation.geminiIntegration",
         "automation.sidebarPullRequestShellDebounceEnabled",
         "automation.sidebarPullRequestShellDebounceSeconds",
+        "automation.kiroIntegration",
+        "automation.kiroNotificationLevel",
         "automation.portBase",
         "automation.portRange",
         "digest.enabled",
@@ -152,6 +178,8 @@ extension CmuxSettingsFileStore {
         "workspaceTab.summaryPriority.sortDimensionId",
         "workspaceTab.summaryPriority.sortDirection",
         "browser.defaultSearchEngine",
+        "browser.customSearchEngineName",
+        "browser.customSearchEngineURLTemplate",
         "browser.showSearchSuggestions",
         "browser.siteSearchKeyboardShortcut",
         "browser.siteSearch",
