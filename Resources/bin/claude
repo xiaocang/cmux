@@ -30,6 +30,18 @@ find_real_claude() {
     return 1
 }
 
+# Return 0 only when this invocation is attached to an interactive terminal
+# (a PTY on stdin). cmux hook/session injection only makes sense for interactive
+# `claude` sessions the user drives from a cmux terminal surface, which is always
+# PTY-backed. When `claude` is spawned without a PTY — from a shell script, a
+# piped/headless invocation, or any nested subprocess that merely inherited
+# cmux's CMUX_* environment — there is no interactive session to track, so we
+# short-circuit straight to the real binary. Checking this before
+# cmux_socket_available also avoids the socket ping latency on those calls.
+cmux_invocation_has_pty() {
+    [[ -t 0 ]]
+}
+
 # Return 0 only when CMUX_SOCKET_PATH points to a live cmux socket.
 cmux_socket_available() {
     local socket="${CMUX_SOCKET_PATH:-}"
@@ -174,7 +186,8 @@ clear_inherited_claude_auth_selection_env() {
     normalize_claude_config_dir
 }
 
-# Pass through if not in a cmux terminal, hooks are disabled, or the cmux
+# Pass through if not in a cmux terminal, hooks are disabled, this invocation
+# has no interactive PTY (spawned from a shell/script or piped), or the cmux
 # socket is unavailable (stale env / app not running).
 IN_CMUX=0
 if [[ -n "$CMUX_SURFACE_ID" ]]; then
@@ -192,7 +205,7 @@ exec_real_claude_passthrough() {
     exec "$REAL_CLAUDE" "$@"
 }
 
-if [[ "$IN_CMUX" == "0" || "$CMUX_CLAUDE_HOOKS_DISABLED" == "1" ]] || ! cmux_socket_available; then
+if [[ "$IN_CMUX" == "0" || "$CMUX_CLAUDE_HOOKS_DISABLED" == "1" ]] || ! cmux_invocation_has_pty || ! cmux_socket_available; then
     # In cmux-launched shells, preserve old behavior and always clear nested
     # Claude session markers, even when we must pass through due to stale socket.
     if [[ "$IN_CMUX" == "1" ]]; then

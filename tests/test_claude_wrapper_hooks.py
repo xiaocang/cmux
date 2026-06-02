@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import pty
 import shutil
 import socket
 import subprocess
@@ -39,6 +40,27 @@ def parse_settings_arg(argv: list[str]) -> dict:
     return json.loads(argv[index + 1])
 
 
+def run_wrapper_proc(cmd: list[str], *, with_pty: bool = True, **kwargs):
+    """Run the wrapper, honoring its PTY short-circuit.
+
+    The wrapper at Resources/bin/claude only injects cmux hooks/session flags
+    when stdin is a TTY. Real cmux terminal surfaces are always PTY-backed, so
+    interactive invocations get hooks; a non-interactive invocation (spawned
+    from a shell/script or piped) short-circuits straight to the real binary.
+    Pass with_pty=True (default) to exercise the interactive injection path, or
+    with_pty=False to drive a non-interactive stdin and exercise the
+    short-circuit/passthrough path.
+    """
+    if with_pty:
+        master_fd, slave_fd = pty.openpty()
+        try:
+            return subprocess.run(cmd, stdin=slave_fd, **kwargs)
+        finally:
+            os.close(slave_fd)
+            os.close(master_fd)
+    return subprocess.run(cmd, stdin=subprocess.DEVNULL, **kwargs)
+
+
 def run_wrapper(
     *,
     socket_state: str,
@@ -47,6 +69,7 @@ def run_wrapper(
     tmpdir: str | None = None,
     hooks_disabled: bool = False,
     permission_request_hook: bool = False,
+    with_pty: bool = True,
 ) -> tuple[int, list[str], list[str], str, str, str, str, str, str, str]:
     with tempfile.TemporaryDirectory(prefix="cmux-claude-wrapper-test-") as td:
         tmp = Path(td)
@@ -195,8 +218,9 @@ exit 0
             env["NODE_OPTIONS"] = node_options
 
         try:
-            proc = subprocess.run(
+            proc = run_wrapper_proc(
                 ["claude", *argv],
+                with_pty=with_pty,
                 cwd=tmp,
                 env=env,
                 capture_output=True,
@@ -319,7 +343,7 @@ exit 0
             env["FAKE_REAL_ENV_LOG"] = str(env_log)
             env["FAKE_REAL_ARGS_LOG"] = str(args_log)
 
-            proc = subprocess.run(
+            proc = run_wrapper_proc(
                 [str(wrapper), *argv],
                 cwd=tmp,
                 env=env,
@@ -450,7 +474,7 @@ exit 0
                 env.update(setup_env(tmp))
             env.update(inherited_env)
 
-            proc = subprocess.run(
+            proc = run_wrapper_proc(
                 ["claude", *argv],
                 cwd=tmp,
                 env=env,
@@ -1157,6 +1181,25 @@ def test_stale_socket_skips_hook_injection(failures: list[str]) -> None:
     expect(hook_cmux_bin == "__UNSET__", f"stale socket: expected hook cmux unset, got {hook_cmux_bin!r}", failures)
 
 
+def test_no_pty_invocation_skips_hook_injection(failures: list[str]) -> None:
+    # A live socket would normally trigger hook injection, but a non-interactive
+    # (no-PTY) invocation must short-circuit straight to the real binary.
+    code, real_argv, cmux_log, stderr, claudecode, _, _, _, hook_cmux_bin, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        with_pty=False,
+    )
+    expect(code == 0, f"no pty: wrapper exited {code}: {stderr}", failures)
+    expect(real_argv == ["hello"], f"no pty: expected passthrough args, got {real_argv}", failures)
+    expect("--settings" not in real_argv, f"no pty: expected no --settings injection, got {real_argv}", failures)
+    expect("--session-id" not in real_argv, f"no pty: expected no --session-id injection, got {real_argv}", failures)
+    # The PTY check must short-circuit BEFORE the socket ping so non-interactive
+    # invocations do not pay the ping latency.
+    expect(cmux_log == [], f"no pty: expected no cmux ping probe, got {cmux_log}", failures)
+    expect(claudecode == "__UNSET__", f"no pty: expected CLAUDECODE unset, got {claudecode!r}", failures)
+    expect(hook_cmux_bin == "__UNSET__", f"no pty: expected hook cmux unset, got {hook_cmux_bin!r}", failures)
+
+
 def main() -> int:
     failures: list[str] = []
     test_live_socket_injects_supported_hooks_without_unlocking_bypass(failures)
@@ -1182,6 +1225,7 @@ def main() -> int:
     test_missing_socket_skips_hook_injection(failures)
     test_disabled_integration_skips_hook_injection(failures)
     test_stale_socket_skips_hook_injection(failures)
+    test_no_pty_invocation_skips_hook_injection(failures)
 
     if failures:
         print("FAIL: claude wrapper regression checks failed")
