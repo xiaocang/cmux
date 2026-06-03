@@ -34,6 +34,7 @@ extension ContextAgent {
             "surface",
             "agent",
             "assistant",
+            "feed",
         ]
     }
 

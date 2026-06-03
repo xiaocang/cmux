@@ -105,6 +105,7 @@ final class SortAssistantCoordinator: ObservableObject {
         ProactiveSuggestionTypes.reviewAgentWaitingUser,
         ProactiveSuggestionTypes.fixCIFailure,
         ProactiveSuggestionTypes.mergeReady,
+        ProactiveSuggestionTypes.workspaceNeedsAttention,
     ]
     // Phase 2 Tier 2 auto-bubble state (default-off sub-flag ProactiveAutoBubbleSettings).
     private var autoBubbleSeenSuggestionIds: Set<UUID> = []
@@ -158,6 +159,7 @@ final class SortAssistantCoordinator: ObservableObject {
     private let suggestionSnapshotStore: SuggestionSnapshotStore
     private let rankingSnapshotStore: RankingSnapshotStore
     private var contextAgentEventTask: Task<Void, Never>?
+    private var contextAgentStartupTask: Task<Void, Never>?
     private var semanticActionAuditTrail: [SemanticActionAuditEntry] = []
     private static let contextFreshnessWarningTools: Set<String> = [
         "assistant_working_context_get",
@@ -209,23 +211,30 @@ final class SortAssistantCoordinator: ObservableObject {
         }
     }
 
-    private final class CoordinatorWorkspaceSnapshotProvider: @unchecked Sendable, WorkspaceSnapshotProviding {
+    /// Bridges a ``WorkspaceSnapshotProviding`` provider id to a coordinator
+    /// method that builds the snapshot on the main actor. The `resolve` closure
+    /// is the only thing that varies between provider families (list/git/github
+    /// snapshots vs. event-payload-derived signals).
+    private final class CoordinatorSnapshotProvider: @unchecked Sendable, WorkspaceSnapshotProviding {
         nonisolated let providerId: String
         private weak var coordinator: SortAssistantCoordinator?
+        private let resolve: @Sendable @MainActor (SortAssistantCoordinator, String, ContextRefreshJob) -> WorkspaceSnapshot?
 
-        init(providerId: String, coordinator: SortAssistantCoordinator) {
+        init(
+            providerId: String,
+            coordinator: SortAssistantCoordinator,
+            resolve: @escaping @Sendable @MainActor (SortAssistantCoordinator, String, ContextRefreshJob) -> WorkspaceSnapshot?
+        ) {
             self.providerId = providerId
             self.coordinator = coordinator
+            self.resolve = resolve
         }
 
         func snapshot(for job: ContextRefreshJob) async throws -> WorkspaceSnapshot {
             let providerId = providerId
             return try await MainActor.run {
-                guard let snapshot = coordinator?.workspaceSnapshotForContextAgent(
-                    workspaceId: job.workspaceId,
-                    now: job.enqueuedAt,
-                    freshnessProviderIds: [providerId]
-                ) else {
+                guard let coordinator,
+                      let snapshot = resolve(coordinator, providerId, job) else {
                     throw ContextAgentSnapshotProviderError.snapshotUnavailable(job.workspaceId)
                 }
                 return snapshot
@@ -270,15 +279,33 @@ final class SortAssistantCoordinator: ObservableObject {
         self.sortOperator = SortOperator(engine: engine, eventLog: eventLog)
         self.contextProvider = SortContextProvider(eventLog: eventLog, engine: engine)
         memories = Self.loadLegacyMemories(from: memoryFileURL)
-        Task { @MainActor [weak self] in
+        self.contextAgentStartupTask = Task { @MainActor [weak self] in
             guard let self else { return }
             for providerId in ["list_state", "git_context", "github_context", "summary_priority"] {
-                await self.contextAgent.registerProvider(CoordinatorWorkspaceSnapshotProvider(
+                await self.contextAgent.registerProvider(CoordinatorSnapshotProvider(
                     providerId: providerId,
                     coordinator: self
-                ))
+                ) { coordinator, providerId, job in
+                    coordinator.workspaceSnapshotForContextAgent(
+                        workspaceId: job.workspaceId,
+                        now: job.enqueuedAt,
+                        freshnessProviderIds: [providerId]
+                    )
+                })
+            }
+            for providerId in ["agent_session", "notification_context", "workspace_activity"] {
+                await self.contextAgent.registerProvider(CoordinatorSnapshotProvider(
+                    providerId: providerId,
+                    coordinator: self
+                ) { coordinator, providerId, job in
+                    coordinator.workspaceSnapshotForContextAgentPayload(
+                        providerId: providerId,
+                        job: job
+                    )
+                })
             }
             self.contextAgentEventTask = self.contextAgent.startEventStream(
+                afterSequence: 0,
                 onBatch: { [weak self] result in
                     await self?.handleContextAgentBatch(result)
                 }
@@ -419,6 +446,7 @@ final class SortAssistantCoordinator: ObservableObject {
         switch type {
         case ProactiveSuggestionTypes.reviewAgentWaitingUser: return 3
         case ProactiveSuggestionTypes.fixCIFailure: return 2
+        case ProactiveSuggestionTypes.workspaceNeedsAttention: return 2
         case ProactiveSuggestionTypes.mergeReady: return 1
         default: return 0
         }
@@ -433,6 +461,8 @@ final class SortAssistantCoordinator: ObservableObject {
             glyph = "xmark.octagon.fill"
         case ProactiveSuggestionTypes.mergeReady:
             glyph = "checkmark.seal.fill"
+        case ProactiveSuggestionTypes.workspaceNeedsAttention:
+            glyph = "bell.badge.fill"
         default:
             glyph = "sparkles"
         }
@@ -498,6 +528,19 @@ final class SortAssistantCoordinator: ObservableObject {
     /// deterministically observe `visibleSuggestions` after a batch.
     func debugAwaitProactiveSuggestionRecompute() async {
         await proactiveSuggestionRecomputeTask?.value
+    }
+
+    /// Test seam: waits until the context agent's asynchronous startup has
+    /// registered the event-payload providers used by real hook-triggered jobs.
+    func debugAwaitContextAgentStartup() async -> Bool {
+        await contextAgentStartupTask?.value
+        let requiredProviderIds: Set<String> = [
+            "agent_session",
+            "notification_context",
+            "workspace_activity",
+        ]
+        let providerIds = Set(await contextAgent.providerIds())
+        return requiredProviderIds.isSubset(of: providerIds) && contextAgentEventTask != nil
     }
 
     func debugContextAgentInspectorSnapshot(now: Date = Date()) async -> ContextAgentInspectorSnapshot {
@@ -2972,6 +3015,11 @@ final class SortAssistantCoordinator: ObservableObject {
             return String(
                 localized: "sortAssistant.fakeAssistant.suggestion.mergeReady",
                 defaultValue: "ready to merge"
+            )
+        case ProactiveSuggestionTypes.workspaceNeedsAttention:
+            return String(
+                localized: "sortAssistant.fakeAssistant.suggestion.workspaceNeedsAttention",
+                defaultValue: "workspace needs attention"
             )
         default:
             return String(
@@ -5702,6 +5750,112 @@ final class SortAssistantCoordinator: ObservableObject {
         ]
     }
 
+    func socketContextAgentCollect(
+        workspaceId: String?,
+        providerIds: [String],
+        reason: String?
+    ) -> [String: Any]? {
+        guard let tabManager = lastTabManager else { return nil }
+        let targetWorkspaceIds = resolvedSocketWorkspaceIds(workspaceId: workspaceId, tabManager: tabManager)
+        guard !targetWorkspaceIds.isEmpty else { return nil }
+        let requestedProviders = normalizedContextProviderIds(providerIds)
+        for workspaceId in targetWorkspaceIds {
+            var payload: [String: Any] = [
+                "reason": Self.nonEmpty(reason) ?? "mcp.context_agent_collect",
+            ]
+            if !requestedProviders.isEmpty {
+                payload["providerIds"] = requestedProviders.joined(separator: " ")
+            }
+            CmuxEventBus.shared.publish(
+                name: "assistant.context_collect.requested",
+                category: "assistant",
+                source: "sprite.mcp",
+                workspaceId: workspaceId.uuidString,
+                payload: payload
+            )
+        }
+        return [
+            "scheduled": true,
+            "workspaceIds": targetWorkspaceIds.map(\.uuidString),
+            "providerIds": requestedProviders,
+            "reason": Self.nonEmpty(reason) ?? "mcp.context_agent_collect",
+            "suggestions": SortAssistantPayload.array(activeSuggestions(now: Date(), publish: false)),
+        ]
+    }
+
+    func socketProactiveSuggestionsRefresh() -> [String: Any]? {
+        guard lastTabManager != nil else { return nil }
+        let suggestions = activeSuggestions(now: Date(), updateVisible: true, publish: true)
+        maybeNotifyProactiveSuggestions(from: suggestions)
+        return [
+            "refreshed": true,
+            "attentionCount": proactiveAttentionCount,
+            "suggestions": SortAssistantPayload.array(suggestions),
+            "badges": Dictionary(uniqueKeysWithValues: proactiveBadgeByWorkspaceId().map { workspaceId, badge in
+                (
+                    workspaceId.uuidString,
+                    [
+                        "type": badge.type,
+                        "glyph": badge.glyph,
+                        "helpText": badge.helpText,
+                    ] as [String: Any]
+                )
+            }),
+        ]
+    }
+
+    func socketReportProactiveSignal(
+        workspaceId: String?,
+        status: String?,
+        title: String?,
+        rankReason: String?,
+        nextAction: String?,
+        summary: String?,
+        priorityScore: Double?,
+        userAttentionNeeded: Double?,
+        source: String?
+    ) -> [String: Any]? {
+        guard let tabManager = lastTabManager,
+              let targetWorkspaceId = resolvedSocketWorkspaceIds(workspaceId: workspaceId, tabManager: tabManager).first else {
+            return nil
+        }
+        var payload: [String: Any] = [
+            "status": Self.normalizedSuggestionStatus(status ?? "") ?? "needs_attention",
+            "source": Self.nonEmpty(source) ?? "sprite.mcp",
+        ]
+        if let title = Self.nonEmpty(title) {
+            payload["title"] = title
+        }
+        if let rankReason = Self.nonEmpty(rankReason) {
+            payload["rankReason"] = rankReason
+        }
+        if let nextAction = Self.nonEmpty(nextAction) {
+            payload["nextAction"] = nextAction
+        }
+        if let summary = Self.nonEmpty(summary) {
+            payload["summary"] = summary
+        }
+        if let priorityScore {
+            payload["priorityScore"] = "\(priorityScore)"
+        }
+        if let userAttentionNeeded {
+            payload["userAttentionNeeded"] = "\(userAttentionNeeded)"
+        }
+        CmuxEventBus.shared.publish(
+            name: ContextAgentEvent.proactiveSignalReportedName,
+            category: "agent",
+            source: Self.nonEmpty(source) ?? "sprite.mcp",
+            workspaceId: targetWorkspaceId.uuidString,
+            payload: payload
+        )
+        return [
+            "accepted": true,
+            "workspaceId": targetWorkspaceId.uuidString,
+            "workspace_id": targetWorkspaceId.uuidString,
+            "payload": payload,
+        ]
+    }
+
     private func activeSuggestionForAction(suggestionId: UUID) -> ProactiveSuggestion? {
         guard !dismissedSuggestionIds.contains(suggestionId) else { return nil }
         if let suggestion = cachedActiveSuggestions.first(where: { $0.id == suggestionId }) {
@@ -6027,6 +6181,199 @@ final class SortAssistantCoordinator: ObservableObject {
         )
     }
 
+    private func workspaceSnapshotForContextAgentPayload(
+        providerId: String,
+        job: ContextRefreshJob
+    ) -> WorkspaceSnapshot? {
+        guard let signal = contextAgentSignal(providerId: providerId, job: job) else {
+            return nil
+        }
+        let existingWorkspace = lastTabManager?.tabs.first { $0.id == job.workspaceId }
+        let existingSnapshot = existingWorkspace.flatMap {
+            makeWorkspaceSnapshot(
+                workspace: $0,
+                now: job.enqueuedAt,
+                freshnessProviderIds: [providerId]
+            )
+        }
+        let nativeOrder = intPayload(job.payload, "nativeOrder", "native_order")
+            ?? existingSnapshot?.context.nativeOrder
+            ?? 0
+        let pullRequestCount = intPayload(job.payload, "pullRequestCount", "pull_request_count")
+            ?? existingSnapshot?.context.pullRequestCount
+            ?? 0
+        let stalePullRequestCount = intPayload(job.payload, "stalePullRequestCount", "stale_pull_request_count")
+            ?? existingSnapshot?.context.stalePullRequestCount
+            ?? 0
+        let title = Self.nonEmpty(payloadString(job.payload, "title", "workspaceTitle", "workspace_title"))
+            ?? existingSnapshot?.context.title
+            ?? signal.title
+        let attention = doublePayload(job.payload, "userAttentionNeeded", "user_attention_needed", "attention")
+            ?? signal.defaultAttention
+        let priorityScore = doublePayload(job.payload, "priorityScore", "priority_score")
+            ?? (attention * 100)
+        let summary = Self.nonEmpty(payloadString(job.payload, "summary"))
+            ?? signal.summary
+        return WorkspaceSnapshot(
+            workspaceId: job.workspaceId,
+            version: max(existingSnapshot?.version ?? 0, nativeOrder + 1),
+            updatedAt: job.enqueuedAt,
+            context: NormalizedWorkspaceContext(
+                title: title,
+                selected: existingSnapshot?.context.selected
+                    ?? (lastTabManager?.selectedTabId == job.workspaceId),
+                directory: existingSnapshot?.context.directory
+                    ?? Self.nonEmpty(payloadString(job.payload, "directory", "cwd")),
+                listRevision: existingSnapshot?.context.listRevision ?? nativeOrder + 1,
+                nativeOrder: nativeOrder,
+                pinned: existingSnapshot?.context.pinned ?? false,
+                locked: existingSnapshot?.context.locked ?? false,
+                customColor: existingSnapshot?.context.customColor,
+                panelCount: existingSnapshot?.context.panelCount ?? 0,
+                pullRequestCount: pullRequestCount,
+                stalePullRequestCount: stalePullRequestCount
+            ),
+            derived: DerivedWorkspaceState(
+                status: signal.status,
+                priorityScore: priorityScore,
+                rankReason: Self.nonEmpty(payloadString(job.payload, "rankReason", "rank_reason"))
+                    ?? signal.rankReason,
+                nextAction: Self.nonEmpty(payloadString(job.payload, "nextAction", "next_action"))
+                    ?? signal.nextAction,
+                userAttentionNeeded: min(max(attention, 0), 1)
+            ),
+            digest: summary.map {
+                WorkspaceDigest(summary: $0, generatedAt: job.enqueuedAt)
+            },
+            freshness: ContextFreshness(
+                providers: [
+                    ProviderFreshness(
+                        providerId: providerId,
+                        lastCollectedAt: job.enqueuedAt,
+                        ttlSeconds: 120,
+                        stale: false,
+                        error: nil,
+                        confidence: signal.confidence
+                    ),
+                ],
+                overallConfidence: signal.confidence
+            )
+        )
+    }
+
+    private struct ContextAgentSignal {
+        var status: String
+        var title: String
+        var rankReason: String?
+        var nextAction: String?
+        var summary: String?
+        var defaultAttention: Double
+        var confidence: Double
+    }
+
+    private func contextAgentSignal(providerId: String, job: ContextRefreshJob) -> ContextAgentSignal? {
+        if let rawStatus = payloadString(job.payload, "status", "state"),
+           let status = Self.normalizedSuggestionStatus(rawStatus) {
+            return ContextAgentSignal(
+                status: status,
+                title: Self.nonEmpty(payloadString(job.payload, "title")) ?? defaultSignalTitle(for: job),
+                rankReason: Self.nonEmpty(payloadString(job.payload, "rankReason", "rank_reason")),
+                nextAction: Self.nonEmpty(payloadString(job.payload, "nextAction", "next_action")),
+                summary: Self.nonEmpty(payloadString(job.payload, "summary")),
+                defaultAttention: defaultAttention(forStatus: status),
+                confidence: 1
+            )
+        }
+
+        switch providerId {
+        case "agent_session":
+            return agentSessionSignal(for: job)
+        case "notification_context":
+            return ContextAgentSignal(
+                status: "notification",
+                title: defaultSignalTitle(for: job),
+                rankReason: String(localized: "sortAssistant.contextAgent.notification.reason", defaultValue: "A new workspace notification arrived."),
+                nextAction: String(localized: "sortAssistant.contextAgent.notification.nextAction", defaultValue: "Review the workspace notification"),
+                summary: nil,
+                defaultAttention: 0.9,
+                confidence: 0.9
+            )
+        case "workspace_activity":
+            return ContextAgentSignal(
+                status: "workspace_activity",
+                title: defaultSignalTitle(for: job),
+                rankReason: String(localized: "sortAssistant.contextAgent.workspaceActivity.reason", defaultValue: "Recent workspace activity may need follow-up."),
+                nextAction: String(localized: "sortAssistant.contextAgent.workspaceActivity.nextAction", defaultValue: "Review recent workspace activity"),
+                summary: nil,
+                defaultAttention: 0.9,
+                confidence: 0.85
+            )
+        default:
+            return nil
+        }
+    }
+
+    private func agentSessionSignal(for job: ContextRefreshJob) -> ContextAgentSignal? {
+        let hook = payloadString(job.payload, "hook_event_name", "hookEventName")
+            ?? job.reason.replacingOccurrences(of: "agent.hook.", with: "")
+        let source = payloadString(job.payload, "_source", "source")
+            ?? String(localized: "sortAssistant.contextAgent.agent.defaultSource", defaultValue: "agent")
+        switch hook {
+        case "PermissionRequest":
+            return ContextAgentSignal(
+                status: "permission_requested",
+                title: defaultSignalTitle(for: job),
+                rankReason: String(format: String(localized: "sortAssistant.contextAgent.permission.reason", defaultValue: "%@ needs permission."), source),
+                nextAction: String(localized: "sortAssistant.contextAgent.permission.nextAction", defaultValue: "Review the permission request"),
+                summary: nil,
+                defaultAttention: 0.98,
+                confidence: 1
+            )
+        case "AskUserQuestion":
+            return ContextAgentSignal(
+                status: "question_requested",
+                title: defaultSignalTitle(for: job),
+                rankReason: String(format: String(localized: "sortAssistant.contextAgent.question.reason", defaultValue: "%@ asked a question."), source),
+                nextAction: String(localized: "sortAssistant.contextAgent.question.nextAction", defaultValue: "Answer the agent question"),
+                summary: nil,
+                defaultAttention: 0.98,
+                confidence: 1
+            )
+        case "ExitPlanMode":
+            return ContextAgentSignal(
+                status: "exit_plan_ready",
+                title: defaultSignalTitle(for: job),
+                rankReason: String(format: String(localized: "sortAssistant.contextAgent.exitPlan.reason", defaultValue: "%@ is waiting for plan approval."), source),
+                nextAction: String(localized: "sortAssistant.contextAgent.exitPlan.nextAction", defaultValue: "Review the plan"),
+                summary: nil,
+                defaultAttention: 0.98,
+                confidence: 1
+            )
+        case "Notification":
+            return ContextAgentSignal(
+                status: "notification",
+                title: defaultSignalTitle(for: job),
+                rankReason: String(format: String(localized: "sortAssistant.contextAgent.agentNotification.reason", defaultValue: "%@ sent a notification."), source),
+                nextAction: String(localized: "sortAssistant.contextAgent.agentNotification.nextAction", defaultValue: "Review the agent notification"),
+                summary: nil,
+                defaultAttention: 0.92,
+                confidence: 0.9
+            )
+        case "Stop", "SubagentStop":
+            return ContextAgentSignal(
+                status: "agent_completed",
+                title: defaultSignalTitle(for: job),
+                rankReason: String(format: String(localized: "sortAssistant.contextAgent.agentCompleted.reason", defaultValue: "%@ finished a turn."), source),
+                nextAction: String(localized: "sortAssistant.contextAgent.agentCompleted.nextAction", defaultValue: "Review completed agent work"),
+                summary: nil,
+                defaultAttention: 0.9,
+                confidence: 0.85
+            )
+        default:
+            return nil
+        }
+    }
+
     private func workspaceSnapshot(workspaceId: String?, now: Date) -> WorkspaceSnapshot? {
         guard let tabManager = lastTabManager else { return nil }
         let requestedWorkspaceId = workspaceId.flatMap(UUID.init(uuidString:))
@@ -6181,11 +6528,107 @@ final class SortAssistantCoordinator: ObservableObject {
             .replacingOccurrences(of: "-", with: "_")
             .replacingOccurrences(of: " ", with: "_")
         switch normalized {
-        case "waiting_user", "ci_failed", "ready_to_merge":
+        case "waiting_user",
+             "ci_failed",
+             "ready_to_merge",
+             "permission_requested",
+             "question_requested",
+             "exit_plan_ready",
+             "agent_completed",
+             "notification",
+             "workspace_activity",
+             "needs_attention":
             return normalized
         default:
             return nil
         }
+    }
+
+    private func payloadString(_ payload: [String: String], _ keys: String...) -> String? {
+        payloadString(payload, keys)
+    }
+
+    private func intPayload(_ payload: [String: String], _ keys: String...) -> Int? {
+        payloadString(payload, keys).flatMap(Int.init)
+    }
+
+    private func doublePayload(_ payload: [String: String], _ keys: String...) -> Double? {
+        payloadString(payload, keys).flatMap(Double.init)
+    }
+
+    private func payloadString(_ payload: [String: String], _ keys: [String]) -> String? {
+        for key in keys {
+            guard let value = Self.nonEmpty(payload[key]) else { continue }
+            return value
+        }
+        return nil
+    }
+
+    private func defaultAttention(forStatus status: String) -> Double {
+        switch status {
+        case "permission_requested", "question_requested", "exit_plan_ready":
+            return 0.98
+        case "waiting_user", "ci_failed":
+            return 0.95
+        case "agent_completed", "notification", "workspace_activity", "needs_attention":
+            return 0.9
+        case "ready_to_merge":
+            return 0.85
+        default:
+            return 0
+        }
+    }
+
+    private func defaultSignalTitle(for job: ContextRefreshJob) -> String {
+        if let title = payloadString(job.payload, "title", "workspaceTitle", "workspace_title") {
+            return title
+        }
+        if let workspace = lastTabManager?.tabs.first(where: { $0.id == job.workspaceId }) {
+            return workspace.title
+        }
+        return String(localized: "sortAssistant.contextAgent.signal.defaultTitle", defaultValue: "Workspace")
+    }
+
+    private func resolvedSocketWorkspaceIds(workspaceId: String?, tabManager: TabManager) -> [UUID] {
+        if let raw = Self.nonEmpty(workspaceId) {
+            if raw == "*" || raw.lowercased() == "all" {
+                return tabManager.tabs.map(\.id)
+            }
+            if let id = UUID(uuidString: raw),
+               tabManager.tabs.contains(where: { $0.id == id }) {
+                return [id]
+            }
+            return []
+        }
+        if let selectedTabId = tabManager.selectedTabId {
+            return [selectedTabId]
+        }
+        return tabManager.tabs.first.map { [$0.id] } ?? []
+    }
+
+    private func normalizedContextProviderIds(_ providerIds: [String]) -> [String] {
+        let allowed: Set<String> = [
+            "list_state",
+            "git_context",
+            "github_context",
+            "summary_priority",
+            "agent_session",
+            "notification_context",
+            "workspace_activity",
+        ]
+        var seen = Set<String>()
+        var output: [String] = []
+        for providerId in providerIds {
+            let normalized = providerId
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+                .replacingOccurrences(of: "-", with: "_")
+            guard allowed.contains(normalized), seen.insert(normalized).inserted else {
+                continue
+            }
+            output.append(normalized)
+        }
+        return output
     }
 
     private func aggregateFreshness(from values: [ContextFreshness]) -> ContextFreshness {

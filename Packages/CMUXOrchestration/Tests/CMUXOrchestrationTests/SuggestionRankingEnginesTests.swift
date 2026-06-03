@@ -70,6 +70,33 @@ final class SuggestionRankingEnginesTests: XCTestCase {
         ])
     }
 
+    func testSuggestionEngineCreatesGenericHighAttentionSuggestion() {
+        let completed = Self.snapshot(
+            id: "00000000-0000-0000-0000-000000000004",
+            status: "agent_completed",
+            nativeOrder: 0,
+            attention: 0.92
+        )
+
+        let suggestions = SuggestionEngine.default.generate(from: [completed])
+
+        XCTAssertEqual(suggestions.map(\.type), [ProactiveSuggestionTypes.workspaceNeedsAttention])
+        XCTAssertEqual(suggestions.first?.workspaceId, completed.workspaceId)
+    }
+
+    func testSuggestionEngineSuppressesGenericLowAttentionSnapshot() {
+        let completed = Self.snapshot(
+            id: "00000000-0000-0000-0000-000000000005",
+            status: "agent_completed",
+            nativeOrder: 0,
+            attention: 0.4
+        )
+
+        let suggestions = SuggestionEngine.default.generate(from: [completed])
+
+        XCTAssertEqual(suggestions, [])
+    }
+
     func testSuggestionStoreHidesDismissedSuggestionUntilSnapshotChanges() async throws {
         let store = SuggestionStore()
         let engine = SuggestionEngine(store: store)

@@ -156,6 +156,36 @@ enum CMUXPluginParams {
         }
         return nil
     }
+
+    static func double(_ value: Any?) -> Double? {
+        guard let value, !(value is NSNull) else { return nil }
+        if let double = value as? Double {
+            return double
+        }
+        if let number = value as? NSNumber {
+            return number.doubleValue
+        }
+        if let string = value as? String {
+            return Double(string.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return nil
+    }
+
+    static func array(_ value: Any?) -> [String] {
+        guard let value, !(value is NSNull) else { return [] }
+        if let strings = value as? [String] {
+            return strings
+        }
+        if let values = value as? [Any] {
+            return values.compactMap { $0 as? String }
+        }
+        if let string = value as? String {
+            return string
+                .split { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" }
+                .map(String.init)
+        }
+        return []
+    }
 }
 
 protocol CMUXLeaderModeOwner: AnyObject {

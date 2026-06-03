@@ -166986,6 +166986,278 @@
         }
       }
     },
+    "sortAssistant.contextAgent.agent.defaultSource": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "agent"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "エージェント"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.agentCompleted.nextAction": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review completed agent work"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "完了したエージェントの作業を確認"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.agentCompleted.reason": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ finished a turn."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ がターンを完了しました。"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.agentNotification.nextAction": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review the agent notification"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "エージェントの通知を確認"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.agentNotification.reason": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ sent a notification."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ が通知を送信しました。"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.exitPlan.nextAction": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review the plan"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プランを確認"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.exitPlan.reason": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ is waiting for plan approval."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ がプランの承認を待っています。"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.notification.nextAction": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review the workspace notification"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースの通知を確認"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.notification.reason": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A new workspace notification arrived."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新しいワークスペース通知が届きました。"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.permission.nextAction": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review the permission request"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "権限リクエストを確認"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.permission.reason": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ needs permission."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ が権限を必要としています。"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.question.nextAction": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Answer the agent question"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "エージェントの質問に回答"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.question.reason": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ asked a question."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ が質問しました。"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.signal.defaultTitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Workspace"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペース"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.workspaceActivity.nextAction": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Review recent workspace activity"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近のワークスペースのアクティビティを確認"
+          }
+        }
+      }
+    },
+    "sortAssistant.contextAgent.workspaceActivity.reason": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recent workspace activity may need follow-up."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最近のワークスペースのアクティビティに対応が必要かもしれません。"
+          }
+        }
+      }
+    },
     "sortAssistant.contextFreshness.missing": {
       "extractionState": "manual",
       "localizations": {
@@ -167598,6 +167870,23 @@
         }
       }
     },
+    "sortAssistant.fakeAssistant.suggestion.workspaceNeedsAttention": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "workspace needs attention"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ワークスペースに対応が必要です"
+          }
+        }
+      }
+    },
     "sortAssistant.fakeAssistant.suggestionDetail": {
       "extractionState": "manual",
       "localizations": {
@@ -168003,6 +168292,23 @@
         }
       }
     },
+    "sortAssistant.mcp.tool.contextAgentCollect": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collecting cmux context"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "cmux コンテキストを収集中"
+          }
+        }
+      }
+    },
     "sortAssistant.mcp.tool.contextCollect": {
       "extractionState": "manual",
       "localizations": {
@@ -168206,6 +168512,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "正在检查 PR 状态"
+          }
+        }
+      }
+    },
+    "sortAssistant.mcp.tool.proactiveSignalReport": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reporting proactive signal"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロアクティブシグナルを報告中"
+          }
+        }
+      }
+    },
+    "sortAssistant.mcp.tool.proactiveSuggestionsRefresh": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refreshing proactive suggestions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロアクティブな提案を更新中"
           }
         }
       }
@@ -169305,6 +169645,23 @@
         }
       }
     },
+    "sortAssistant.plugin.command.contextAgentCollect": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ContextAgent Collect"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ContextAgent 収集"
+          }
+        }
+      }
+    },
     "sortAssistant.plugin.command.contextFreshness": {
       "extractionState": "manual",
       "localizations": {
@@ -169454,6 +169811,40 @@
           "stringUnit": {
             "state": "translated",
             "value": "フリーソートメモリ候補を作成"
+          }
+        }
+      }
+    },
+    "sortAssistant.plugin.command.proactiveSignalReport": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Report Proactive Signal"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロアクティブシグナルを報告"
+          }
+        }
+      }
+    },
+    "sortAssistant.plugin.command.proactiveSuggestionsRefresh": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh Proactive Suggestions"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "プロアクティブな提案を更新"
           }
         }
       }

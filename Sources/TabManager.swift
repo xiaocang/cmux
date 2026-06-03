@@ -285,13 +285,13 @@ enum WorkspaceAutoReorderSettings {
     }
 }
 
-// Gate for the proactive sprite suggestion surfaces (mascot badge, auto bubble,
-// sidebar suggestion badge, suggestion-driven notifications). Default OFF: when
-// disabled the sprite stays reactive and behaves exactly as before. See
-// suggestion-sprint-plan.md (Phase 0 gate; consumed from Phase 1 onward).
+// Gate for the proactive sprite suggestion surfaces (mascot badge, sidebar
+// suggestion badge, and opt-in auto bubble / notifications). Default ON so
+// closed-loop agent hook signals surface without hidden setup; disabling keeps
+// the sprite reactive only.
 enum ProactiveSpriteSuggestionsSettings {
     static let key = "sprite.proactiveSuggestions"
-    static let defaultValue = false
+    static let defaultValue = true
 
     static func isEnabled(defaults: UserDefaults = .standard) -> Bool {
         if defaults.object(forKey: key) == nil {

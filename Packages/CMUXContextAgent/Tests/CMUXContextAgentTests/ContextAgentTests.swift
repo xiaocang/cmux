@@ -245,6 +245,91 @@ final class ContextAgentTests: XCTestCase {
         XCTAssertFalse(records.map(\.providerId).contains("github_context"))
     }
 
+    func testAgentStopEventRoutesToAgentSessionProviderOnly() async throws {
+        let workspaceId = UUID(uuidString: "30000000-0000-0000-0000-000000000005")!
+        let now = Date(timeIntervalSince1970: 2_150)
+        let scheduler = ContextScheduler()
+        let agent = ContextAgent(
+            snapshotStore: RecordingSnapshotStore(),
+            scheduler: scheduler,
+            providers: [
+                FixtureProvider(providerId: "agent_session", version: 6, status: "agent_completed"),
+                FixtureProvider(providerId: "summary_priority", version: 7, status: "ranked"),
+            ]
+        )
+
+        await agent.handle(ContextAgentEvent(
+            name: "agent.hook.Stop",
+            workspaceId: workspaceId,
+            occurredAt: now,
+            payload: ["hook_event_name": "Stop"]
+        ))
+
+        let queuedJobs = await scheduler.pendingJobs()
+        XCTAssertEqual(queuedJobs.map(\.providerId), [
+            Optional.some("agent_session"),
+        ])
+        XCTAssertEqual(queuedJobs.first?.priority, .visible)
+        let lease = await scheduler.lease(for: workspaceId)
+        XCTAssertEqual(lease, .visible)
+    }
+
+    func testProactiveSignalReportedEventRoutesToAgentSessionProviderOnly() async throws {
+        let workspaceId = UUID(uuidString: "30000000-0000-0000-0000-000000000007")!
+        let now = Date(timeIntervalSince1970: 2_170)
+        let scheduler = ContextScheduler()
+        let agent = ContextAgent(
+            snapshotStore: RecordingSnapshotStore(),
+            scheduler: scheduler,
+            providers: [
+                FixtureProvider(providerId: "agent_session", version: 6, status: "needs_attention"),
+                FixtureProvider(providerId: "summary_priority", version: 7, status: "ranked"),
+            ]
+        )
+
+        await agent.handle(ContextAgentEvent(
+            name: ContextAgentEvent.proactiveSignalReportedName,
+            workspaceId: workspaceId,
+            occurredAt: now,
+            payload: ["status": "needs_attention"]
+        ))
+
+        let queuedJobs = await scheduler.pendingJobs()
+        XCTAssertEqual(queuedJobs.map(\.providerId), [
+            Optional.some("agent_session"),
+        ])
+        XCTAssertEqual(queuedJobs.first?.priority, .visible)
+        let lease = await scheduler.lease(for: workspaceId)
+        XCTAssertEqual(lease, .visible)
+    }
+
+    func testManualContextCollectRoutesRequestedProviderAngles() async throws {
+        let workspaceId = UUID(uuidString: "30000000-0000-0000-0000-000000000006")!
+        let scheduler = ContextScheduler()
+        let agent = ContextAgent(
+            snapshotStore: RecordingSnapshotStore(),
+            scheduler: scheduler,
+            providers: [
+                FixtureProvider(providerId: "agent_session", version: 6, status: "agent_completed"),
+                FixtureProvider(providerId: "notification_context", version: 7, status: "notification"),
+                FixtureProvider(providerId: "summary_priority", version: 8, status: "ranked"),
+            ]
+        )
+
+        await agent.handle(ContextAgentEvent(
+            name: "assistant.context_collect.requested",
+            workspaceId: workspaceId,
+            occurredAt: Date(timeIntervalSince1970: 2_160),
+            payload: ["providerIds": "agent_session notification_context"]
+        ))
+
+        let queuedJobs = await scheduler.pendingJobs()
+        XCTAssertEqual(queuedJobs.map(\.providerId), [
+            Optional.some("agent_session"),
+            Optional.some("notification_context"),
+        ])
+    }
+
     func testEventLogDecodesJSONLinesForReplay() throws {
         let data = Data("""
         {"name":"assistant.query_started","workspaceId":"30000000-0000-0000-0000-000000000002","relatedWorkspaceIds":["30000000-0000-0000-0000-000000000003"],"occurredAt":"2026-05-23T10:00:00Z","payload":{"reason":"ask"}}

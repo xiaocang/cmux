@@ -459,7 +459,7 @@ struct SortAssistantMCPClient: Sendable {
             return "normal_chat: Answer naturally and briefly. Use recentConversation when it helps."
         case "context":
             return """
-            context: Read assistant_working_context_get first. Use workspace_snapshot_get or workspace_digest_get for specific workspaces, context_freshness_get to report stale or missing providers, suggestions_active_get to inspect current proactive suggestions, and list_state only when the user asks about visible sidebar order. Use suggestion_accept or suggestion_dismiss only when the latest user request explicitly asks to accept/open or dismiss a specific suggestion. Do not refresh or collect context; cmux ContextAgent maintains workspace context outside the assistant turn. If required data is stale or missing, say which provider is stale or missing and answer with that limitation.
+            context: Read assistant_working_context_get first. Use workspace_snapshot_get or workspace_digest_get for specific workspaces, context_freshness_get to report stale or missing providers, suggestions_active_get to inspect current proactive suggestions, and list_state only when the user asks about visible sidebar order. Use context_agent_collect or proactive_suggestions_refresh only when the user explicitly asks to refresh/collect cmux context or required data is missing/stale enough that cached context cannot answer. Use proactive_signal_report only when the user explicitly asks to report a proactive workspace signal. Use suggestion_accept or suggestion_dismiss only when the latest user request explicitly asks to accept/open or dismiss a specific suggestion. If required data remains stale or missing, say which provider is stale or missing and answer with that limitation.
             """
         case "workspace_color":
             return """
@@ -1140,6 +1140,12 @@ struct SortAssistantMCPClient: Sendable {
                 return String(localized: "sortAssistant.mcp.tool.contextFreshness", defaultValue: "Reading context freshness")
             case "suggestions_active_get":
                 return String(localized: "sortAssistant.mcp.tool.suggestionsActive", defaultValue: "Reading suggestions")
+            case "context_agent_collect":
+                return String(localized: "sortAssistant.mcp.tool.contextAgentCollect", defaultValue: "Collecting cmux context")
+            case "proactive_suggestions_refresh":
+                return String(localized: "sortAssistant.mcp.tool.proactiveSuggestionsRefresh", defaultValue: "Refreshing proactive suggestions")
+            case "proactive_signal_report":
+                return String(localized: "sortAssistant.mcp.tool.proactiveSignalReport", defaultValue: "Reporting proactive signal")
             case "suggestion_accept":
                 return String(localized: "sortAssistant.mcp.tool.suggestionAccept", defaultValue: "Accepting suggestion")
             case "suggestion_dismiss":

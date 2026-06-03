@@ -50,6 +50,7 @@ public enum ProactiveSuggestionTypes {
     public static let reviewAgentWaitingUser = "review_agent_waiting_user"
     public static let fixCIFailure = "fix_ci_failure"
     public static let mergeReady = "merge_ready"
+    public static let workspaceNeedsAttention = "workspace_needs_attention"
 }
 
 public struct SuggestionEngine: Sendable {
@@ -103,14 +104,21 @@ public struct SuggestionEngine: Sendable {
     ) -> SuggestionCandidate? {
         let type: String
         switch snapshot.derived.status.lowercased() {
-        case "waiting_user":
+        case "waiting_user", "permission_requested", "question_requested", "exit_plan_ready":
             type = ProactiveSuggestionTypes.reviewAgentWaitingUser
         case "ci_failed":
             type = ProactiveSuggestionTypes.fixCIFailure
         case "ready_to_merge":
             type = ProactiveSuggestionTypes.mergeReady
         default:
-            return nil
+            // Any other status (agent_completed, notification, workspace_activity,
+            // needs_attention, or an unknown signal) surfaces a generic attention
+            // suggestion only when it is both high-attention and actionable.
+            guard snapshot.derived.userAttentionNeeded >= 0.9,
+                  hasActionableContext(snapshot) else {
+                return nil
+            }
+            type = ProactiveSuggestionTypes.workspaceNeedsAttention
         }
 
         let identity = SuggestionIdentity(
@@ -149,6 +157,12 @@ public struct SuggestionEngine: Sendable {
     private func suggestionReason(for snapshot: WorkspaceSnapshot) -> String? {
         nonEmpty(snapshot.derived.rankReason)
             ?? nonEmpty(snapshot.digest?.summary)
+    }
+
+    private func hasActionableContext(_ snapshot: WorkspaceSnapshot) -> Bool {
+        nonEmpty(snapshot.derived.nextAction) != nil
+            || nonEmpty(snapshot.derived.rankReason) != nil
+            || nonEmpty(snapshot.digest?.summary) != nil
     }
 
     private func nonEmpty(_ value: String?) -> String? {

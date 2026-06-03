@@ -5385,7 +5385,6 @@ final class WindowDragHandleHitTests: XCTestCase {
             fileExplorerStore: FileExplorerStore(),
             fileExplorerState: FileExplorerState(),
             sessionIndexStore: SessionIndexStore(),
-            tabManager: TabManager(),
             workspaceTabStore: WorkspaceTabStore(),
             titlebarHeight: 36,
             workspaceId: nil,

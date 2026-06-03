@@ -348,6 +348,68 @@ final class CMUXSpriteAssistantPlugin: CMUXPlugin {
         disposables.append(
             context.commands.registerSocketCommand(
                 CMUXSocketCommandContribution(
+                    id: "context.agent.collect",
+                    title: String(localized: "sortAssistant.plugin.command.contextAgentCollect", defaultValue: "ContextAgent Collect")
+                ) { input in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketContextAgentCollect(
+                            workspaceId: CMUXPluginParams.string(input.params, "workspaceId", "workspace_id"),
+                            providerIds: CMUXPluginParams.array(input.params["providerIds"] ?? input.params["provider_ids"]),
+                            reason: CMUXPluginParams.string(input.params, "reason")
+                        ) else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "proactive.suggestions.refresh",
+                    title: String(localized: "sortAssistant.plugin.command.proactiveSuggestionsRefresh", defaultValue: "Refresh Proactive Suggestions")
+                ) { _ in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketProactiveSuggestionsRefresh() else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
+                    id: "proactive.signal.report",
+                    title: String(localized: "sortAssistant.plugin.command.proactiveSignalReport", defaultValue: "Report Proactive Signal")
+                ) { input in
+                    try runOnMainSyncThrowing {
+                        guard let payload = SortAssistantCoordinator.shared.socketReportProactiveSignal(
+                            workspaceId: CMUXPluginParams.string(input.params, "workspaceId", "workspace_id"),
+                            status: CMUXPluginParams.string(input.params, "status", "state"),
+                            title: CMUXPluginParams.string(input.params, "title"),
+                            rankReason: CMUXPluginParams.string(input.params, "rankReason", "rank_reason"),
+                            nextAction: CMUXPluginParams.string(input.params, "nextAction", "next_action"),
+                            summary: CMUXPluginParams.string(input.params, "summary"),
+                            priorityScore: CMUXPluginParams.double(input.params["priorityScore"] ?? input.params["priority_score"]),
+                            userAttentionNeeded: CMUXPluginParams.double(input.params["userAttentionNeeded"] ?? input.params["user_attention_needed"] ?? input.params["attention"]),
+                            source: CMUXPluginParams.string(input.params, "source")
+                        ) else {
+                            throw Self.unavailable()
+                        }
+                        return .ok(payload)
+                    }
+                }
+            )
+        )
+
+        disposables.append(
+            context.commands.registerSocketCommand(
+                CMUXSocketCommandContribution(
                     id: "suggestion.accept",
                     title: String(localized: "sortAssistant.plugin.command.suggestionAccept", defaultValue: "Accept Sprite Suggestion")
                 ) { input in

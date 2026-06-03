@@ -90,8 +90,117 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
         )
     }
 
+    func testContextAgentBatchRecomputesGenericAttentionSignalWhenEnabled() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        UserDefaults.standard.set(true, forKey: flagKey)
+
+        let workspaceId = UUID(uuidString: "33333333-3333-3333-3333-333333333333")!
+        await coordinator.workspaceSnapshotStore.write(
+            Self.attentionSnapshot(
+                workspaceId: workspaceId,
+                status: "agent_completed",
+                contextHash: "phase2-agent-completed"
+            )
+        )
+
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [workspaceId], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        XCTAssertTrue(
+            coordinator.visibleSuggestions.contains {
+                $0.type == ProactiveSuggestionTypes.workspaceNeedsAttention
+                    && $0.workspaceId == workspaceId
+            },
+            "A high-attention agent-completed snapshot should surface a generic proactive suggestion."
+        )
+        XCTAssertEqual(
+            coordinator.proactiveBadgeByWorkspaceId()[workspaceId]?.type,
+            ProactiveSuggestionTypes.workspaceNeedsAttention,
+            "Generic attention suggestions should drive the sidebar proactive badge."
+        )
+    }
+
+    func testContextAgentBatchSuppressesLowAttentionGenericSignal() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        UserDefaults.standard.set(true, forKey: flagKey)
+
+        let workspaceId = UUID(uuidString: "44444444-4444-4444-4444-444444444444")!
+        await coordinator.workspaceSnapshotStore.write(
+            Self.attentionSnapshot(
+                workspaceId: workspaceId,
+                status: "agent_completed",
+                attention: 0.4,
+                contextHash: "phase2-agent-low"
+            )
+        )
+
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [workspaceId], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        XCTAssertFalse(
+            coordinator.visibleSuggestions.contains { $0.workspaceId == workspaceId },
+            "A low-attention generic snapshot should not create a proactive suggestion."
+        )
+    }
+
+    func testRealAgentHookEventTriggersProactiveSuggestionWhenDefaultEnabled() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        UserDefaults.standard.removeObject(forKey: flagKey)
+        XCTAssertTrue(
+            ProactiveSpriteSuggestionsSettings.isEnabled(),
+            "Proactive sprite suggestions should be on by default so real hooks can trigger without hidden setup."
+        )
+        let contextAgentStarted = await coordinator.debugAwaitContextAgentStartup()
+        XCTAssertTrue(
+            contextAgentStarted,
+            "The context agent must be subscribed with event-payload providers before publishing the hook event."
+        )
+
+        let workspaceId = UUID(uuidString: "55555555-5555-5555-5555-555555555555")!
+        CmuxEventBus.shared.publish(
+            name: "agent.hook.Stop",
+            category: "agent",
+            source: "proactive-sprite-test",
+            workspaceId: workspaceId.uuidString,
+            payload: [
+                "hook_event_name": "Stop",
+                "_source": "proactive-sprite-test",
+                "title": "Agent finished",
+                "summary": "The agent completed a turn.",
+                "nativeOrder": "0",
+            ]
+        )
+
+        let suggestion = await waitForSuggestion(workspaceId: workspaceId)
+        XCTAssertEqual(suggestion?.type, ProactiveSuggestionTypes.workspaceNeedsAttention)
+        XCTAssertEqual(
+            coordinator.proactiveBadgeByWorkspaceId()[workspaceId]?.type,
+            ProactiveSuggestionTypes.workspaceNeedsAttention
+        )
+    }
+
     private static func waitingUserSnapshot(
         workspaceId: UUID,
+        contextHash: String
+    ) -> WorkspaceSnapshot {
+        attentionSnapshot(
+            workspaceId: workspaceId,
+            status: "waiting_user",
+            attention: 0.95,
+            nextAction: "Review the agent's question",
+            contextHash: contextHash
+        )
+    }
+
+    private static func attentionSnapshot(
+        workspaceId: UUID,
+        status: String,
+        attention: Double = 0.92,
+        nextAction: String = "Review completed agent work",
         contextHash: String
     ) -> WorkspaceSnapshot {
         let freshness = ContextFreshness(
@@ -125,15 +234,27 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
                 stalePullRequestCount: 0
             ),
             derived: DerivedWorkspaceState(
-                status: "waiting_user",
+                status: status,
                 priorityScore: nil,
                 rankReason: nil,
-                nextAction: "Review the agent's question",
-                userAttentionNeeded: 0.95
+                nextAction: nextAction,
+                userAttentionNeeded: attention
             ),
             digest: nil,
             freshness: freshness,
             contextHash: contextHash
         )
+    }
+
+    private func waitForSuggestion(workspaceId: UUID) async -> ProactiveSuggestion? {
+        let coordinator = SortAssistantCoordinator.shared
+        for _ in 0..<50 {
+            if let suggestion = coordinator.visibleSuggestions.first(where: { $0.workspaceId == workspaceId }) {
+                return suggestion
+            }
+            await coordinator.debugAwaitProactiveSuggestionRecompute()
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+        return coordinator.visibleSuggestions.first(where: { $0.workspaceId == workspaceId })
     }
 }

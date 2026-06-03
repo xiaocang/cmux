@@ -38,6 +38,7 @@ let sortAssistantKnownPromptFragments: [String: String] = [
 
 let sortAssistantKnownInternalTools: Set<String> = [
     "assistant_working_context_get",
+    "context_agent_collect",
     "context_freshness_get",
     "context_collect",
     "ghpr_context",
@@ -58,6 +59,8 @@ let sortAssistantKnownInternalTools: Set<String> = [
     "sort_preview",
     "sort_undo",
     "ranking_latest_get",
+    "proactive_signal_report",
+    "proactive_suggestions_refresh",
     "suggestion_accept",
     "suggestion_dismiss",
     "suggestions_active_get",
@@ -78,6 +81,9 @@ let sortAssistantMutatingInternalTools: Set<String> = [
     "list_pin",
     "memory_forget",
     "memory_write_candidate",
+    "context_agent_collect",
+    "proactive_signal_report",
+    "proactive_suggestions_refresh",
     "suggestion_accept",
     "suggestion_dismiss",
     "sort_apply",

@@ -6077,6 +6077,9 @@ struct CMUXCLI {
             "workspace_snapshot_get",
             "context_freshness_get",
             "suggestions_active_get",
+            "context_agent_collect",
+            "proactive_suggestions_refresh",
+            "proactive_signal_report",
             "suggestion_accept",
             "suggestion_dismiss",
             "ranking_latest_get",
@@ -6199,6 +6202,12 @@ struct CMUXCLI {
             return "context.freshness.get"
         case "suggestions_active_get":
             return "suggestions.active.get"
+        case "context_agent_collect":
+            return "context.agent.collect"
+        case "proactive_suggestions_refresh":
+            return "proactive.suggestions.refresh"
+        case "proactive_signal_report":
+            return "proactive.signal.report"
         case "suggestion_accept":
             return "suggestion.accept"
         case "suggestion_dismiss":
@@ -6243,6 +6252,8 @@ struct CMUXCLI {
         case "context_collect",
              "workspace_snapshot_get",
              "context_freshness_get",
+             "context_agent_collect",
+             "proactive_signal_report",
              "ghpr_context",
              "github_pr_context",
              "ghpr_refresh",
@@ -6411,6 +6422,41 @@ struct CMUXCLI {
                 name: "suggestions_active_get",
                 description: "Return active cached proactive suggestions for the sprite assistant.",
                 properties: [:]
+            ),
+            spriteMCPTool(
+                name: "context_agent_collect",
+                description: "Ask cmux ContextAgent to collect one or more context angles for a workspace. providerIds may include list_state, git_context, github_context, summary_priority, agent_session, notification_context, or workspace_activity. Returns immediately with cached suggestions while collection runs through cmux's event loop.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID, '*' for all visible workspaces, or omitted for the active workspace."),
+                    "providerIds": stringArraySchema(description: "Optional ContextAgent provider ids/angles to collect. Omit to collect the default angles."),
+                    "reason": stringSchema(description: "Optional reason recorded on the cmux context-collection event."),
+                ]
+            ),
+            spriteMCPTool(
+                name: "proactive_suggestions_refresh",
+                description: "Recompute proactive suggestions from cmux's current cached/live workspace context and return the visible suggestions plus badge summary.",
+                properties: [:]
+            ),
+            spriteMCPTool(
+                name: "proactive_signal_report",
+                description: "Report an explicit cmux proactive workspace signal. Use when an external agent knows a workspace needs user attention; cmux converts it into ContextAgent state and proactive suggestions.",
+                properties: [
+                    "workspaceId": stringSchema(description: "Optional workspace UUID. Defaults to the active workspace."),
+                    "status": stringSchema(description: "Optional status such as waiting_user, ci_failed, ready_to_merge, agent_completed, notification, or needs_attention."),
+                    "title": stringSchema(description: "Optional workspace/signal title."),
+                    "rankReason": stringSchema(description: "Short reason this workspace needs attention."),
+                    "nextAction": stringSchema(description: "Concrete next action for the user."),
+                    "summary": stringSchema(description: "Optional short summary."),
+                    "priorityScore": [
+                        "type": "number",
+                        "description": "Optional 0-100 priority score.",
+                    ] as [String: Any],
+                    "userAttentionNeeded": [
+                        "type": "number",
+                        "description": "Optional 0-1 attention score.",
+                    ] as [String: Any],
+                    "source": stringSchema(description: "Optional source label for the cmux event."),
+                ]
             ),
             spriteMCPTool(
                 name: "suggestion_accept",

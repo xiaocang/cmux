@@ -2085,7 +2085,8 @@ final class BrowserPanelWebViewLifecycleTests: XCTestCase {
                 isDeveloperToolsVisible: false,
                 isElementFullscreenActive: false,
                 isReactGrabActive: false,
-                hasPopups: false
+                hasPopups: false,
+                isCapturingMedia: false
             )
         }
     }

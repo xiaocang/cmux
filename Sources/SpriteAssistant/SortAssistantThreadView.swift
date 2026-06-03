@@ -286,6 +286,8 @@ struct SortAssistantThreadView: View {
             return "xmark.octagon"
         case ProactiveSuggestionTypes.mergeReady:
             return "checkmark.seal"
+        case ProactiveSuggestionTypes.workspaceNeedsAttention:
+            return "bell.badge"
         default:
             return "sparkles"
         }

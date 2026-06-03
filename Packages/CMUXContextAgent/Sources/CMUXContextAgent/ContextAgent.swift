@@ -167,6 +167,15 @@ public struct ContextAgentDiagnosticsSnapshot: Codable, Equatable, Sendable {
 public struct ContextAgentEvent: Codable, Equatable, Sendable {
     public static let agentMessageAppendedName = "dev.cmux.agent.message_appended.v1"
 
+    /// Event name for an explicitly reported proactive workspace-attention
+    /// signal (e.g. an external agent telling cmux a workspace needs attention
+    /// via the `proactive_signal_report` MCP tool).
+    ///
+    /// Routed to the `agent_session` provider like ``agentMessageAppendedName``,
+    /// but kept distinct so the message-append route is not overloaded to carry
+    /// caller-asserted attention state.
+    public static let proactiveSignalReportedName = "dev.cmux.assistant.proactive_signal_reported.v1"
+
     public var name: String
     public var workspaceId: UUID?
     public var relatedWorkspaceIds: [UUID]
@@ -658,6 +667,7 @@ public actor ContextAgent {
         "surface",
         "agent",
         "assistant",
+        "feed",
     ]
 
     private let snapshotStore: any WorkspaceSnapshotStoring
@@ -809,14 +819,21 @@ public actor ContextAgent {
     }
 
     private nonisolated func refreshPriority(for event: ContextAgentEvent) -> ContextRefreshPriority {
+        if isAgentAttentionEvent(event.name) {
+            return .visible
+        }
         switch event.name {
         case "assistant.query_started":
             return .userInitiated
         case ContextAgentEvent.agentMessageAppendedName,
+             ContextAgentEvent.proactiveSignalReportedName,
              "workspace.selected",
              "workspace.created",
+             "workspace.prompt.submitted",
+             "assistant.context_collect.requested",
              "sidebar.metadata.updated",
-             "notification.requested":
+             "notification.requested",
+             "notification.created":
             return .visible
         default:
             return .background
@@ -824,10 +841,16 @@ public actor ContextAgent {
     }
 
     private nonisolated func attentionLease(for event: ContextAgentEvent) -> ContextAttentionLease? {
+        if isAgentAttentionEvent(event.name) {
+            return .visible
+        }
         switch event.name {
         case "assistant.query_started":
             return .hot
         case ContextAgentEvent.agentMessageAppendedName,
+             ContextAgentEvent.proactiveSignalReportedName,
+             "notification.requested",
+             "notification.created",
              "workspace.selected":
             return .visible
         default:
@@ -854,10 +877,39 @@ public actor ContextAgent {
                 "summary_priority",
             ]
         }
-        if event.name == ContextAgentEvent.agentMessageAppendedName {
+        if event.name == ContextAgentEvent.agentMessageAppendedName
+            || event.name == ContextAgentEvent.proactiveSignalReportedName {
             return [
                 "agent_session",
-                "summary_priority",
+            ]
+        }
+        if event.name == "assistant.context_collect.requested" {
+            let requestedProviders = providerList(from: event.payload["providerIds"] ?? event.payload["provider_ids"])
+            return requestedProviders.isEmpty
+                ? [
+                    "list_state",
+                    "workspace_activity",
+                    "notification_context",
+                    "agent_session",
+                    "git_context",
+                    "github_context",
+                    "summary_priority",
+                ]
+                : requestedProviders
+        }
+        if isAgentAttentionEvent(event.name) {
+            return [
+                "agent_session",
+            ]
+        }
+        if event.name == "notification.requested" || event.name == "notification.created" {
+            return [
+                "notification_context",
+            ]
+        }
+        if event.name == "workspace.prompt.submitted" {
+            return [
+                "workspace_activity",
             ]
         }
         if event.name == "workspace.selected" || event.name == "workspace.created" {
@@ -879,11 +931,6 @@ public actor ContextAgent {
                 "summary_priority",
             ]
         }
-        if event.name == "notification.requested" {
-            return [
-                "summary_priority",
-            ]
-        }
         if event.name.contains("github") || event.name.contains("pull_request") || event.name.contains("pr.") {
             return [
                 "github_context",
@@ -896,6 +943,33 @@ public actor ContextAgent {
             ]
         }
         return []
+    }
+
+    private nonisolated func isAgentAttentionEvent(_ name: String) -> Bool {
+        switch name {
+        case "agent.hook.Stop",
+             "agent.hook.SubagentStop",
+             "agent.hook.Notification",
+             "agent.hook.PermissionRequest",
+             "agent.hook.AskUserQuestion",
+             "agent.hook.ExitPlanMode":
+            return true
+        default:
+            return false
+        }
+    }
+
+    private nonisolated func providerList(from raw: String?) -> [String] {
+        guard let raw else { return [] }
+        return raw
+            .split { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" }
+            .map {
+                String($0)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                    .lowercased()
+                    .replacingOccurrences(of: "-", with: "_")
+            }
+            .filter { !$0.isEmpty }
     }
 
     private nonisolated func isGitContextEvent(_ name: String) -> Bool {
