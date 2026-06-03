@@ -456,10 +456,12 @@ struct SortAssistantMCPClient: Sendable {
     private static func promptFragment(named name: String) -> String? {
         switch name {
         case "normal_chat":
-            return "normal_chat: Answer naturally and briefly. Use recentConversation when it helps."
+            return """
+            normal_chat: Answer naturally and briefly. Use recentConversation when it helps. If the user asks about an external system such as Jira issues/tickets or Confluence pages and a matching external MCP tool is present in your allowed tools (their names start with mcp__, e.g. mcp__mcp-atlassian__* for Jira/Confluence), call that tool to answer instead of guessing; if no such tool is available, say so.
+            """
         case "context":
             return """
-            context: Read assistant_working_context_get first. Use workspace_snapshot_get or workspace_digest_get for specific workspaces, context_freshness_get to report stale or missing providers, suggestions_active_get to inspect current proactive suggestions, and list_state only when the user asks about visible sidebar order. Use context_agent_collect or proactive_suggestions_refresh only when the user explicitly asks to refresh/collect cmux context or required data is missing/stale enough that cached context cannot answer. Use proactive_signal_report only when the user explicitly asks to report a proactive workspace signal. Use suggestion_accept or suggestion_dismiss only when the latest user request explicitly asks to accept/open or dismiss a specific suggestion. If required data remains stale or missing, say which provider is stale or missing and answer with that limitation.
+            context: Read assistant_working_context_get first. Use workspace_snapshot_get or workspace_digest_get for specific workspaces, context_freshness_get to report stale or missing providers, suggestions_active_get to inspect current proactive suggestions, and list_state only when the user asks about visible sidebar order. Use context_agent_collect or proactive_suggestions_refresh only when the user explicitly asks to refresh/collect cmux context or required data is missing/stale enough that cached context cannot answer. Use proactive_signal_report only when the user explicitly asks to report a proactive workspace signal. Use suggestion_accept or suggestion_dismiss only when the latest user request explicitly asks to accept/open or dismiss a specific suggestion. When the request is about an external system such as Jira issues/tickets or Confluence pages and a matching external MCP tool is present in your allowed tools (their names start with mcp__, e.g. mcp__mcp-atlassian__* for Jira/Confluence), call that tool to answer rather than guessing. If required data remains stale or missing, say which provider is stale or missing and answer with that limitation.
             """
         case "workspace_color":
             return """
@@ -841,12 +843,17 @@ struct SortAssistantMCPClient: Sendable {
     private static func shouldLoadExternalMCP(for request: SortAssistantMCPRequest) -> Bool {
         normalizedRouteSteps(for: request).contains { step in
             switch step.intent {
+            // Conversational intents are where the user asks about external
+            // systems (Jira issues, Confluence pages, etc.), so they get the
+            // configured external MCP servers. Sort/color/memory routes stay
+            // sprite-only to avoid paying the external-server spawn latency on
+            // every mutation turn.
+            case .askContext, .normalChat:
+                return true
             case .clearSession,
-                 .askContext,
                  .proposeSort,
                  .applySort,
                  .explainCurrentOrder,
-                 .normalChat,
                  .manualReorderFeedback,
                  .rememberPreference,
                  .forgetPreference,

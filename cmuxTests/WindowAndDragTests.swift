@@ -160,9 +160,12 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         XCTAssertTrue(adjustment.requestsMutatingTools(applyingTo: route.allowedTools))
     }
 
-    func testMCPRuntimePlanDoesNotLoadExternalServersForProductionAssistantRoutes() {
+    func testMCPRuntimePlanKeepsSortAndMemoryRoutesSpriteOnly() {
+        // Sort/color/memory routes never load external MCP servers, even when a
+        // workspace has external servers configured, so mutation turns do not pay
+        // the external-server spawn cost. Conversational routes are covered by
+        // testMCPRuntimePlanLoadsExternalServersForConversationalRoutes.
         let intents: [SortAssistantIntent] = [
-            .askContext,
             .proposeSort,
             .applySort,
             .explainCurrentOrder,
@@ -172,7 +175,6 @@ final class SortAssistantIntentRouterTests: XCTestCase {
             .forgetSpriteMemory,
             .undoSort,
             .workspaceColor,
-            .normalChat,
             .manualReorderFeedback,
         ]
 
@@ -187,6 +189,42 @@ final class SortAssistantIntentRouterTests: XCTestCase {
             XCTAssertEqual(
                 summary.serverNames.contains("cmux_sprite"),
                 !request.route.allowedTools.isEmpty,
+                "\(intent.rawValue)"
+            )
+        }
+    }
+
+    func testMCPRuntimePlanLoadsExternalServersForConversationalRoutes() throws {
+        // ask_context and normal_chat are the routes where the user asks about
+        // external systems (Jira/Confluence), so they must expose the workspace's
+        // configured external MCP servers and their qualified tool allowlist.
+        let tempDir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("cmux-sprite-ext-\(UUID().uuidString)", isDirectory: true)
+        let cmuxDir = tempDir.appendingPathComponent(".cmux", isDirectory: true)
+        try FileManager.default.createDirectory(at: cmuxDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let config: [String: Any] = [
+            "mcpServers": [
+                "mock_external": [
+                    "command": "/bin/sh",
+                    "args": ["-c", "exit 0"],
+                ],
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: config)
+        try data.write(to: cmuxDir.appendingPathComponent("sprite.json"))
+
+        for intent in [SortAssistantIntent.askContext, .normalChat] {
+            let request = makeSpriteMCPRequest(intent: intent, workspaceDirectory: tempDir.path)
+            let summary = SortAssistantMCPClient.runtimePlanSummaryForTesting(request)
+
+            XCTAssertEqual(summary.externalPolicy, "loaded_for_intent", "\(intent.rawValue)")
+            XCTAssertTrue(summary.externalServerNames.contains("mock_external"), "\(intent.rawValue)")
+            XCTAssertTrue(summary.externalAllowedTools.contains("mcp__mock_external__*"), "\(intent.rawValue)")
+            XCTAssertTrue(summary.serverNames.contains("mock_external"), "\(intent.rawValue)")
+            XCTAssertTrue(
+                summary.executionAllowedTools.contains { $0.hasPrefix("mcp__mock_external__") },
                 "\(intent.rawValue)"
             )
         }
@@ -2492,7 +2530,8 @@ final class SortAssistantIntentRouterTests: XCTestCase {
     private func makeSpriteMCPRequest(
         intent: SortAssistantIntent,
         route: SortAssistantActionRoute? = nil,
-        routeSteps: [SortAssistantRouteStep]? = nil
+        routeSteps: [SortAssistantRouteStep]? = nil,
+        workspaceDirectory: String? = nil
     ) -> SortAssistantMCPRequest {
         let actionRouter = SortAssistantActionRouter()
         let resolvedRoute = route ?? actionRouter.route(for: intent)
@@ -2508,7 +2547,7 @@ final class SortAssistantIntentRouterTests: XCTestCase {
             includeConversationContext: false,
             explicitSlashCommand: false,
             workspaceId: "11111111-1111-1111-1111-111111111111",
-            workspaceDirectory: nil,
+            workspaceDirectory: workspaceDirectory,
             socketPath: "/tmp/cmux-test.sock",
             cmuxCLIPath: "/tmp/cmux",
             claudeSessionId: nil,
