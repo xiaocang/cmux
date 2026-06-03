@@ -37,6 +37,9 @@ public struct AppSection: View {
     @State private var openMarkdown: DefaultsValueModel<Bool>
     @State private var iMessage: DefaultsValueModel<Bool>
     @State private var reorder: DefaultsValueModel<Bool>
+    @State private var proactiveSuggestions: DefaultsValueModel<Bool>
+    @State private var proactiveAutoBubble: DefaultsValueModel<Bool>
+    @State private var proactiveNotifications: DefaultsValueModel<Bool>
     @State private var dockBadge: DefaultsValueModel<Bool>
     @State private var menuBarOnly: DefaultsValueModel<Bool>
     @State private var showInMenuBar: DefaultsValueModel<Bool>
@@ -77,6 +80,9 @@ public struct AppSection: View {
         _openMarkdown = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.app.openMarkdownInCmuxViewer))
         _iMessage = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.app.iMessageMode))
         _reorder = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.app.reorderOnNotification))
+        _proactiveSuggestions = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.app.proactiveSpriteSuggestions))
+        _proactiveAutoBubble = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.app.proactiveAutoBubble))
+        _proactiveNotifications = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.app.proactiveSuggestionNotifications))
         _dockBadge = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.notifications.dockBadge))
         _menuBarOnly = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.app.menuBarOnly))
         _showInMenuBar = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.notifications.showInMenuBar))
@@ -332,6 +338,45 @@ public struct AppSection: View {
                 Toggle("", isOn: Binding(get: { reorder.current }, set: { reorder.set($0) }))
                     .labelsHidden()
                     .controlSize(.small)
+            }
+            SettingsCardDivider()
+
+            // Proactive Sprite Suggestions
+            SettingsCardRow(
+                configurationReview: .json("app.proactiveSpriteSuggestions"),
+                String(localized: "settings.app.proactiveSpriteSuggestions", defaultValue: "Proactive Sprite Suggestions"),
+                subtitle: String(localized: "settings.app.proactiveSpriteSuggestions.subtitle", defaultValue: "Let the sprite proactively surface what to look at next based on workspace context.")
+            ) {
+                Toggle("", isOn: Binding(get: { proactiveSuggestions.current }, set: { proactiveSuggestions.set($0) }))
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("SettingsProactiveSpriteSuggestionsToggle")
+            }
+            SettingsCardDivider()
+
+            // Proactive Sprite Auto-Bubble
+            SettingsCardRow(
+                configurationReview: .json("app.proactiveAutoBubble"),
+                String(localized: "settings.app.proactiveAutoBubble", defaultValue: "Proactive Sprite Auto-Bubble"),
+                subtitle: String(localized: "settings.app.proactiveAutoBubble.subtitle", defaultValue: "When proactive suggestions are on, let the sprite pop a compact bubble for high-priority items. Off by default.")
+            ) {
+                Toggle("", isOn: Binding(get: { proactiveAutoBubble.current }, set: { proactiveAutoBubble.set($0) }))
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("SettingsProactiveAutoBubbleToggle")
+            }
+            SettingsCardDivider()
+
+            // Proactive Suggestion Notifications
+            SettingsCardRow(
+                configurationReview: .json("app.proactiveSuggestionNotifications"),
+                String(localized: "settings.app.proactiveSuggestionNotifications", defaultValue: "Proactive Suggestion Notifications"),
+                subtitle: String(localized: "settings.app.proactiveSuggestionNotifications.subtitle", defaultValue: "When proactive suggestions are on, post a desktop notification for new high-priority items while cmux is in the background. Off by default.")
+            ) {
+                Toggle("", isOn: Binding(get: { proactiveNotifications.current }, set: { proactiveNotifications.set($0) }))
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("SettingsProactiveSuggestionNotificationsToggle")
             }
             SettingsCardDivider()
 

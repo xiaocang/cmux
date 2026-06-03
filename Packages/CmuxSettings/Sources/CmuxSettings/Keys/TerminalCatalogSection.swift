@@ -61,5 +61,13 @@ public struct TerminalCatalogSection: SettingCatalogSection {
         defaultValue: []
     )
 
+    /// Whether new terminal panes run their shell directly or wrap it in
+    /// livesh. Defaults to ``TerminalShellBackend/direct``.
+    public let shellBackend = DefaultsKey<TerminalShellBackend>(
+        id: "terminal.shellBackend",
+        defaultValue: .direct,
+        userDefaultsKey: "terminalShellBackend"
+    )
+
     public init() {}
 }

@@ -98,10 +98,43 @@ public protocol SettingsHostActions: AnyObject {
     /// Formats a point size for display next to a font-size slider
     /// (e.g. `12`, `13.5`), trimming trailing zeros.
     func formattedFontSize(_ points: Double) -> String
+
+    /// Fetches the model names available from the sprite semantic router's
+    /// Ollama server. The host resolves `baseURL` (empty falls back to the
+    /// Ollama default) and performs the network request off the main actor.
+    ///
+    /// - Parameters:
+    ///   - baseURL: The stored router base URL, possibly empty.
+    ///   - timeoutSeconds: Request timeout in seconds.
+    /// - Returns: Sorted model names. Empty when the server reports none.
+    /// - Throws: When the server is unreachable or returns an error status.
+    func fetchSpriteOllamaModels(baseURL: String, timeoutSeconds: Double) async throws -> [String]
+
+    /// Runs a connectivity test against the sprite semantic router and returns
+    /// a formatted ``SpriteRouterTestResult``. The host sends a repo-context
+    /// request, verifies the JSON route format, and builds the user-facing
+    /// message (it owns the route-decision types).
+    ///
+    /// - Parameters:
+    ///   - provider: The router provider raw value (`ollama` / `openai_compatible`).
+    ///   - model: The model name to test.
+    ///   - baseURL: The stored router base URL, possibly empty.
+    ///   - timeoutSeconds: Request timeout in seconds.
+    func testSpriteRouter(provider: String, model: String, baseURL: String, timeoutSeconds: Double) async -> SpriteRouterTestResult
 }
 
 public extension SettingsHostActions {
     func browserHistoryEntryCount() -> Int? { nil }
+
+    /// Default: no host model discovery available, so report an empty list.
+    /// The live host overrides this with a real Ollama `/api/tags` fetch.
+    func fetchSpriteOllamaModels(baseURL: String, timeoutSeconds: Double) async throws -> [String] { [] }
+
+    /// Default: no host router available, so report failure. The live host
+    /// overrides this with a real router test.
+    func testSpriteRouter(provider: String, model: String, baseURL: String, timeoutSeconds: Double) async -> SpriteRouterTestResult {
+        SpriteRouterTestResult(passed: false, message: "")
+    }
 
     func sidebarFontSize() -> SettingsFontSize {
         SettingsFontSize(points: 12.5, minimum: 10, maximum: 20, defaultValue: 12.5)

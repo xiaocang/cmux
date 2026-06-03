@@ -108,5 +108,21 @@ public struct BrowserCatalogSection: SettingCatalogSection {
         userDefaultsKey: "browserImportHintDismissed"
     )
 
+    /// Key that activates site-search mode after typing a site shortcut in the
+    /// address bar. Defaults to ``BrowserSiteSearchActivation/tab``.
+    public let siteSearchActivation = DefaultsKey<BrowserSiteSearchActivation>(
+        id: "browser.siteSearchKeyboardShortcut",
+        defaultValue: .tab,
+        userDefaultsKey: "browserSiteSearchActivationShortcut"
+    )
+
+    /// User-defined site-search shortcuts, stored as a JSON-encoded array
+    /// string (see ``BrowserSiteSearchShortcut``). Defaults to an empty array.
+    public let siteSearchShortcuts = DefaultsKey<String>(
+        id: "browser.siteSearchShortcuts",
+        defaultValue: BrowserSiteSearchShortcut.emptyStorage,
+        userDefaultsKey: "browserSiteSearchShortcuts"
+    )
+
     public init() {}
 }

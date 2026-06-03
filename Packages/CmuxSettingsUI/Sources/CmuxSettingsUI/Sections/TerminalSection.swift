@@ -20,6 +20,7 @@ public struct TerminalSection: View {
     @State private var hibernation: DefaultsValueModel<Bool>
     @State private var idleSeconds: DefaultsValueModel<Double>
     @State private var maxLive: DefaultsValueModel<Int>
+    @State private var shellBackend: DefaultsValueModel<TerminalShellBackend>
 
     public init(
         defaultsStore: UserDefaultsSettingsStore,
@@ -37,6 +38,7 @@ public struct TerminalSection: View {
         _hibernation = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.terminal.agentHibernationEnabled))
         _idleSeconds = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.terminal.agentHibernationIdleSeconds))
         _maxLive = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.terminal.agentHibernationMaxLiveTerminals))
+        _shellBackend = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.terminal.shellBackend))
     }
 
     public var body: some View {
@@ -153,6 +155,21 @@ public struct TerminalSection: View {
                     .labelsHidden()
                     .controlSize(.small)
                     .accessibilityIdentifier("SettingsTerminalCopyOnSelectToggle")
+            }
+            SettingsCardDivider()
+            SettingsCardRow(
+                configurationReview: .json("terminal.shellBackend"),
+                String(localized: "settings.terminal.shellBackend", defaultValue: "Shell Backend"),
+                subtitle: String(localized: "settings.terminal.shellBackend.subtitle", defaultValue: "Run new panes directly, or wrap them in livesh so the shell outlives cmux."),
+                controlWidth: 196
+            ) {
+                Picker("", selection: Binding(get: { shellBackend.current }, set: { shellBackend.set($0) })) {
+                    Text(String(localized: "settings.terminal.shellBackend.direct", defaultValue: "Direct")).tag(TerminalShellBackend.direct)
+                    Text(String(localized: "settings.terminal.shellBackend.livesh", defaultValue: "Live Shell (livesh)")).tag(TerminalShellBackend.livesh)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .accessibilityIdentifier("SettingsTerminalShellBackendPicker")
             }
             SettingsCardDivider()
             SettingsCardRow(

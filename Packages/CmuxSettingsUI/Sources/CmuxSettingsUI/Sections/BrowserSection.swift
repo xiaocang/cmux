@@ -31,6 +31,11 @@ public struct BrowserSection: View {
     @State private var httpAllowlist: DefaultsValueModel<String>
     @State private var importHint: DefaultsValueModel<Bool>
     @State private var reactGrab: DefaultsValueModel<String>
+    @State private var siteSearchActivation: DefaultsValueModel<BrowserSiteSearchActivation>
+    @State private var siteSearchShortcuts: DefaultsValueModel<String>
+    @State private var newSiteSearchName: String = ""
+    @State private var newSiteSearchShortcut: String = ""
+    @State private var newSiteSearchURLTemplate: String = ""
 
     @State private var confirmClearHistory: Bool = false
     @State private var httpAllowlistDraft: String = ""
@@ -61,6 +66,8 @@ public struct BrowserSection: View {
         _httpAllowlist = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.browser.insecureHttpHostsAllowedInEmbeddedBrowser))
         _importHint = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.browser.showImportHintOnBlankTabs))
         _reactGrab = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.browser.reactGrabVersion))
+        _siteSearchActivation = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.browser.siteSearchActivation))
+        _siteSearchShortcuts = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.browser.siteSearchShortcuts))
     }
 
     private static let columnWidth: CGFloat = 196
@@ -154,6 +161,28 @@ public struct BrowserSection: View {
                     .labelsHidden()
                     .controlSize(.small)
             }
+            SettingsCardDivider()
+
+            // Site Search Shortcut
+            SettingsCardRow(
+                configurationReview: .json("browser.siteSearchKeyboardShortcut"),
+                String(localized: "settings.browser.siteSearch.keyboard", defaultValue: "Site Search Shortcut"),
+                subtitle: String(localized: "settings.browser.siteSearch.keyboard.subtitle", defaultValue: "After typing a site shortcut in the address bar, use this key to enter site search mode."),
+                controlWidth: 196
+            ) {
+                Picker("", selection: Binding(get: { siteSearchActivation.current }, set: { siteSearchActivation.set($0) })) {
+                    Text(String(localized: "settings.browser.siteSearch.keyboard.tab", defaultValue: "Tab")).tag(BrowserSiteSearchActivation.tab)
+                    Text(String(localized: "settings.browser.siteSearch.keyboard.spaceOrTab", defaultValue: "Space or Tab")).tag(BrowserSiteSearchActivation.spaceOrTab)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .accessibilityIdentifier("SettingsBrowserSiteSearchKeyboardPicker")
+            }
+            SettingsCardDivider()
+
+            siteSearchEditor
+                .padding(.horizontal, 14)
+                .padding(.vertical, 9)
             SettingsCardDivider()
 
             // Browser Theme
@@ -547,5 +576,122 @@ public struct BrowserSection: View {
         }
         let format = String(localized: "settings.browser.hiddenWebViewDiscardDelay.minutesSeconds", defaultValue: "%lldm %llds")
         return String.localizedStringWithFormat(format, Int64(total / 60), Int64(total % 60))
+    }
+
+    // MARK: - Custom site search editor
+
+    private var siteSearchList: [BrowserSiteSearchShortcut] {
+        BrowserSiteSearchShortcut.decode(siteSearchShortcuts.current)
+    }
+
+    private var canAddSiteSearch: Bool {
+        let name = newSiteSearchName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty,
+              BrowserSiteSearchShortcut.isValidShortcut(newSiteSearchShortcut),
+              BrowserSiteSearchShortcut.isValidURLTemplate(newSiteSearchURLTemplate) else {
+            return false
+        }
+        let normalized = newSiteSearchShortcut.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return !siteSearchList.contains {
+            $0.shortcut.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalized
+        }
+    }
+
+    @ViewBuilder
+    private var siteSearchEditor: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(String(localized: "settings.browser.siteSearch", defaultValue: "Site Search"))
+                    .font(.system(size: 13, weight: .semibold))
+                Text(String(localized: "settings.browser.siteSearch.subtitle", defaultValue: "Type a shortcut in the address bar, press the site search key, then enter a query. URL templates must include %s where the query belongs."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            BrowserSiteSearchHeaderRow()
+
+            if siteSearchList.isEmpty {
+                Text(String(localized: "settings.browser.siteSearch.empty", defaultValue: "No site searches configured."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("SettingsBrowserSiteSearchEmpty")
+            } else {
+                VStack(spacing: 6) {
+                    ForEach(siteSearchList) { shortcut in
+                        BrowserSiteSearchShortcutRow(
+                            id: shortcut.id,
+                            name: siteSearchStringBinding(id: shortcut.id, keyPath: \.name),
+                            shortcut: siteSearchStringBinding(id: shortcut.id, keyPath: \.shortcut),
+                            urlTemplate: siteSearchStringBinding(id: shortcut.id, keyPath: \.urlTemplate),
+                            isActive: siteSearchActiveBinding(id: shortcut.id),
+                            onRemove: { removeSiteSearchShortcut(id: shortcut.id) }
+                        )
+                    }
+                }
+            }
+
+            BrowserSiteSearchAddRow(
+                name: $newSiteSearchName,
+                shortcut: $newSiteSearchShortcut,
+                urlTemplate: $newSiteSearchURLTemplate,
+                canAdd: canAddSiteSearch,
+                onAdd: addSiteSearchShortcut
+            )
+        }
+    }
+
+    private func siteSearchStringBinding(
+        id: UUID,
+        keyPath: WritableKeyPath<BrowserSiteSearchShortcut, String>
+    ) -> Binding<String> {
+        Binding(
+            get: { siteSearchList.first(where: { $0.id == id })?[keyPath: keyPath] ?? "" },
+            set: { newValue in
+                updateSiteSearchShortcut(id: id) { $0[keyPath: keyPath] = newValue }
+            }
+        )
+    }
+
+    private func siteSearchActiveBinding(id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { siteSearchList.first(where: { $0.id == id })?.isActive ?? false },
+            set: { newValue in
+                updateSiteSearchShortcut(id: id) { $0.isActive = newValue }
+            }
+        )
+    }
+
+    private func updateSiteSearchShortcut(
+        id: UUID,
+        update: (inout BrowserSiteSearchShortcut) -> Void
+    ) {
+        var shortcuts = siteSearchList
+        guard let idx = shortcuts.firstIndex(where: { $0.id == id }) else { return }
+        update(&shortcuts[idx])
+        siteSearchShortcuts.set(BrowserSiteSearchShortcut.encode(shortcuts))
+    }
+
+    private func addSiteSearchShortcut() {
+        guard canAddSiteSearch else { return }
+        var shortcuts = siteSearchList
+        shortcuts.append(
+            BrowserSiteSearchShortcut(
+                name: newSiteSearchName.trimmingCharacters(in: .whitespacesAndNewlines),
+                shortcut: newSiteSearchShortcut.trimmingCharacters(in: .whitespacesAndNewlines),
+                urlTemplate: newSiteSearchURLTemplate.trimmingCharacters(in: .whitespacesAndNewlines),
+                isActive: true
+            )
+        )
+        siteSearchShortcuts.set(BrowserSiteSearchShortcut.encode(shortcuts))
+        newSiteSearchName = ""
+        newSiteSearchShortcut = ""
+        newSiteSearchURLTemplate = ""
+    }
+
+    private func removeSiteSearchShortcut(id: UUID) {
+        let shortcuts = siteSearchList.filter { $0.id != id }
+        siteSearchShortcuts.set(BrowserSiteSearchShortcut.encode(shortcuts))
     }
 }

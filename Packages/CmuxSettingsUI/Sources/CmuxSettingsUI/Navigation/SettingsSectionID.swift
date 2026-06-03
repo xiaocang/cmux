@@ -17,6 +17,7 @@ public enum SettingsSectionID: String, CaseIterable, Identifiable, Sendable, Has
     case sidebarAppearance
     case betaFeatures
     case automation
+    case digest
     case browser
     case browserImport
     case globalHotkey
@@ -37,6 +38,7 @@ public enum SettingsSectionID: String, CaseIterable, Identifiable, Sendable, Has
         case .sidebarAppearance: return "Sidebar"
         case .betaFeatures: return "Beta Features"
         case .automation: return "Automation"
+        case .digest: return String(localized: "settings.section.digest", defaultValue: "Digest")
         case .browser: return "Browser"
         case .browserImport: return "Import Browser Data"
         case .globalHotkey: return "Global Hotkey"
@@ -57,6 +59,7 @@ public enum SettingsSectionID: String, CaseIterable, Identifiable, Sendable, Has
         case .sidebarAppearance: return "sidebar.left"
         case .betaFeatures: return "exclamationmark.triangle"
         case .automation: return "wand.and.sparkles"
+        case .digest: return "doc.text.magnifyingglass"
         case .browser: return "globe"
         case .browserImport: return "square.and.arrow.down"
         case .globalHotkey: return "keyboard.badge.ellipsis"
@@ -79,6 +82,7 @@ public enum SettingsSectionID: String, CaseIterable, Identifiable, Sendable, Has
         case .sidebarAppearance: return "sidebar details branches material terminal background"
         case .betaFeatures: return "beta experimental unstable dock right sidebar"
         case .automation: return "socket integrations hooks ports claude cursor gemini"
+        case .digest: return "digest summary workspace ghpr pull request pr jira provider model claude codex summary priority radar"
         case .browser: return "search engine links history theme"
         case .browserImport: return "browser import bookmarks history cookies"
         case .globalHotkey: return "system wide shortcut"

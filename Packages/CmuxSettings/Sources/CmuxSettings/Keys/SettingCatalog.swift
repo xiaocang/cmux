@@ -29,6 +29,7 @@ public struct SettingCatalog: SettingCatalogSection {
     public let sidebarAppearance = SidebarAppearanceCatalogSection()
     public let workspaceColors = WorkspaceColorsCatalogSection()
     public let automation = AutomationCatalogSection()
+    public let digest = DigestCatalogSection()
     public let browser = BrowserCatalogSection()
     public let betaFeatures = BetaFeaturesCatalogSection()
     public let shortcuts = KeyboardShortcutsCatalogSection()

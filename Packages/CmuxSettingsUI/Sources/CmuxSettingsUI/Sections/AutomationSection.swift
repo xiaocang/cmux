@@ -10,6 +10,7 @@ import SwiftUI
 @MainActor
 public struct AutomationSection: View {
     private let catalog: SettingCatalog
+    private let hostActions: SettingsHostActions
 
     @State private var socketPasswordModel: SecretValueModel
     @State private var modeModel: DefaultsValueModel<SocketControlMode>
@@ -23,6 +24,20 @@ public struct AutomationSection: View {
     @State private var kiroLevelModel: DefaultsValueModel<String>
     @State private var portBaseModel: DefaultsValueModel<Int>
     @State private var portRangeModel: DefaultsValueModel<Int>
+    @State private var routerEnabledModel: DefaultsValueModel<Bool>
+    @State private var routerProviderModel: DefaultsValueModel<SpriteSemanticRouterProvider>
+    @State private var routerModelNameModel: DefaultsValueModel<String>
+    @State private var routerBaseURLModel: DefaultsValueModel<String>
+    @State private var routerTimeoutModel: DefaultsValueModel<Double>
+    @State private var prDebounceEnabledModel: DefaultsValueModel<Bool>
+    @State private var prDebounceSecondsModel: DefaultsValueModel<Int>
+    @State private var routerOllamaModels: [String] = []
+    @State private var routerOllamaLoading = false
+    @State private var routerOllamaStatus: String?
+    @State private var routerOllamaStatusIsError = false
+    @State private var routerTesting = false
+    @State private var routerTestStatus: String?
+    @State private var routerTestStatusIsError = false
     @State private var socketPasswordDraft: String = ""
     @State private var socketPasswordStatus: SocketPasswordStatus?
     @State private var showOpenAccessConfirmation: Bool = false
@@ -39,9 +54,11 @@ public struct AutomationSection: View {
         jsonStore: JSONConfigStore,
         secretStore: SecretFileStore,
         catalog: SettingCatalog,
-        errorLog: SettingsErrorLog
+        errorLog: SettingsErrorLog,
+        hostActions: SettingsHostActions
     ) {
         self.catalog = catalog
+        self.hostActions = hostActions
         _socketPasswordModel = State(initialValue: SecretValueModel(
             store: secretStore,
             key: catalog.automation.socketPassword,
@@ -58,6 +75,13 @@ public struct AutomationSection: View {
         _kiroLevelModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.kiroNotificationLevel))
         _portBaseModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.portBase))
         _portRangeModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.portRange))
+        _routerEnabledModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.spriteSemanticRouterEnabled))
+        _routerProviderModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.spriteSemanticRouterProvider))
+        _routerModelNameModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.spriteSemanticRouterModel))
+        _routerBaseURLModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.spriteSemanticRouterBaseURL))
+        _routerTimeoutModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.spriteSemanticRouterTimeoutSeconds))
+        _prDebounceEnabledModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.sidebarPullRequestShellDebounceEnabled))
+        _prDebounceSecondsModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.automation.sidebarPullRequestShellDebounceSeconds))
     }
 
     private static let columnWidth: CGFloat = 196
@@ -67,14 +91,18 @@ public struct AutomationSection: View {
             SettingsSectionHeader(String(localized: "settings.section.automation", defaultValue: "Automation"), section: .automation)
 
             socketControlCard
-            claudeCodeCard
-            claudePathCard
-            ripgrepPathCard
-            suppressSubagentCard
-            cursorCard
-            geminiCard
-            kiroCard
+            Group {
+                claudeCodeCard
+                claudePathCard
+                ripgrepPathCard
+                suppressSubagentCard
+                cursorCard
+                geminiCard
+                kiroCard
+            }
             portCard
+            spriteLocalLLMCard
+            prShellDebounceCard
         }
         .confirmationDialog(
             String(localized: "settings.automation.openAccess.dialog.title", defaultValue: "Enable full open access?"),
@@ -380,6 +408,237 @@ public struct AutomationSection: View {
             }
             SettingsCardDivider()
             SettingsCardNote(String(localized: "settings.automation.port.note", defaultValue: "Each workspace gets CMUX_PORT and CMUX_PORT_END env vars with a dedicated port range. New terminals inherit these values."))
+        }
+    }
+
+    private var routerBaseURLPlaceholder: String {
+        routerProviderModel.current == .ollama ? "http://localhost:11434" : "https://api.openai.com/v1"
+    }
+
+    private func refreshOllamaModels() {
+        guard routerProviderModel.current == .ollama else { return }
+        routerOllamaLoading = true
+        routerOllamaStatus = nil
+        routerOllamaStatusIsError = false
+        let baseURL = routerBaseURLModel.current
+        let timeout = routerTimeoutModel.current
+        Task {
+            do {
+                let models = try await hostActions.fetchSpriteOllamaModels(baseURL: baseURL, timeoutSeconds: timeout)
+                routerOllamaModels = models
+                routerOllamaLoading = false
+                routerOllamaStatusIsError = false
+                routerOllamaStatus = models.isEmpty
+                    ? String(localized: "settings.sprite.localLLM.models.empty", defaultValue: "No Ollama models found.")
+                    : String(
+                        format: String(localized: "settings.sprite.localLLM.models.loaded", defaultValue: "Loaded %d model(s)."),
+                        models.count
+                    )
+                if routerModelNameModel.current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                   let first = models.first {
+                    routerModelNameModel.set(first)
+                }
+            } catch {
+                routerOllamaModels = []
+                routerOllamaLoading = false
+                routerOllamaStatusIsError = true
+                routerOllamaStatus = String(localized: "settings.sprite.localLLM.models.failed", defaultValue: "Could not load Ollama models.")
+            }
+        }
+    }
+
+    private func testRouter() {
+        let model = routerModelNameModel.current.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            routerTestStatus = String(localized: "settings.sprite.localLLM.test.missingModel", defaultValue: "Set a model before testing.")
+            routerTestStatusIsError = true
+            return
+        }
+        routerTesting = true
+        routerTestStatusIsError = false
+        routerTestStatus = String(localized: "settings.sprite.localLLM.test.running", defaultValue: "Sending test request...")
+        let provider = routerProviderModel.current.rawValue
+        let baseURL = routerBaseURLModel.current
+        let timeout = routerTimeoutModel.current
+        Task {
+            let result = await hostActions.testSpriteRouter(provider: provider, model: model, baseURL: baseURL, timeoutSeconds: timeout)
+            routerTesting = false
+            routerTestStatusIsError = !result.passed
+            routerTestStatus = result.message
+        }
+    }
+
+    @ViewBuilder
+    private var spriteLocalLLMCard: some View {
+        let enabled = routerEnabledModel.current
+        SettingsCard {
+            SettingsCardRow(
+                configurationReview: .settingsOnly,
+                searchAnchorID: "setting:automation:sprite-local-llm",
+                String(localized: "settings.sprite.localLLM.title", defaultValue: "Sprite Local LLM Router"),
+                subtitle: String(localized: "settings.sprite.localLLM.subtitle", defaultValue: "Route simple sprite requests through a local LLM before falling back to Claude Code.")
+            ) {
+                Toggle("", isOn: Binding(get: { routerEnabledModel.current }, set: { routerEnabledModel.set($0) }))
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("SettingsSpriteLocalLLMEnabledToggle")
+            }
+            SettingsCardDivider()
+            SettingsCardRow(
+                configurationReview: .settingsOnly,
+                String(localized: "settings.sprite.localLLM.provider", defaultValue: "Provider"),
+                subtitle: String(localized: "settings.sprite.localLLM.provider.subtitle", defaultValue: "Defaults to Ollama for local semantic routing."),
+                controlWidth: Self.columnWidth
+            ) {
+                Picker("", selection: Binding(get: { routerProviderModel.current }, set: { routerProviderModel.set($0) })) {
+                    Text(String(localized: "settings.sprite.localLLM.provider.ollama", defaultValue: "Ollama")).tag(SpriteSemanticRouterProvider.ollama)
+                    Text(String(localized: "settings.sprite.localLLM.provider.openAICompatible", defaultValue: "OpenAI-compatible")).tag(SpriteSemanticRouterProvider.openAICompatible)
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .disabled(!enabled)
+            }
+            SettingsCardDivider()
+            SettingsCardRow(
+                configurationReview: .settingsOnly,
+                String(localized: "settings.sprite.localLLM.baseURL", defaultValue: "Base URL"),
+                subtitle: String(localized: "settings.sprite.localLLM.baseURL.subtitle", defaultValue: "Ollama default is http://localhost:11434."),
+                controlWidth: 280
+            ) {
+                TextField(routerBaseURLPlaceholder, text: Binding(get: { routerBaseURLModel.current }, set: { routerBaseURLModel.set($0) }))
+                    .textFieldStyle(.roundedBorder)
+                    .font(.system(size: 12, design: .monospaced))
+                    .disabled(!enabled)
+            }
+            SettingsCardDivider()
+            SettingsCardRow(
+                configurationReview: .settingsOnly,
+                String(localized: "settings.sprite.localLLM.model", defaultValue: "Model"),
+                subtitle: String(localized: "settings.sprite.localLLM.model.subtitle", defaultValue: "Model name used only for simple semantic routing."),
+                controlWidth: 330
+            ) {
+                VStack(alignment: .trailing, spacing: 6) {
+                    HStack(spacing: 6) {
+                        TextField(
+                            String(localized: "settings.sprite.localLLM.model.placeholder", defaultValue: "e.g. qwen2.5-coder:7b"),
+                            text: Binding(get: { routerModelNameModel.current }, set: { routerModelNameModel.set($0) })
+                        )
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(size: 12, design: .monospaced))
+
+                        if routerProviderModel.current == .ollama {
+                            Button(
+                                routerOllamaLoading
+                                    ? String(localized: "settings.sprite.localLLM.models.loading", defaultValue: "Loading")
+                                    : String(localized: "settings.sprite.localLLM.models.refresh", defaultValue: "Refresh")
+                            ) {
+                                refreshOllamaModels()
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(!enabled || routerOllamaLoading)
+                            .accessibilityIdentifier("SettingsSpriteLocalLLMRefreshModelsButton")
+                        }
+                    }
+
+                    if routerProviderModel.current == .ollama, !routerOllamaModels.isEmpty {
+                        Picker("", selection: Binding(get: { routerModelNameModel.current }, set: { routerModelNameModel.set($0) })) {
+                            ForEach(routerOllamaModels, id: \.self) { model in
+                                Text(model).tag(model)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                        .accessibilityIdentifier("SettingsSpriteLocalLLMModelPicker")
+                    }
+
+                    if let status = routerOllamaStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(routerOllamaStatusIsError ? Color.red : Color.secondary)
+                            .lineLimit(2)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
+                .disabled(!enabled)
+            }
+            SettingsCardDivider()
+            SettingsCardRow(
+                configurationReview: .settingsOnly,
+                String(localized: "settings.sprite.localLLM.timeout", defaultValue: "Timeout"),
+                subtitle: String(localized: "settings.sprite.localLLM.timeout.subtitle", defaultValue: "Seconds to wait before falling back to Claude Code routing."),
+                controlWidth: Self.columnWidth
+            ) {
+                TextField("", value: Binding(get: { routerTimeoutModel.current }, set: { routerTimeoutModel.set($0) }), format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .disabled(!enabled)
+            }
+            SettingsCardDivider()
+            SettingsCardRow(
+                configurationReview: .settingsOnly,
+                String(localized: "settings.sprite.localLLM.test", defaultValue: "Test Router"),
+                subtitle: String(localized: "settings.sprite.localLLM.test.subtitle", defaultValue: "Sends a repo-context request and verifies the JSON route format."),
+                controlWidth: 330
+            ) {
+                VStack(alignment: .trailing, spacing: 6) {
+                    Button(
+                        routerTesting
+                            ? String(localized: "settings.sprite.localLLM.test.testing", defaultValue: "Testing")
+                            : String(localized: "settings.sprite.localLLM.test.button", defaultValue: "Test")
+                    ) {
+                        testRouter()
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(
+                        !enabled
+                            || routerTesting
+                            || routerModelNameModel.current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+                    .accessibilityIdentifier("SettingsSpriteLocalLLMTestButton")
+
+                    if let status = routerTestStatus {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(routerTestStatusIsError ? Color.red : Color.secondary)
+                            .lineLimit(3)
+                            .multilineTextAlignment(.trailing)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var prShellDebounceCard: some View {
+        let enabled = prDebounceEnabledModel.current
+        SettingsCard {
+            SettingsCardRow(
+                configurationReview: .json("automation.sidebarPullRequestShellDebounceEnabled"),
+                String(localized: "settings.automation.prShellDebounce", defaultValue: "Debounce Sidebar PR Shell Refreshes"),
+                subtitle: String(localized: "settings.automation.prShellDebounce.subtitle", defaultValue: "Coalesce rapid pull-request shell refreshes in the sidebar into a single debounced run.")
+            ) {
+                Toggle("", isOn: Binding(get: { prDebounceEnabledModel.current }, set: { prDebounceEnabledModel.set($0) }))
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("SettingsPRShellDebounceToggle")
+            }
+            SettingsCardDivider()
+            SettingsCardRow(
+                configurationReview: .json("automation.sidebarPullRequestShellDebounceSeconds"),
+                String(localized: "settings.automation.prShellDebounce.seconds", defaultValue: "Debounce Window"),
+                subtitle: String(localized: "settings.automation.prShellDebounce.seconds.subtitle", defaultValue: "Seconds to wait before running a coalesced refresh."),
+                controlWidth: Self.columnWidth
+            ) {
+                TextField("", value: Binding(get: { prDebounceSecondsModel.current }, set: { prDebounceSecondsModel.set($0) }), format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .disabled(!enabled)
+            }
         }
     }
 

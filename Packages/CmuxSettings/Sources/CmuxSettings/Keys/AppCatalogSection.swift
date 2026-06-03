@@ -91,6 +91,33 @@ public struct AppCatalogSection: SettingCatalogSection {
         userDefaultsKey: "workspaceAutoReorderOnNotification"
     )
 
+    /// Master switch for the sprite proactively surfacing what to look at
+    /// next based on workspace context. Stored under the legacy
+    /// `sprite.proactiveSuggestions` key; default on.
+    public let proactiveSpriteSuggestions = DefaultsKey<Bool>(
+        id: "app.proactiveSpriteSuggestions",
+        defaultValue: true,
+        userDefaultsKey: "sprite.proactiveSuggestions"
+    )
+
+    /// When ``proactiveSpriteSuggestions`` is on, lets the sprite pop a
+    /// compact bubble for high-priority items. Default off — the badge is the
+    /// non-intrusive default surface.
+    public let proactiveAutoBubble = DefaultsKey<Bool>(
+        id: "app.proactiveAutoBubble",
+        defaultValue: false,
+        userDefaultsKey: "sprite.proactiveAutoBubble"
+    )
+
+    /// When ``proactiveSpriteSuggestions`` is on, posts a desktop
+    /// notification for new high-priority items while cmux is backgrounded.
+    /// Default off.
+    public let proactiveSuggestionNotifications = DefaultsKey<Bool>(
+        id: "app.proactiveSuggestionNotifications",
+        defaultValue: false,
+        userDefaultsKey: "sprite.proactiveSuggestions.notifications"
+    )
+
     public let sendAnonymousTelemetry = DefaultsKey<Bool>(
         id: "app.sendAnonymousTelemetry",
         defaultValue: true,

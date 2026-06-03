@@ -194,6 +194,56 @@ final class HostSettingsActions: SettingsHostActions {
         CmuxGhosttyConfigSettingEditor.formattedFontSize(points)
     }
 
+    func fetchSpriteOllamaModels(baseURL: String, timeoutSeconds: Double) async throws -> [String] {
+        let resolved = SpriteAssistantSemanticRouterSettings.resolvedBaseURL(
+            provider: SpriteAssistantSemanticRouterProviderOption.ollama.rawValue,
+            storedBaseURL: baseURL
+        )
+        return try await SpriteAssistantSemanticRouterSettings.fetchOllamaModelNames(
+            baseURL: resolved,
+            timeoutSeconds: timeoutSeconds
+        )
+    }
+
+    func testSpriteRouter(provider: String, model: String, baseURL: String, timeoutSeconds: Double) async -> SpriteRouterTestResult {
+        let resolved = SpriteAssistantSemanticRouterSettings.resolvedBaseURL(
+            provider: provider,
+            storedBaseURL: baseURL
+        )
+        do {
+            let result = try await SortAssistantIntentRouter.testLocalSemanticRouter(
+                provider: provider,
+                model: model,
+                baseURL: resolved,
+                timeoutSeconds: timeoutSeconds
+            )
+            if result.passed {
+                return SpriteRouterTestResult(
+                    passed: true,
+                    message: String(
+                        format: String(localized: "settings.sprite.localLLM.test.passed", defaultValue: "Test passed: %@, confidence %.2f."),
+                        result.decision.intent.rawValue,
+                        result.decision.confidence
+                    )
+                )
+            }
+            return SpriteRouterTestResult(
+                passed: false,
+                message: String(
+                    format: String(localized: "settings.sprite.localLLM.test.wrongIntent", defaultValue: "Format parsed, but returned %@ with confidence %.2f; expected %@."),
+                    result.decision.intent.rawValue,
+                    result.decision.confidence,
+                    result.expectedIntent.rawValue
+                )
+            )
+        } catch {
+            return SpriteRouterTestResult(
+                passed: false,
+                message: String(localized: "settings.sprite.localLLM.test.failed", defaultValue: "Test failed: endpoint failed or response did not match the required JSON format.")
+            )
+        }
+    }
+
     /// Writes a clamped font-size value to cmux's editable Ghostty config and
     /// triggers a live reload so open windows re-render at the new size.
     ///
