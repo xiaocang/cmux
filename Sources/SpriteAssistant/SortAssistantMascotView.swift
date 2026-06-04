@@ -76,6 +76,12 @@ struct SortAssistantMascotButton: View {
 
     @State private var bobbing = false
 
+    private static let attentionBadgeMinSize: CGFloat = 15
+    private static let attentionBadgeHorizontalPadding: CGFloat = 4
+    private static let attentionBadgeOffset = CGSize(width: 5, height: -3)
+    private static let attentionBadgeTopBleed: CGFloat = 3
+    private static let attentionBadgeTrailingBleed: CGFloat = 5
+
     init(
         presentation: Presentation,
         isActive: Bool = false,
@@ -90,6 +96,7 @@ struct SortAssistantMascotButton: View {
     }
 
     var body: some View {
+        let hasAttentionBadge = attentionBadgeCount > 0
         Button(action: action) {
             SortAssistantMascotView(
                 size: presentation.size,
@@ -101,6 +108,8 @@ struct SortAssistantMascotButton: View {
             .overlay(alignment: .topTrailing) {
                 attentionBadge
             }
+            .padding(.top, hasAttentionBadge ? Self.attentionBadgeTopBleed : 0)
+            .padding(.trailing, hasAttentionBadge ? Self.attentionBadgeTrailingBleed : 0)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(String(localized: "sortAssistant.mascot.open", defaultValue: "Open sort assistant"))
@@ -116,11 +125,11 @@ struct SortAssistantMascotButton: View {
             Text(attentionBadgeCount > 9 ? "9+" : "\(attentionBadgeCount)")
                 .font(.system(size: 9, weight: .bold))
                 .foregroundStyle(.white)
-                .padding(.horizontal, 4)
-                .frame(minWidth: 15, minHeight: 15)
+                .padding(.horizontal, Self.attentionBadgeHorizontalPadding)
+                .frame(minWidth: Self.attentionBadgeMinSize, minHeight: Self.attentionBadgeMinSize)
                 .background(Capsule().fill(Color.red))
                 .overlay(Capsule().stroke(Color.white.opacity(0.9), lineWidth: 1))
-                .offset(x: 5, y: -3)
+                .offset(x: Self.attentionBadgeOffset.width, y: Self.attentionBadgeOffset.height)
                 // The button below owns taps; the badge is a passive indicator.
                 .allowsHitTesting(false)
                 .accessibilityIdentifier(SortAssistantAccessibility.mascotAttentionBadge)

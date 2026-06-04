@@ -264,7 +264,7 @@ struct SortAssistantThreadView: View {
             ForEach(Array(suggestions.prefix(3))) { suggestion in
                 SortAssistantSuggestionCardView(
                     suggestion: suggestion,
-                    workspaceTitle: workspaceTitle(for: suggestion.workspaceId),
+                    workspaceMetadata: workspaceMetadata(for: suggestion.workspaceId).displayText,
                     icon: suggestionIcon(for: suggestion.type),
                     onOpen: {
                         coordinator.acceptVisibleSuggestion(suggestion)
@@ -361,9 +361,14 @@ struct SortAssistantThreadView: View {
         .accessibilityIdentifier(SortAssistantAccessibility.semanticActionConfirmation)
     }
 
-    private func workspaceTitle(for workspaceId: UUID) -> String {
-        tabManager.tabs.first(where: { $0.id == workspaceId })?.title
-            ?? workspaceId.uuidString
+    private func workspaceMetadata(for workspaceId: UUID) -> SortAssistantSuggestionWorkspaceMetadata {
+        guard let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) else {
+            return SortAssistantSuggestionWorkspaceMetadata(title: "", paneCount: 0)
+        }
+        return SortAssistantSuggestionWorkspaceMetadata(
+            title: workspace.displayTitle,
+            paneCount: workspace.bonsplitController.allPaneIds.count
+        )
     }
 
     private func scrollToLatestMessage(_ proxy: ScrollViewProxy) {
@@ -1362,7 +1367,7 @@ struct SortAssistantThreadView: View {
 
 private struct SortAssistantSuggestionCardView: View {
     let suggestion: ProactiveSuggestion
-    let workspaceTitle: String
+    let workspaceMetadata: String
     let icon: String
     let onOpen: () -> Void
     let onDismiss: () -> Void
@@ -1382,7 +1387,7 @@ private struct SortAssistantSuggestionCardView: View {
                         .lineLimit(2)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier(SortAssistantAccessibility.suggestionCard(suggestion))
-                    Text(workspaceTitle)
+                    Text(workspaceMetadata)
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

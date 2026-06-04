@@ -81,6 +81,7 @@ final class SortAssistantCoordinator: ObservableObject {
     private let rankingEngine = RankingEngine()
     private let suggestionEngine = SuggestionEngine()
     private var dismissedSuggestionIds: Set<UUID> = []
+    private var dismissedSuggestionSurfaceKeys: Set<String> = []
     // Phase 1 closed-loop recompute (gated by ProactiveSpriteSuggestionsSettings):
     // coalesces bursts of ContextAgent batches into a single trailing recompute.
     private var proactiveSuggestionRecomputePending = false
@@ -108,13 +109,13 @@ final class SortAssistantCoordinator: ObservableObject {
         ProactiveSuggestionTypes.workspaceNeedsAttention,
     ]
     // Phase 2 Tier 2 auto-bubble state (default-off sub-flag ProactiveAutoBubbleSettings).
-    private var autoBubbleSeenSuggestionIds: Set<UUID> = []
+    private var autoBubbleSeenSuggestionSurfaceKeys: Set<String> = []
     private var lastAutoBubbleSurfacedAt: Date?
     private var autoBubbleDismissTask: Task<Void, Never>?
     private static let autoBubbleMinInterval: TimeInterval = 90
     private static let autoBubbleAutoDismissNanos: UInt64 = 12_000_000_000
-    // Phase 4: dedup-by-id for suggestion-driven OS notifications (default-off sub-flag).
-    private var notifiedProactiveSuggestionIds: Set<UUID> = []
+    // Phase 4: dedup suggestion-driven OS notifications (default-off sub-flag).
+    private var notifiedProactiveSuggestionSurfaceKeys: Set<String> = []
     private let mcpClient = SortAssistantMCPClient()
     private var pendingExternalGoal: (goal: String, forceApply: Bool)?
     private var pendingPreviewPatch: SortPatch?
@@ -366,20 +367,23 @@ final class SortAssistantCoordinator: ObservableObject {
     }
 
     /// Phase 4: fire a deduped, rate-limited OS notification for a NEW high-confidence
-    /// suggestion while the app is backgrounded. Gated by both the parent flag and the
+    /// workspace signal while the app is backgrounded. Gated by both the parent flag and the
     /// default-off ProactiveSuggestionNotificationsSettings sub-flag. Focus-safe:
     /// addNotification only posts a banner and never activates the app.
     private func maybeNotifyProactiveSuggestions(from suggestions: [ProactiveSuggestion]) {
         guard ProactiveSpriteSuggestionsSettings.isEnabled(),
               ProactiveSuggestionNotificationsSettings.isEnabled() else { return }
         guard !AppFocusState.isAppActive() else { return }
-        // Bound the dedup set and let a genuinely re-appearing suggestion notify again.
-        notifiedProactiveSuggestionIds.formIntersection(Set(suggestions.map(\.id)))
+        // Bound the dedup set and let a genuinely re-appearing workspace signal notify again.
+        notifiedProactiveSuggestionSurfaceKeys.formIntersection(Set(suggestions.map {
+            Self.proactiveSurfaceKey(for: $0)
+        }))
         for suggestion in suggestions
         where Self.proactiveBadgeSuggestionTypes.contains(suggestion.type)
             && suggestion.confidence >= Self.proactiveAutoSurfaceConfidenceFloor
-            && !notifiedProactiveSuggestionIds.contains(suggestion.id) {
-            notifiedProactiveSuggestionIds.insert(suggestion.id)
+            && !notifiedProactiveSuggestionSurfaceKeys.contains(Self.proactiveSurfaceKey(for: suggestion)) {
+            let surfaceKey = Self.proactiveSurfaceKey(for: suggestion)
+            notifiedProactiveSuggestionSurfaceKeys.insert(surfaceKey)
             let workspaceTitle = lastTabManager?.tabs
                 .first(where: { $0.id == suggestion.workspaceId })?.displayTitle ?? ""
             TerminalNotificationStore.shared.addNotification(
@@ -389,10 +393,14 @@ final class SortAssistantCoordinator: ObservableObject {
                 subtitle: workspaceTitle.isEmpty ? "" : suggestion.title,
                 body: suggestion.reason ?? "",
                 source: .monitor,
-                cooldownKey: "sprite.proactive.\(suggestion.id.uuidString)",
+                cooldownKey: "sprite.proactive.\(surfaceKey)",
                 cooldownInterval: 300
             )
         }
+    }
+
+    private static func proactiveSurfaceKey(for suggestion: ProactiveSuggestion) -> String {
+        "\(suggestion.workspaceId.uuidString):\(suggestion.type)"
     }
 
     var hasCurrentSessionState: Bool {
@@ -529,6 +537,41 @@ final class SortAssistantCoordinator: ObservableObject {
     func debugAwaitProactiveSuggestionRecompute() async {
         await proactiveSuggestionRecomputeTask?.value
     }
+
+    #if DEBUG
+    func debugResetProactiveSurfaceStateForTesting() {
+        proactiveSuggestionRecomputeTask?.cancel()
+        proactiveSuggestionRecomputeTask = nil
+        proactiveSuggestionRecomputePending = false
+        autoBubbleSeenSuggestionSurfaceKeys.removeAll()
+        notifiedProactiveSuggestionSurfaceKeys.removeAll()
+        lastAutoBubbleSurfacedAt = nil
+        autoBubbleDismissTask?.cancel()
+        autoBubbleDismissTask = nil
+        isCompactAutoBubble = false
+        compactAutoBubbleSuggestion = nil
+        if isConversationBubblePresented {
+            setConversationBubblePresented(false, reason: "testReset")
+        }
+        visibleSuggestions = []
+        cachedActiveSuggestions = []
+        dismissedSuggestionIds.removeAll()
+        dismissedSuggestionSurfaceKeys.removeAll()
+    }
+
+    func debugSeedVisibleSuggestionsForTesting(_ suggestions: [ProactiveSuggestion]) {
+        visibleSuggestions = suggestions
+        cachedActiveSuggestions = suggestions
+        dismissedSuggestionIds.subtract(Set(suggestions.map(\.id)))
+        dismissedSuggestionSurfaceKeys.subtract(Set(suggestions.map {
+            Self.proactiveSurfaceKey(for: $0)
+        }))
+    }
+
+    func debugExpireAutoBubbleRateLimitForTesting() {
+        lastAutoBubbleSurfacedAt = nil
+    }
+    #endif
 
     /// Test seam: waits until the context agent's asynchronous startup has
     /// registered the event-payload providers used by real hook-triggered jobs.
@@ -795,22 +838,24 @@ final class SortAssistantCoordinator: ObservableObject {
     }
 
     /// Phase 2 Tier 2: surface a NEW high-confidence suggestion as a compact,
-    /// non-activating speech bubble — at most once per suggestion id, rate-limited,
+    /// non-activating speech bubble — at most once per active workspace signal, rate-limited,
     /// never while the panel is already open or the user is typing. Gated by both
     /// the parent flag and the default-off ProactiveAutoBubbleSettings sub-flag.
     private func maybeSurfaceAutoBubble(from suggestions: [ProactiveSuggestion]) {
         guard ProactiveSpriteSuggestionsSettings.isEnabled(),
               ProactiveAutoBubbleSettings.isEnabled() else { return }
-        // Bound the seen-set and allow a genuinely re-appearing suggestion to fire again.
-        autoBubbleSeenSuggestionIds.formIntersection(Set(suggestions.map(\.id)))
+        // Bound the seen-set and allow a genuinely re-appearing workspace signal to fire again.
+        autoBubbleSeenSuggestionSurfaceKeys.formIntersection(Set(suggestions.map {
+            Self.proactiveSurfaceKey(for: $0)
+        }))
         guard let candidate = suggestions.first(where: {
             Self.proactiveBadgeSuggestionTypes.contains($0.type)
                 && $0.confidence >= Self.proactiveAutoSurfaceConfidenceFloor
-                && !autoBubbleSeenSuggestionIds.contains($0.id)
+                && !autoBubbleSeenSuggestionSurfaceKeys.contains(Self.proactiveSurfaceKey(for: $0))
         }) else { return }
         // Mark seen before the suppression guards so a suppressed suggestion is not
         // retried on every debounced recompute.
-        autoBubbleSeenSuggestionIds.insert(candidate.id)
+        autoBubbleSeenSuggestionSurfaceKeys.insert(Self.proactiveSurfaceKey(for: candidate))
         guard !isConversationBubblePresented else { return }
         guard !isUserLikelyTyping() else { return }
         if let last = lastAutoBubbleSurfacedAt,
@@ -5856,12 +5901,39 @@ final class SortAssistantCoordinator: ObservableObject {
         ]
     }
 
+    private func isSuggestionDismissed(_ suggestion: ProactiveSuggestion) -> Bool {
+        dismissedSuggestionIds.contains(suggestion.id)
+            || dismissedSuggestionSurfaceKeys.contains(Self.proactiveSurfaceKey(for: suggestion))
+    }
+
     private func activeSuggestionForAction(suggestionId: UUID) -> ProactiveSuggestion? {
-        guard !dismissedSuggestionIds.contains(suggestionId) else { return nil }
-        if let suggestion = cachedActiveSuggestions.first(where: { $0.id == suggestionId }) {
+        if let suggestion = cachedActiveSuggestions.first(where: { $0.id == suggestionId }),
+           !isSuggestionDismissed(suggestion) {
             return suggestion
         }
-        return activeSuggestions(now: Date(), publish: false).first { $0.id == suggestionId }
+        return activeSuggestions(now: Date(), updateVisible: false, publish: false).first {
+            $0.id == suggestionId && !isSuggestionDismissed($0)
+        }
+    }
+
+    private func activeSuggestionForAction(_ candidate: ProactiveSuggestion) -> ProactiveSuggestion? {
+        let candidateSurfaceKey = Self.proactiveSurfaceKey(for: candidate)
+        guard !dismissedSuggestionIds.contains(candidate.id),
+              !dismissedSuggestionSurfaceKeys.contains(candidateSurfaceKey) else {
+            return nil
+        }
+        let currentSuggestions = cachedActiveSuggestions
+            + visibleSuggestions
+            + activeSuggestions(now: Date(), updateVisible: false, publish: false)
+        if let exact = currentSuggestions.first(where: {
+            $0.id == candidate.id && !isSuggestionDismissed($0)
+        }) {
+            return exact
+        }
+        return currentSuggestions.first {
+            Self.proactiveSurfaceKey(for: $0) == candidateSurfaceKey
+                && !isSuggestionDismissed($0)
+        }
     }
 
     func socketAcceptSuggestion(suggestionId: UUID) -> [String: Any]? {
@@ -5975,52 +6047,15 @@ final class SortAssistantCoordinator: ObservableObject {
 
     func acceptVisibleSuggestion(_ suggestion: ProactiveSuggestion) {
         guard let tabManager = lastTabManager,
-              let suggestion = activeSuggestions(now: Date(), publish: false).first(where: { $0.id == suggestion.id }),
+              let suggestion = activeSuggestionForAction(suggestion),
               let workspace = tabManager.tabs.first(where: { $0.id == suggestion.workspaceId }) else {
             return
         }
-        let intent = assistantActionIntent(
-            kind: .acceptSuggestion,
-            route: nil,
-            arguments: [
-                "suggestionId": suggestion.id.uuidString,
-                "workspaceId": workspace.id.uuidString,
-                "type": suggestion.type,
-            ],
-            workspaceIds: [workspace.id],
-            suggestionId: suggestion.id,
-            reason: suggestion.reason
-        )
-        do {
-            let review = try submitReviewedAction(intent) {
-                acceptSuggestionWithoutReview(suggestion, workspace: workspace, tabManager: tabManager)
-                return ActionExecutionResult(payload: [
-                    "accepted": "true",
-                    "suggestionId": suggestion.id.uuidString,
-                ])
-            }
-            guard review.decision == .allow else {
-                let reviewError = SemanticActionReviewError(intent: intent, result: review)
-                _ = queueSemanticActionConfirmation(
-                    for: reviewError,
-                    actionName: Self.semanticActionDisplayName(.acceptSuggestion),
-                    confirm: { [weak self, weak tabManager] in
-                        guard let self, let tabManager else { return }
-                        self.confirmAcceptSuggestion(suggestion, workspace: workspace, tabManager: tabManager, intent: intent)
-                    }
-                )
-                return
-            }
-        } catch {
-            append(.init(
-                kind: .error,
-                text: String(localized: "sortAssistant.suggestions.acceptFailed", defaultValue: "Could not accept suggestion: ") + Self.displayMessage(for: error)
-            ))
-        }
+        acceptSuggestionWithoutReview(suggestion, workspace: workspace, tabManager: tabManager, closeConversation: true)
     }
 
     func dismissVisibleSuggestion(_ suggestion: ProactiveSuggestion) {
-        guard let suggestion = activeSuggestions(now: Date(), publish: false).first(where: { $0.id == suggestion.id }) else {
+        guard let suggestion = activeSuggestionForAction(suggestion) else {
             return
         }
         let intent = assistantActionIntent(
@@ -6065,15 +6100,29 @@ final class SortAssistantCoordinator: ObservableObject {
     private func acceptSuggestionWithoutReview(
         _ suggestion: ProactiveSuggestion,
         workspace: Workspace,
-        tabManager: TabManager
+        tabManager: TabManager,
+        closeConversation: Bool = false
     ) {
+        exitCompactAutoBubble()
         tabManager.selectWorkspace(workspace)
+        if closeConversation {
+            focusWorkspaceWindow(for: tabManager)
+            setConversationBubblePresented(false, reason: "acceptSuggestion")
+        }
         dismissedSuggestionIds.insert(suggestion.id)
+        dismissedSuggestionSurfaceKeys.insert(Self.proactiveSurfaceKey(for: suggestion))
         _ = activeSuggestions(now: Date(), updateVisible: true, publish: true)
+    }
+
+    private func focusWorkspaceWindow(for tabManager: TabManager) {
+        guard let window = tabManager.window else { return }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func dismissSuggestionWithoutReview(_ suggestion: ProactiveSuggestion) {
         dismissedSuggestionIds.insert(suggestion.id)
+        dismissedSuggestionSurfaceKeys.insert(Self.proactiveSurfaceKey(for: suggestion))
         _ = activeSuggestions(now: Date(), updateVisible: true, publish: true)
     }
 
@@ -6663,6 +6712,9 @@ final class SortAssistantCoordinator: ObservableObject {
     ) -> [ProactiveSuggestion] {
         let source = snapshots ?? currentWorkspaceSnapshots(now: now)
         var suggestions = suggestionEngine.generate(from: source, now: now)
+        if snapshots == nil {
+            suggestions = mergeCachedProactiveSuggestions(into: suggestions)
+        }
         if let latestResult,
            let selectedWorkspaceId = lastTabManager?.selectedTabId {
             suggestions.append(ProactiveSuggestion(
@@ -6675,7 +6727,12 @@ final class SortAssistantCoordinator: ObservableObject {
                 createdAt: now
             ))
         }
-        suggestions.removeAll { dismissedSuggestionIds.contains($0.id) }
+        if snapshots != nil {
+            dismissedSuggestionSurfaceKeys.formIntersection(Set(suggestions.map {
+                Self.proactiveSurfaceKey(for: $0)
+            }))
+        }
+        suggestions.removeAll { isSuggestionDismissed($0) }
         cachedActiveSuggestions = suggestions
         if updateVisible, visibleSuggestions != suggestions {
             visibleSuggestions = suggestions
@@ -6687,6 +6744,25 @@ final class SortAssistantCoordinator: ObservableObject {
             Task { await suggestionSnapshotStore.setActiveSuggestions(suggestions) }
         }
         return suggestions
+    }
+
+    private func mergeCachedProactiveSuggestions(
+        into suggestions: [ProactiveSuggestion]
+    ) -> [ProactiveSuggestion] {
+        guard let tabManager = lastTabManager else { return suggestions }
+        let liveWorkspaceIds = Set(tabManager.tabs.map(\.id))
+        var merged = suggestions
+        var mergedSurfaceKeys = Set(merged.map { Self.proactiveSurfaceKey(for: $0) })
+        for suggestion in cachedActiveSuggestions + visibleSuggestions
+        where Self.proactiveBadgeSuggestionTypes.contains(suggestion.type)
+            && liveWorkspaceIds.contains(suggestion.workspaceId)
+            && !isSuggestionDismissed(suggestion) {
+            let surfaceKey = Self.proactiveSurfaceKey(for: suggestion)
+            guard !mergedSurfaceKeys.contains(surfaceKey) else { continue }
+            merged.append(suggestion)
+            mergedSurfaceKeys.insert(surfaceKey)
+        }
+        return merged
     }
 
     private func refreshVisibleSuggestions(now: Date = Date()) {

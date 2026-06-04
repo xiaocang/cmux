@@ -171946,6 +171946,40 @@
         }
       }
     },
+    "sortAssistant.suggestions.workspaceMetadata.multiplePanes": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ - %lld panes"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ - %lld ペイン"
+          }
+        }
+      }
+    },
+    "sortAssistant.suggestions.workspaceMetadata.onePane": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ - 1 pane"
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ - 1 ペイン"
+          }
+        }
+      }
+    },
     "sortAssistant.summaryPriority.rationale": {
       "extractionState": "manual",
       "localizations": {

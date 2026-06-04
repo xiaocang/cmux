@@ -625,6 +625,7 @@
 		5A5100000000000000000020 /* SortAssistantRuntimeSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000001F /* SortAssistantRuntimeSupport.swift */; };
 		5A5100000000000000000026 /* SortAssistantSorting.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000025 /* SortAssistantSorting.swift */; };
 		5A5100000000000000000024 /* SortAssistantSortModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000023 /* SortAssistantSortModels.swift */; };
+		C0DE60310000000000000001 /* SortAssistantSuggestionWorkspaceMetadata.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DE60320000000000000002 /* SortAssistantSuggestionWorkspaceMetadata.swift */; };
 		5A510000000000000000003A /* SortAssistantThreadView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000039 /* SortAssistantThreadView.swift */; };
 		5A5100000000000000000032 /* SortAssistantWorkspaceMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A5100000000000000000031 /* SortAssistantWorkspaceMonitor.swift */; };
 		A5001230 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A5001231 /* Sparkle */; };
@@ -1498,6 +1499,7 @@
 		5A510000000000000000001F /* SortAssistantRuntimeSupport.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantRuntimeSupport.swift; sourceTree = "<group>"; };
 		5A5100000000000000000025 /* SortAssistantSorting.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantSorting.swift; sourceTree = "<group>"; };
 		5A5100000000000000000023 /* SortAssistantSortModels.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantSortModels.swift; sourceTree = "<group>"; };
+		C0DE60320000000000000002 /* SortAssistantSuggestionWorkspaceMetadata.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantSuggestionWorkspaceMetadata.swift; sourceTree = "<group>"; };
 		5A5100000000000000000039 /* SortAssistantThreadView.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantThreadView.swift; sourceTree = "<group>"; };
 		5A5100000000000000000031 /* SortAssistantWorkspaceMonitor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantWorkspaceMonitor.swift; sourceTree = "<group>"; };
 		E3309A0E /* SplitEqualizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitEqualizer.swift; sourceTree = "<group>"; };
@@ -1911,6 +1913,7 @@
 				5A5100000000000000000033 /* SortAssistantMessageViews.swift */,
 				5A5100000000000000000035 /* SortAssistantInputViews.swift */,
 				5A5100000000000000000037 /* SortAssistantCompletionModel.swift */,
+				C0DE60320000000000000002 /* SortAssistantSuggestionWorkspaceMetadata.swift */,
 				5A5100000000000000000039 /* SortAssistantThreadView.swift */,
 				5A5100000000000000000003 /* SortAssistantFloatingHost.swift */,
 				FEED0000000000000000F014 /* SortAssistantMascotView.swift */,
@@ -3138,6 +3141,7 @@
 				5A5100000000000000000020 /* SortAssistantRuntimeSupport.swift in Sources */,
 				5A5100000000000000000026 /* SortAssistantSorting.swift in Sources */,
 				5A5100000000000000000024 /* SortAssistantSortModels.swift in Sources */,
+				C0DE60310000000000000001 /* SortAssistantSuggestionWorkspaceMetadata.swift in Sources */,
 				5A510000000000000000003A /* SortAssistantThreadView.swift in Sources */,
 				5A5100000000000000000032 /* SortAssistantWorkspaceMonitor.swift in Sources */,
 					E3309A0D /* SplitEqualizer.swift in Sources */,

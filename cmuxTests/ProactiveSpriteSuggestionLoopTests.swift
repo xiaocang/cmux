@@ -17,15 +17,20 @@ import CMUXContracts
 @MainActor
 final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
     private let flagKey = ProactiveSpriteSuggestionsSettings.key
+    private let autoBubbleKey = ProactiveAutoBubbleSettings.key
 
     override func setUp() {
         super.setUp()
         // Remove the debounce delay so the recompute Task is awaitable deterministically.
         SortAssistantCoordinator.debugProactiveSuggestionRecomputeDebounceOverrideNanos = 0
+        SortAssistantCoordinator.shared.debugResetProactiveSurfaceStateForTesting()
     }
 
     override func tearDown() {
+        SortAssistantCoordinator.shared.debugResetProactiveSurfaceStateForTesting()
         UserDefaults.standard.removeObject(forKey: flagKey)
+        UserDefaults.standard.removeObject(forKey: autoBubbleKey)
+        UserDefaults.standard.removeObject(forKey: ProactiveSuggestionNotificationsSettings.key)
         SortAssistantCoordinator.debugProactiveSuggestionRecomputeDebounceOverrideNanos = nil
         super.tearDown()
     }
@@ -145,6 +150,138 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
             coordinator.visibleSuggestions.contains { $0.workspaceId == workspaceId },
             "A low-attention generic snapshot should not create a proactive suggestion."
         )
+    }
+
+    func testAutoBubbleDoesNotRepeatForSameWorkspaceSignalWhenContextHashChanges() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        UserDefaults.standard.set(true, forKey: flagKey)
+        UserDefaults.standard.set(true, forKey: autoBubbleKey)
+
+        let workspaceId = UUID(uuidString: "66666666-6666-6666-6666-666666666666")!
+        await coordinator.workspaceSnapshotStore.write(
+            Self.waitingUserSnapshot(workspaceId: workspaceId, contextHash: "repeat-signal-first")
+        )
+
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [workspaceId], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        let firstBubbleSuggestion = try XCTUnwrap(coordinator.compactAutoBubbleSuggestion)
+        XCTAssertEqual(firstBubbleSuggestion.workspaceId, workspaceId)
+        XCTAssertEqual(firstBubbleSuggestion.type, ProactiveSuggestionTypes.reviewAgentWaitingUser)
+        XCTAssertTrue(coordinator.isCompactAutoBubble)
+        XCTAssertTrue(coordinator.isConversationBubblePresented)
+
+        if coordinator.isConversationBubblePresented {
+            _ = coordinator.toggleConversationBubble(reason: "testCloseAutoBubble")
+        }
+        coordinator.debugExpireAutoBubbleRateLimitForTesting()
+
+        await coordinator.workspaceSnapshotStore.write(
+            Self.waitingUserSnapshot(workspaceId: workspaceId, contextHash: "repeat-signal-second")
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [workspaceId], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        let currentSuggestion = try XCTUnwrap(coordinator.visibleSuggestions.first {
+            $0.workspaceId == workspaceId && $0.type == ProactiveSuggestionTypes.reviewAgentWaitingUser
+        })
+        XCTAssertNotEqual(
+            currentSuggestion.id,
+            firstBubbleSuggestion.id,
+            "Test precondition: the same workspace signal can receive a new suggestion id when contextHash changes."
+        )
+        XCTAssertFalse(
+            coordinator.isConversationBubblePresented,
+            "A contextHash-only suggestion id change must not re-open the proactive auto-bubble for the same workspace signal."
+        )
+        XCTAssertFalse(coordinator.isCompactAutoBubble)
+        XCTAssertNil(coordinator.compactAutoBubbleSuggestion)
+    }
+
+    func testOpeningAutoBubbleKeepsStoreBackedSuggestionAfterAttach() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        UserDefaults.standard.set(true, forKey: flagKey)
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        let targetWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        coordinator.attach(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+
+        await coordinator.workspaceSnapshotStore.write(
+            Self.waitingUserSnapshot(workspaceId: targetWorkspace.id, contextHash: "open-bubble-store")
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [targetWorkspace.id], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        let suggestion = try XCTUnwrap(coordinator.visibleSuggestions.first {
+            $0.workspaceId == targetWorkspace.id && $0.type == ProactiveSuggestionTypes.reviewAgentWaitingUser
+        })
+
+        coordinator.openEntry()
+        coordinator.attach(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+
+        XCTAssertTrue(
+            coordinator.visibleSuggestions.contains { $0.id == suggestion.id },
+            "Opening the full sprite dialog must not clear the store-backed proactive suggestion before the user can click Open."
+        )
+    }
+
+    func testOpenButtonAcceptsSameWorkspaceSignalAfterContextHashChanges() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        UserDefaults.standard.set(true, forKey: flagKey)
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        let initialWorkspace = try XCTUnwrap(tabManager.selectedWorkspace)
+        let targetWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        coordinator.attach(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+
+        await coordinator.workspaceSnapshotStore.write(
+            Self.waitingUserSnapshot(workspaceId: targetWorkspace.id, contextHash: "open-button-first")
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [targetWorkspace.id], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+        let firstSuggestion = try XCTUnwrap(coordinator.visibleSuggestions.first {
+            $0.workspaceId == targetWorkspace.id && $0.type == ProactiveSuggestionTypes.reviewAgentWaitingUser
+        })
+
+        await coordinator.workspaceSnapshotStore.write(
+            Self.waitingUserSnapshot(workspaceId: targetWorkspace.id, contextHash: "open-button-second")
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [targetWorkspace.id], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+        let currentSuggestion = try XCTUnwrap(coordinator.visibleSuggestions.first {
+            $0.workspaceId == targetWorkspace.id && $0.type == ProactiveSuggestionTypes.reviewAgentWaitingUser
+        })
+        XCTAssertNotEqual(firstSuggestion.id, currentSuggestion.id)
+
+        coordinator.openConversationBubble(reason: "testOpenButton")
+        coordinator.acceptVisibleSuggestion(firstSuggestion)
+
+        XCTAssertEqual(tabManager.selectedWorkspace?.id, targetWorkspace.id)
+        XCTAssertNotEqual(tabManager.selectedWorkspace?.id, initialWorkspace.id)
+        XCTAssertFalse(coordinator.isConversationBubblePresented)
+        XCTAssertFalse(coordinator.visibleSuggestions.contains {
+            $0.workspaceId == targetWorkspace.id && $0.type == ProactiveSuggestionTypes.reviewAgentWaitingUser
+        })
     }
 
     func testRealAgentHookEventTriggersProactiveSuggestionWhenDefaultEnabled() async throws {

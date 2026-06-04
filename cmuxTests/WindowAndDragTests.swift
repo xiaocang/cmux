@@ -1888,6 +1888,46 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         XCTAssertNil(coordinator.semanticActionConfirmation)
         coordinator.clearCurrentSession()
     }
+
+    @MainActor
+    func testAcceptVisibleSuggestionImmediatelySelectsWorkspace() throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        coordinator.debugResetProactiveSurfaceStateForTesting()
+        defer {
+            coordinator.debugResetProactiveSurfaceStateForTesting()
+            coordinator.clearCurrentSession()
+        }
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        let initialWorkspace = try XCTUnwrap(tabManager.selectedWorkspace)
+        let targetWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        coordinator.attach(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+        let suggestion = ProactiveSuggestion(
+            id: UUID(uuidString: "42424242-4242-4242-4242-424242424242")!,
+            workspaceId: targetWorkspace.id,
+            type: ProactiveSuggestionTypes.reviewAgentWaitingUser,
+            title: "Review agent output",
+            reason: "Agent is waiting for your decision.",
+            confidence: 0.92,
+            createdAt: Date(timeIntervalSince1970: 1_000)
+        )
+        coordinator.debugSeedVisibleSuggestionsForTesting([suggestion])
+        coordinator.openConversationBubble(reason: "testAcceptVisibleSuggestion")
+
+        coordinator.acceptVisibleSuggestion(suggestion)
+
+        XCTAssertEqual(tabManager.selectedWorkspace?.id, targetWorkspace.id)
+        XCTAssertNotEqual(tabManager.selectedWorkspace?.id, initialWorkspace.id)
+        XCTAssertFalse(coordinator.isConversationBubblePresented)
+        XCTAssertNil(coordinator.semanticActionConfirmation)
+        XCTAssertFalse(coordinator.visibleSuggestions.contains { $0.id == suggestion.id })
+    }
 #endif
 
     @MainActor
@@ -3401,6 +3441,74 @@ final class SortAssistantIntentRouterTests: XCTestCase {
             "  sendIdentifier: \(SortAssistantAccessibility.sendButton)",
         ]
         return lines.joined(separator: "\n")
+    }
+}
+
+@MainActor
+final class SortAssistantSuggestionWorkspaceMetadataTests: XCTestCase {
+    func testDisplayTextTrimsTitleAndIncludesPaneCount() {
+        let metadata = SortAssistantSuggestionWorkspaceMetadata(
+            title: "  Review Queue\nFollow Up  ",
+            paneCount: 3
+        )
+
+        XCTAssertEqual(metadata.displayText, "Review Queue Follow Up - 3 panes")
+    }
+
+    func testDisplayTextTruncatesLongTitleBeforePaneCount() {
+        let metadata = SortAssistantSuggestionWorkspaceMetadata(
+            title: "  \(String(repeating: "A", count: 40))  ",
+            paneCount: 1
+        )
+
+        XCTAssertEqual(
+            metadata.displayText,
+            "\(String(repeating: "A", count: 36))... - 1 pane"
+        )
+    }
+}
+
+@MainActor
+final class SortAssistantMascotBadgeLayoutTests: XCTestCase {
+    func testFloatingMascotBadgeExpandsFittingSizeForBadgeBleed() {
+        _ = NSApplication.shared
+
+        let plainSize = fittingSize(attentionBadgeCount: 0)
+        let badgedSize = fittingSize(attentionBadgeCount: 1)
+
+        XCTAssertEqual(
+            plainSize.width,
+            SortAssistantFloatingPanelMetrics.avatarSize,
+            accuracy: 0.5,
+            "The unbadged floating mascot should keep the configured avatar width."
+        )
+        XCTAssertEqual(
+            plainSize.height,
+            SortAssistantFloatingPanelMetrics.avatarSize,
+            accuracy: 0.5,
+            "The unbadged floating mascot should keep the configured avatar height."
+        )
+        XCTAssertGreaterThanOrEqual(
+            badgedSize.width,
+            plainSize.width + 5,
+            "The badge's rightward bleed must participate in NSHostingView fitting size."
+        )
+        XCTAssertGreaterThanOrEqual(
+            badgedSize.height,
+            plainSize.height + 3,
+            "The badge's upward bleed must participate in NSHostingView fitting size."
+        )
+    }
+
+    private func fittingSize(attentionBadgeCount: Int) -> NSSize {
+        let hostingView = NSHostingView(rootView: SortAssistantMascotButton(
+            presentation: .floating,
+            state: .idle,
+            attentionBadgeCount: attentionBadgeCount,
+            action: {}
+        ))
+        hostingView.layoutSubtreeIfNeeded()
+        return hostingView.fittingSize
     }
 }
 
