@@ -580,6 +580,9 @@ struct cmuxApp: App {
                     Button("Split Button Layout Debug…") {
                         SplitButtonLayoutDebugWindowController.shared.show()
                     }
+                    Button(String(localized: "debug.menu.spriteEmotes", defaultValue: "Sprite Emotes…")) {
+                        SpriteEmoteGalleryWindowController.shared.show()
+                    }
                     Button(
                         String(
                             localized: "debug.menu.tabBarBackdropLab",
@@ -1326,6 +1329,7 @@ struct cmuxApp: App {
         FeedTextEditorDebugWindowController.shared.show()
         FeedButtonStyleDebugWindowController.shared.show()
         BonsplitTabBarDebugWindowController.shared.show()
+        SpriteEmoteGalleryWindowController.shared.show()
     }
 #endif
 }

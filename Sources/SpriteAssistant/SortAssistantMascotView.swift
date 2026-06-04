@@ -1,6 +1,8 @@
+import AppKit
 import SwiftUI
 
-enum SortAssistantMascotState: Equatable {
+enum SortAssistantMascotState: Equatable, CaseIterable {
+    // Engine rows 0-8 — the OpenPets universal sprite sheet ground truth.
     case idle
     case runningRight
     case runningLeft
@@ -10,6 +12,24 @@ enum SortAssistantMascotState: Equatable {
     case waiting
     case running
     case review
+
+    // Clawd rows 9-23 — themed emote catalog rendered from the clawd-emotes-skill
+    // hobbies + daily-life cards, reframed to the engine baseline. Six frames each.
+    case coding
+    case coffee
+    case reading
+    case gaming
+    case painting
+    case photo
+    case guitar
+    case watering
+    case listening
+    case singing
+    case eating
+    case exercise
+    case shower
+    case sleeping
+    case birthday
 
     var row: Int {
         switch self {
@@ -22,19 +42,38 @@ enum SortAssistantMascotState: Equatable {
         case .waiting: return 6
         case .running: return 7
         case .review: return 8
+        case .coding: return 9
+        case .coffee: return 10
+        case .reading: return 11
+        case .gaming: return 12
+        case .painting: return 13
+        case .photo: return 14
+        case .guitar: return 15
+        case .watering: return 16
+        case .listening: return 17
+        case .singing: return 18
+        case .eating: return 19
+        case .exercise: return 20
+        case .shower: return 21
+        case .sleeping: return 22
+        case .birthday: return 23
         }
     }
 
     var frames: Int {
         switch self {
-        case .idle, .waiting, .running, .review:
-            return 6
         case .runningRight, .runningLeft, .failed:
             return 8
-        case .waving:
-            return 4
         case .jumping:
             return 5
+        case .waving:
+            return 4
+        // Engine 6-frame states plus every themed row render six frames.
+        case .idle, .waiting, .running, .review,
+             .coding, .coffee, .reading, .gaming, .painting, .photo, .guitar,
+             .watering, .listening, .singing, .eating, .exercise, .shower,
+             .sleeping, .birthday:
+            return 6
         }
     }
 
@@ -48,8 +87,42 @@ enum SortAssistantMascotState: Equatable {
         case .waiting: return 1.01
         case .running: return 0.82
         case .review: return 1.03
+        // Themed loop durations captured from the source cards' CSS cycles.
+        case .coding: return 2.8
+        case .coffee: return 3.4
+        case .reading: return 4.2
+        case .gaming: return 2.8
+        case .painting: return 3.2
+        case .photo: return 3.0
+        case .guitar: return 3.0
+        case .watering: return 3.4
+        case .listening: return 3.0
+        case .singing: return 2.8
+        case .eating: return 3.4
+        case .exercise: return 1.0
+        case .shower: return 3.0
+        case .sleeping: return 3.6
+        case .birthday: return 2.2
         }
     }
+}
+
+extension SortAssistantMascotState {
+    /// Number of rows in the bundled sprite sheet: 9 for the OpenPets engine
+    /// art, or 24 once the full Clawd extension art is installed. Detected once
+    /// from the asset's pixel height (208 px per cell) so the app reflects
+    /// whichever sheet is shipped without a code change.
+    static let installedSheetRowCount: Int = {
+        if let rep = NSImage(named: "OpenPetsClawClaudeSprite")?.representations.first {
+            let detected = Int((Double(rep.pixelsHigh) / 208.0).rounded())
+            if detected >= 1 { return detected }
+        }
+        return 9
+    }()
+
+    /// Whether the installed sheet includes the Clawd extension rows (9–23).
+    /// New emotes render as transparent cells until this is `true`.
+    static var hasClawdRows: Bool { installedSheetRowCount >= 24 }
 }
 
 struct SortAssistantMascotButton: View {
@@ -218,7 +291,11 @@ private struct SortAssistantMascotView: View {
     private static let frameWidth: CGFloat = 192
     private static let frameHeight: CGFloat = 208
     private static let columns: CGFloat = 8
-    private static let rows: CGFloat = 9
+    // Derived from the actual sprite-sheet height (via `installedSheetRowCount`) so
+    // the per-cell math stays correct whether the bundled art is the 9-row engine
+    // sheet or the full 24-emote sheet. Dropping in a taller
+    // `OpenPetsClawClaudeSprite.png` lights up the Clawd rows with no code change.
+    private static let rows = CGFloat(SortAssistantMascotState.installedSheetRowCount)
 
     private var spriteWidth: CGFloat {
         size * 0.84

@@ -632,6 +632,7 @@
 		A5001230 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = A5001231 /* Sparkle */; };
 		E3309A0D /* SplitEqualizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = E3309A0E /* SplitEqualizer.swift */; };
 		5A5100000000000000000030 /* SpriteAssistantUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A510000000000000000002F /* SpriteAssistantUITests.swift */; };
+		C4160A080000000000000001 /* SpriteEmoteGalleryWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4160A080000000000000002 /* SpriteEmoteGalleryWindow.swift */; };
 		F6355600A1B2C3D4E5F60718 /* SSHStartupSignalLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F6355601A1B2C3D4E5F60718 /* SSHStartupSignalLifecycleTests.swift */; };
 		F20F85FC5900550685FA33AD /* StackAuth in Frameworks */ = {isa = PBXBuildFile; productRef = A8BD195031FC4B82B4354297 /* StackAuth */; };
 		D35B71010000000000000001 /* StartupBreadcrumbLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = D35B71010000000000000002 /* StartupBreadcrumbLog.swift */; };
@@ -1504,6 +1505,7 @@
 		5A5100000000000000000031 /* SortAssistantWorkspaceMonitor.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SortAssistantWorkspaceMonitor.swift; sourceTree = "<group>"; };
 		E3309A0E /* SplitEqualizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SplitEqualizer.swift; sourceTree = "<group>"; };
 		5A510000000000000000002F /* SpriteAssistantUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpriteAssistantUITests.swift; sourceTree = "<group>"; };
+		C4160A080000000000000002 /* SpriteEmoteGalleryWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpriteEmoteGalleryWindow.swift; sourceTree = "<group>"; };
 		F6355601A1B2C3D4E5F60718 /* SSHStartupSignalLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SSHStartupSignalLifecycleTests.swift; sourceTree = "<group>"; };
 		D35B71010000000000000002 /* StartupBreadcrumbLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = App/StartupBreadcrumbLog.swift; sourceTree = "<group>"; };
 		5A510000000000000000003B /* SuggestionRankingEngines.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = SpriteAssistant/SuggestionRankingEngines.swift; sourceTree = "<group>"; };
@@ -1926,6 +1928,7 @@
 				C4160A010000000000000002 /* cmuxApp+HistoryMenu.swift */,
 				C4160A020000000000000002 /* FocusHistoryMenuInvalidator.swift */,
 				C4160A070000000000000002 /* TitlebarLayoutDebugWindow.swift */,
+				C4160A080000000000000002 /* SpriteEmoteGalleryWindow.swift */,
 				F50030020000000000000002 /* TitlebarInteractiveControlModifier.swift */,
 				C0DE34020000000000000003 /* CmuxHelpCommands.swift */,
 				C0DE34020000000000000004 /* CmuxHelpResource.swift */,
@@ -3146,6 +3149,7 @@
 				5A5100000000000000000032 /* SortAssistantWorkspaceMonitor.swift in Sources */,
 					E3309A0D /* SplitEqualizer.swift in Sources */,
 					E3309A0D /* SplitEqualizer.swift in Sources */,
+				C4160A080000000000000001 /* SpriteEmoteGalleryWindow.swift in Sources */,
 				D35B71010000000000000001 /* StartupBreadcrumbLog.swift in Sources */,
 				5A510000000000000000003C /* SuggestionRankingEngines.swift in Sources */,
 				A5001303 /* SurfaceSearchOverlay.swift in Sources */,

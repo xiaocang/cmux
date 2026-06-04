@@ -52,6 +52,11 @@ final class SortAssistantCoordinator: ObservableObject {
     @Published private(set) var visibleSuggestions: [ProactiveSuggestion] = []
     private var cachedActiveSuggestions: [ProactiveSuggestion] = []
     @Published private(set) var isSorting = false
+    /// When non-nil, forces the mascot to a specific emote, overriding the
+    /// state derived from the current sort/conversation context. Used by the
+    /// Debug ▸ Sprite Emotes gallery to preview an emote on the live floating
+    /// sprite; clear it (set to `nil`) to return to the derived state.
+    @Published var emoteOverride: SortAssistantMascotState?
     @Published private(set) var presentationSequence = 0
     @Published private(set) var presentationToggleSequence = 0
     @Published private(set) var isConversationBubblePresented = false
@@ -492,6 +497,9 @@ final class SortAssistantCoordinator: ObservableObject {
     }
 
     var mascotState: SortAssistantMascotState {
+        if let emoteOverride {
+            return emoteOverride
+        }
         if isSorting {
             return .running
         }
