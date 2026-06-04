@@ -23,6 +23,8 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
         super.setUp()
         // Remove the debounce delay so the recompute Task is awaitable deterministically.
         SortAssistantCoordinator.debugProactiveSuggestionRecomputeDebounceOverrideNanos = 0
+        SortAssistantCoordinator.debugProactiveSuggestionDigestDebounceOverrideNanos = 0
+        SortAssistantCoordinator.debugUseDeterministicProactiveDigestForTesting = true
         SortAssistantCoordinator.shared.debugResetProactiveSurfaceStateForTesting()
     }
 
@@ -32,6 +34,8 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: autoBubbleKey)
         UserDefaults.standard.removeObject(forKey: ProactiveSuggestionNotificationsSettings.key)
         SortAssistantCoordinator.debugProactiveSuggestionRecomputeDebounceOverrideNanos = nil
+        SortAssistantCoordinator.debugProactiveSuggestionDigestDebounceOverrideNanos = nil
+        SortAssistantCoordinator.debugUseDeterministicProactiveDigestForTesting = false
         super.tearDown()
     }
 
@@ -284,6 +288,131 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
         })
     }
 
+    func testDigestMergesMultipleNotificationSuggestionsAndKeepsFoldedCardOpenable() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        let store = TerminalNotificationStore.shared
+        let appDelegate = AppDelegate.shared ?? AppDelegate()
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+
+        let originalTabManager = appDelegate.tabManager
+        let originalNotificationStore = appDelegate.notificationStore
+        let originalAppFocusOverride = AppFocusState.overrideIsFocused
+        var deliveredNotifications: [TerminalNotification] = []
+
+        UserDefaults.standard.set(true, forKey: flagKey)
+        UserDefaults.standard.set(true, forKey: ProactiveSuggestionNotificationsSettings.key)
+        await coordinator.workspaceSnapshotStore.replace(AssistantWorkingContext(
+            activeWorkspaceId: nil,
+            snapshots: [],
+            freshness: ContextFreshness(providers: [], overallConfidence: 1),
+            activeSuggestions: [],
+            latestRanking: nil
+        ))
+        store.replaceNotificationsForTesting([])
+        store.configureNotificationDeliveryHandlerForTesting { _, notification in
+            deliveredNotifications.append(notification)
+        }
+        appDelegate.tabManager = tabManager
+        appDelegate.notificationStore = store
+        AppFocusState.overrideIsFocused = false
+        defer {
+            coordinator.debugResetProactiveSurfaceStateForTesting()
+            store.replaceNotificationsForTesting([])
+            store.resetNotificationDeliveryHandlerForTesting()
+            appDelegate.tabManager = originalTabManager
+            appDelegate.notificationStore = originalNotificationStore
+            AppFocusState.overrideIsFocused = originalAppFocusOverride
+        }
+
+        let reviewWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        let releaseWorkspace = tabManager.addWorkspace(
+            title: "Release",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        coordinator.attach(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+
+        await coordinator.workspaceSnapshotStore.write(
+            Self.waitingUserSnapshot(
+                workspaceId: reviewWorkspace.id,
+                title: "Review Queue",
+                contextHash: "digest-review"
+            )
+        )
+        await coordinator.workspaceSnapshotStore.write(
+            Self.attentionSnapshot(
+                workspaceId: releaseWorkspace.id,
+                title: "Release",
+                status: "ready_to_merge",
+                attention: 0.95,
+                nextAction: "Merge the release PR",
+                contextHash: "digest-release",
+                nativeOrder: 1
+            )
+        )
+
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(
+                updatedWorkspaceIds: [reviewWorkspace.id, releaseWorkspace.id],
+                failures: []
+            )
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+        await coordinator.debugAwaitProactiveSuggestionDigestForTesting()
+
+        let digest = try XCTUnwrap(coordinator.proactiveSuggestionDigest)
+        let foldedSuggestion = try XCTUnwrap(coordinator.visibleSuggestions.first {
+            $0.workspaceId == releaseWorkspace.id && $0.type == ProactiveSuggestionTypes.mergeReady
+        })
+        XCTAssertTrue(digest.text.contains("Review Queue"))
+        XCTAssertTrue(digest.text.contains("Release"))
+        XCTAssertTrue(
+            digest.foldedSuggestionIds.contains(foldedSuggestion.id),
+            "The lower-priority merge-ready card should be collapsed by the digest while remaining available."
+        )
+        XCTAssertTrue(coordinator.visibleSuggestions.contains { $0.id == foldedSuggestion.id })
+        XCTAssertEqual(deliveredNotifications.count, 1)
+        XCTAssertEqual(deliveredNotifications.first?.body, digest.text)
+        XCTAssertEqual(store.notifications.count, 1)
+
+        coordinator.openConversationBubble(reason: "testFoldedSuggestionOpen")
+        coordinator.acceptVisibleSuggestion(foldedSuggestion)
+
+        XCTAssertEqual(tabManager.selectedWorkspace?.id, releaseWorkspace.id)
+    }
+
+    func testDigestParserAcceptsFencedJSONWithoutRenderingRawJSON() throws {
+        let itemId = UUID(uuidString: "77777777-7777-7777-7777-777777777777")!
+        let workspaceId = UUID(uuidString: "88888888-8888-8888-8888-888888888888")!
+        let result = try XCTUnwrap(SortAssistantMCPClient.proactiveNotificationDigestResultForTesting(
+            from: """
+            ```json
+            {"sentence":"Review a debug-injected suggestion in the livesh workspace.","folded_ids":["77777777-7777-7777-7777-777777777777"]}
+            ```
+            """,
+            items: [
+                SortAssistantProactiveNotificationDigestItem(
+                    id: itemId,
+                    workspaceId: workspaceId,
+                    workspaceTitle: "livesh",
+                    type: ProactiveSuggestionTypes.reviewAgentWaitingUser,
+                    title: "Review the debug-injected suggestion",
+                    reason: "Debug-injected high-priority suggestion",
+                    confidence: 1
+                ),
+            ]
+        ))
+
+        XCTAssertEqual(result.sentence, "Review a debug-injected suggestion in the livesh workspace.")
+        XCTAssertFalse(result.sentence.contains("json"))
+        XCTAssertEqual(result.foldedSuggestionIds, Set([itemId]))
+    }
+
     func testRealAgentHookEventTriggersProactiveSuggestionWhenDefaultEnabled() async throws {
         let coordinator = SortAssistantCoordinator.shared
         UserDefaults.standard.removeObject(forKey: flagKey)
@@ -322,10 +451,12 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
 
     private static func waitingUserSnapshot(
         workspaceId: UUID,
+        title: String = "API fix",
         contextHash: String
     ) -> WorkspaceSnapshot {
         attentionSnapshot(
             workspaceId: workspaceId,
+            title: title,
             status: "waiting_user",
             attention: 0.95,
             nextAction: "Review the agent's question",
@@ -335,10 +466,12 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
 
     private static func attentionSnapshot(
         workspaceId: UUID,
+        title: String = "API fix",
         status: String,
         attention: Double = 0.92,
         nextAction: String = "Review completed agent work",
-        contextHash: String
+        contextHash: String,
+        nativeOrder: Int = 0
     ) -> WorkspaceSnapshot {
         let freshness = ContextFreshness(
             providers: [
@@ -358,11 +491,11 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
             version: 1,
             updatedAt: Date(timeIntervalSince1970: 1_000),
             context: NormalizedWorkspaceContext(
-                title: "API fix",
+                title: title,
                 selected: false,
                 directory: nil,
                 listRevision: 1,
-                nativeOrder: 0,
+                nativeOrder: nativeOrder,
                 pinned: false,
                 locked: false,
                 customColor: nil,

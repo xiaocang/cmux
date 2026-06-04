@@ -117,8 +117,15 @@ struct SortAssistantThreadView: View {
             if let confirmation = coordinator.semanticActionConfirmation {
                 semanticActionConfirmationCard(confirmation)
             }
+            if let digest = coordinator.proactiveSuggestionDigest,
+               !digest.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                proactiveSuggestionDigest(digest)
+            }
             if !coordinator.visibleSuggestions.isEmpty {
-                suggestionCards(coordinator.visibleSuggestions)
+                suggestionCards(
+                    coordinator.visibleSuggestions,
+                    digest: coordinator.proactiveSuggestionDigest
+                )
             }
             if let prompt = coordinator.choicePrompt {
                 choicePromptCard(prompt)
@@ -255,7 +262,19 @@ struct SortAssistantThreadView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func suggestionCards(_ suggestions: [ProactiveSuggestion]) -> some View {
+    private func proactiveSuggestionDigest(_ digest: SortAssistantProactiveSuggestionDigest) -> some View {
+        Text(digest.text)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(.primary)
+            .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            .padding(.horizontal, 2)
+    }
+
+    private func suggestionCards(
+        _ suggestions: [ProactiveSuggestion],
+        digest: SortAssistantProactiveSuggestionDigest?
+    ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(String(localized: "sortAssistant.suggestions.title", defaultValue: "Suggestions"))
                 .font(.system(size: 10, weight: .semibold))
@@ -266,6 +285,7 @@ struct SortAssistantThreadView: View {
                     suggestion: suggestion,
                     workspaceMetadata: workspaceMetadata(for: suggestion.workspaceId).displayText,
                     icon: suggestionIcon(for: suggestion.type),
+                    isCollapsed: digest?.foldedSuggestionIds.contains(suggestion.id) ?? false,
                     onOpen: {
                         coordinator.acceptVisibleSuggestion(suggestion)
                     },
@@ -1369,6 +1389,7 @@ private struct SortAssistantSuggestionCardView: View {
     let suggestion: ProactiveSuggestion
     let workspaceMetadata: String
     let icon: String
+    let isCollapsed: Bool
     let onOpen: () -> Void
     let onDismiss: () -> Void
 
@@ -1391,7 +1412,8 @@ private struct SortAssistantSuggestionCardView: View {
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    if let reason = suggestion.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
+                    if !isCollapsed,
+                       let reason = suggestion.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
                        !reason.isEmpty {
                         Text(reason)
                             .font(.system(size: 9))
@@ -1403,14 +1425,16 @@ private struct SortAssistantSuggestionCardView: View {
 
                 Spacer(minLength: 0)
 
-                Text(String(format: "%.0f%%", suggestion.confidence * 100))
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .accessibilityLabel(String(
-                        localized: "sortAssistant.suggestions.confidence",
-                        defaultValue: "Confidence"
-                    ))
+                if !isCollapsed {
+                    Text(String(format: "%.0f%%", suggestion.confidence * 100))
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .accessibilityLabel(String(
+                            localized: "sortAssistant.suggestions.confidence",
+                            defaultValue: "Confidence"
+                        ))
+                }
             }
 
             HStack(spacing: 6) {

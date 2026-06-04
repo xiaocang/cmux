@@ -50,6 +50,7 @@ final class SortAssistantCoordinator: ObservableObject {
     @Published private(set) var memories: [SortAssistantMemory] = []
     @Published private(set) var spriteMemories: [SortAssistantMemory] = []
     @Published private(set) var visibleSuggestions: [ProactiveSuggestion] = []
+    @Published private(set) var proactiveSuggestionDigest: SortAssistantProactiveSuggestionDigest?
     private var cachedActiveSuggestions: [ProactiveSuggestion] = []
     @Published private(set) var isSorting = false
     /// When non-nil, forces the mascot to a specific emote, overriding the
@@ -101,6 +102,8 @@ final class SortAssistantCoordinator: ObservableObject {
     }
     #if DEBUG
     static var debugProactiveSuggestionRecomputeDebounceOverrideNanos: UInt64?
+    static var debugProactiveSuggestionDigestDebounceOverrideNanos: UInt64?
+    static var debugUseDeterministicProactiveDigestForTesting = false
     #endif
     // Phase 2 surfacing thresholds (see suggestion-sprint-plan.md decision 5).
     // Badge shows all three actionable types (floor 0.85 == "the suggestion exists");
@@ -121,6 +124,17 @@ final class SortAssistantCoordinator: ObservableObject {
     private static let autoBubbleAutoDismissNanos: UInt64 = 12_000_000_000
     // Phase 4: dedup suggestion-driven OS notifications (default-off sub-flag).
     private var notifiedProactiveSuggestionSurfaceKeys: Set<String> = []
+    private var pendingProactiveNotificationSuggestions: [String: ProactiveSuggestion] = [:]
+    private var proactiveSuggestionDigestTask: Task<Void, Never>?
+    private var proactiveSuggestionDigestDebounceNanos: UInt64 {
+        #if DEBUG
+        if let override = Self.debugProactiveSuggestionDigestDebounceOverrideNanos {
+            return override
+        }
+        #endif
+        return Self.proactiveSuggestionDigestDefaultDebounceNanos
+    }
+    private static let proactiveSuggestionDigestDefaultDebounceNanos: UInt64 = 650_000_000
     private let mcpClient = SortAssistantMCPClient()
     private var pendingExternalGoal: (goal: String, forceApply: Bool)?
     private var pendingPreviewPatch: SortPatch?
@@ -383,25 +397,289 @@ final class SortAssistantCoordinator: ObservableObject {
         notifiedProactiveSuggestionSurfaceKeys.formIntersection(Set(suggestions.map {
             Self.proactiveSurfaceKey(for: $0)
         }))
-        for suggestion in suggestions
-        where Self.proactiveBadgeSuggestionTypes.contains(suggestion.type)
-            && suggestion.confidence >= Self.proactiveAutoSurfaceConfidenceFloor
-            && !notifiedProactiveSuggestionSurfaceKeys.contains(Self.proactiveSurfaceKey(for: suggestion)) {
+        var queuedAny = false
+        for suggestion in suggestions where Self.isProactiveNotificationCandidate(suggestion) {
             let surfaceKey = Self.proactiveSurfaceKey(for: suggestion)
+            guard !notifiedProactiveSuggestionSurfaceKeys.contains(surfaceKey) else { continue }
             notifiedProactiveSuggestionSurfaceKeys.insert(surfaceKey)
-            let workspaceTitle = lastTabManager?.tabs
-                .first(where: { $0.id == suggestion.workspaceId })?.displayTitle ?? ""
-            TerminalNotificationStore.shared.addNotification(
-                tabId: suggestion.workspaceId,
-                surfaceId: nil,
-                title: workspaceTitle.isEmpty ? suggestion.title : workspaceTitle,
-                subtitle: workspaceTitle.isEmpty ? "" : suggestion.title,
-                body: suggestion.reason ?? "",
-                source: .monitor,
-                cooldownKey: "sprite.proactive.\(surfaceKey)",
-                cooldownInterval: 300
+            pendingProactiveNotificationSuggestions[surfaceKey] = suggestion
+            queuedAny = true
+        }
+        if queuedAny {
+            scheduleProactiveSuggestionDigest(from: suggestions, reason: "notification")
+        }
+    }
+
+    private static func isProactiveNotificationCandidate(_ suggestion: ProactiveSuggestion) -> Bool {
+        proactiveBadgeSuggestionTypes.contains(suggestion.type)
+            && suggestion.confidence >= proactiveAutoSurfaceConfidenceFloor
+    }
+
+    private static func isProactiveDigestCandidate(_ suggestion: ProactiveSuggestion) -> Bool {
+        proactiveBadgeSuggestionTypes.contains(suggestion.type)
+            && suggestion.confidence >= proactiveBadgeConfidenceFloor
+    }
+
+    private func scheduleProactiveSuggestionDigest(from suggestions: [ProactiveSuggestion], reason: String) {
+        guard ProactiveSpriteSuggestionsSettings.isEnabled() else {
+            proactiveSuggestionDigestTask?.cancel()
+            proactiveSuggestionDigestTask = nil
+            proactiveSuggestionDigest = nil
+            pendingProactiveNotificationSuggestions.removeAll()
+            return
+        }
+        let hasDigestInput = suggestions.contains(where: Self.isProactiveDigestCandidate)
+            || !pendingProactiveNotificationSuggestions.isEmpty
+        guard hasDigestInput else {
+            proactiveSuggestionDigestTask?.cancel()
+            proactiveSuggestionDigestTask = nil
+            proactiveSuggestionDigest = nil
+            return
+        }
+
+        proactiveSuggestionDigestTask?.cancel()
+        proactiveSuggestionDigestTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let delay = self.proactiveSuggestionDigestDebounceNanos
+            if delay > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: delay)
+                } catch {
+                    return
+                }
+            }
+            guard !Task.isCancelled else { return }
+            await self.resolveProactiveSuggestionDigest(reason: reason)
+        }
+    }
+
+    private func resolveProactiveSuggestionDigest(reason: String) async {
+        let digestSuggestions = proactiveDigestSuggestions(from: visibleSuggestions)
+        let notificationSuggestions = proactiveDigestSuggestions(
+            from: Array(pendingProactiveNotificationSuggestions.values)
+        )
+        pendingProactiveNotificationSuggestions.removeAll()
+        let digestItems = proactiveDigestItems(for: digestSuggestions + notificationSuggestions)
+        guard !digestItems.isEmpty else {
+            proactiveSuggestionDigest = nil
+            return
+        }
+
+        let signature = Self.proactiveDigestSignature(for: digestItems)
+        let digest: SortAssistantProactiveSuggestionDigest
+        if let existing = proactiveSuggestionDigest, existing.signature == signature {
+            digest = existing
+        } else {
+            digest = await makeProactiveSuggestionDigest(signature: signature, items: digestItems, reason: reason)
+            guard !Task.isCancelled else { return }
+            proactiveSuggestionDigest = digest
+        }
+
+        if !notificationSuggestions.isEmpty {
+            postMergedProactiveNotification(
+                digest: digest,
+                notificationSuggestions: notificationSuggestions,
+                digestItems: digestItems
             )
         }
+    }
+
+    private func proactiveDigestSuggestions(from suggestions: [ProactiveSuggestion]) -> [ProactiveSuggestion] {
+        var seenSurfaceKeys = Set<String>()
+        return suggestions
+            .filter(Self.isProactiveDigestCandidate)
+            .sorted(by: Self.proactiveSuggestionPrecedes)
+            .filter { suggestion in
+                seenSurfaceKeys.insert(Self.proactiveSurfaceKey(for: suggestion)).inserted
+            }
+    }
+
+    private static func proactiveSuggestionPrecedes(_ lhs: ProactiveSuggestion, _ rhs: ProactiveSuggestion) -> Bool {
+        let lhsPriority = proactiveBadgePriority(lhs.type)
+        let rhsPriority = proactiveBadgePriority(rhs.type)
+        if lhsPriority != rhsPriority {
+            return lhsPriority > rhsPriority
+        }
+        if lhs.confidence != rhs.confidence {
+            return lhs.confidence > rhs.confidence
+        }
+        if lhs.createdAt != rhs.createdAt {
+            return lhs.createdAt > rhs.createdAt
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private func proactiveDigestItems(
+        for suggestions: [ProactiveSuggestion]
+    ) -> [SortAssistantProactiveNotificationDigestItem] {
+        var seenSurfaceKeys = Set<String>()
+        return suggestions
+            .sorted(by: Self.proactiveSuggestionPrecedes)
+            .filter { suggestion in
+                seenSurfaceKeys.insert(Self.proactiveSurfaceKey(for: suggestion)).inserted
+            }
+            .map { suggestion in
+                SortAssistantProactiveNotificationDigestItem(
+                    id: suggestion.id,
+                    workspaceId: suggestion.workspaceId,
+                    workspaceTitle: proactiveWorkspaceTitle(for: suggestion),
+                    type: suggestion.type,
+                    title: suggestion.title,
+                    reason: suggestion.reason,
+                    confidence: suggestion.confidence
+                )
+            }
+    }
+
+    private func proactiveWorkspaceTitle(for suggestion: ProactiveSuggestion) -> String {
+        if let title = lastTabManager?.tabs.first(where: { $0.id == suggestion.workspaceId })?.displayTitle,
+           !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return title
+        }
+        return suggestion.title
+    }
+
+    private static func proactiveDigestSignature(
+        for items: [SortAssistantProactiveNotificationDigestItem]
+    ) -> String {
+        items.map { item in
+            [
+                item.id.uuidString,
+                item.workspaceId.uuidString,
+                item.type,
+                item.workspaceTitle,
+                item.title,
+                item.reason ?? "",
+                String(format: "%.3f", item.confidence),
+            ].joined(separator: "\u{1F}")
+        }.joined(separator: "\u{1E}")
+    }
+
+    private func makeProactiveSuggestionDigest(
+        signature: String,
+        items: [SortAssistantProactiveNotificationDigestItem],
+        reason: String
+    ) async -> SortAssistantProactiveSuggestionDigest {
+        let fallback = Self.fallbackProactiveSuggestionDigest(signature: signature, items: items)
+        guard !shouldUseDeterministicProactiveDigest() else {
+            return fallback
+        }
+
+        do {
+            let result = try await mcpClient.summarizeProactiveNotifications(
+                SortAssistantProactiveNotificationDigestRequest(
+                    items: items,
+                    conversationContext: semanticConversationContext(workspaceTarget: nil),
+                    claudeSessionId: claudeConversationSessionId,
+                    claudeSessionReused: claudeConversationSessionStarted,
+                    debugSession: nil
+                )
+            )
+            claudeConversationSessionStarted = true
+            return SortAssistantProactiveSuggestionDigest(
+                signature: signature,
+                text: result.sentence,
+                suggestionIds: items.map(\.id),
+                foldedSuggestionIds: result.foldedSuggestionIds
+            )
+        } catch {
+            #if DEBUG
+            cmuxDebugLog("sprite.proactive.digest fallback reason=\(reason) error=\(SortAssistantDebugSession.errorSummary(error))")
+            #endif
+            return fallback
+        }
+    }
+
+    private func shouldUseDeterministicProactiveDigest() -> Bool {
+        #if DEBUG
+        if Self.debugUseDeterministicProactiveDigestForTesting {
+            return true
+        }
+        #endif
+        let runtimeMode = CmuxRuntimeMode.current()
+        return runtimeMode.disableRealLLM || runtimeMode.fakeAssistant
+    }
+
+    private static func fallbackProactiveSuggestionDigest(
+        signature: String,
+        items: [SortAssistantProactiveNotificationDigestItem]
+    ) -> SortAssistantProactiveSuggestionDigest {
+        let orderedItems = items.sorted(by: proactiveDigestItemPrecedes)
+        let sentence = fallbackProactiveDigestSentence(items: orderedItems)
+        return SortAssistantProactiveSuggestionDigest(
+            signature: signature,
+            text: sentence,
+            suggestionIds: orderedItems.map(\.id),
+            foldedSuggestionIds: fallbackFoldedSuggestionIds(items: orderedItems)
+        )
+    }
+
+    private static func proactiveDigestItemPrecedes(
+        _ lhs: SortAssistantProactiveNotificationDigestItem,
+        _ rhs: SortAssistantProactiveNotificationDigestItem
+    ) -> Bool {
+        let lhsPriority = proactiveBadgePriority(lhs.type)
+        let rhsPriority = proactiveBadgePriority(rhs.type)
+        if lhsPriority != rhsPriority {
+            return lhsPriority > rhsPriority
+        }
+        if lhs.confidence != rhs.confidence {
+            return lhs.confidence > rhs.confidence
+        }
+        return lhs.id.uuidString < rhs.id.uuidString
+    }
+
+    private static func fallbackProactiveDigestSentence(
+        items: [SortAssistantProactiveNotificationDigestItem]
+    ) -> String {
+        let parts = items.prefix(3).map { item in
+            let title = item.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let workspaceTitle = item.workspaceTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+            if workspaceTitle.isEmpty || workspaceTitle == title {
+                return title
+            }
+            return "\(workspaceTitle): \(title)"
+        }
+        return parts.joined(separator: "; ")
+    }
+
+    private static func fallbackFoldedSuggestionIds(
+        items: [SortAssistantProactiveNotificationDigestItem]
+    ) -> Set<UUID> {
+        guard let primary = items.first else { return [] }
+        let primaryPriority = proactiveBadgePriority(primary.type)
+        return Set(items.dropFirst().compactMap { item in
+            let priority = proactiveBadgePriority(item.type)
+            if priority < primaryPriority || priority <= proactiveBadgePriority(ProactiveSuggestionTypes.mergeReady) {
+                return item.id
+            }
+            return nil
+        })
+    }
+
+    private func postMergedProactiveNotification(
+        digest: SortAssistantProactiveSuggestionDigest,
+        notificationSuggestions: [ProactiveSuggestion],
+        digestItems: [SortAssistantProactiveNotificationDigestItem]
+    ) {
+        let notificationIds = Set(notificationSuggestions.map(\.id))
+        let notificationItems = digestItems.filter { notificationIds.contains($0.id) }
+        guard let primary = notificationItems.first ?? digestItems.first else { return }
+        let secondaryTitles = notificationItems
+            .dropFirst()
+            .prefix(2)
+            .map(\.workspaceTitle)
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        TerminalNotificationStore.shared.addNotification(
+            tabId: primary.workspaceId,
+            surfaceId: nil,
+            title: primary.workspaceTitle.isEmpty ? primary.title : primary.workspaceTitle,
+            subtitle: secondaryTitles.isEmpty ? primary.title : secondaryTitles.joined(separator: ", "),
+            body: digest.text,
+            source: .monitor,
+            cooldownKey: "sprite.proactive.digest.\(digest.signature.hashValue)",
+            cooldownInterval: 300
+        )
     }
 
     private static func proactiveSurfaceKey(for suggestion: ProactiveSuggestion) -> String {
@@ -546,18 +824,26 @@ final class SortAssistantCoordinator: ObservableObject {
         await proactiveSuggestionRecomputeTask?.value
     }
 
+    func debugAwaitProactiveSuggestionDigestForTesting() async {
+        await proactiveSuggestionDigestTask?.value
+    }
+
     #if DEBUG
     func debugResetProactiveSurfaceStateForTesting() {
         proactiveSuggestionRecomputeTask?.cancel()
         proactiveSuggestionRecomputeTask = nil
+        proactiveSuggestionDigestTask?.cancel()
+        proactiveSuggestionDigestTask = nil
         proactiveSuggestionRecomputePending = false
         autoBubbleSeenSuggestionSurfaceKeys.removeAll()
         notifiedProactiveSuggestionSurfaceKeys.removeAll()
+        pendingProactiveNotificationSuggestions.removeAll()
         lastAutoBubbleSurfacedAt = nil
         autoBubbleDismissTask?.cancel()
         autoBubbleDismissTask = nil
         isCompactAutoBubble = false
         compactAutoBubbleSuggestion = nil
+        proactiveSuggestionDigest = nil
         if isConversationBubblePresented {
             setConversationBubblePresented(false, reason: "testReset")
         }
@@ -6747,6 +7033,7 @@ final class SortAssistantCoordinator: ObservableObject {
         }
         if updateVisible {
             maybeSurfaceAutoBubble(from: suggestions)
+            scheduleProactiveSuggestionDigest(from: suggestions, reason: "activeSuggestions")
         }
         if publish {
             Task { await suggestionSnapshotStore.setActiveSuggestions(suggestions) }

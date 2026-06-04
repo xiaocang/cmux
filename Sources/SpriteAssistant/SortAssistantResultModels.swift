@@ -48,6 +48,36 @@ struct SortAssistantMessage: Identifiable, Equatable {
     }
 }
 
+struct SortAssistantProactiveSuggestionDigest: Equatable, Sendable {
+    let signature: String
+    let text: String
+    let suggestionIds: [UUID]
+    let foldedSuggestionIds: Set<UUID>
+}
+
+struct SortAssistantProactiveNotificationDigestItem: Sendable {
+    let id: UUID
+    let workspaceId: UUID
+    let workspaceTitle: String
+    let type: String
+    let title: String
+    let reason: String?
+    let confidence: Double
+}
+
+struct SortAssistantProactiveNotificationDigestRequest: Sendable {
+    let items: [SortAssistantProactiveNotificationDigestItem]
+    let conversationContext: [String]
+    let claudeSessionId: UUID?
+    let claudeSessionReused: Bool
+    let debugSession: SortAssistantDebugSession?
+}
+
+struct SortAssistantProactiveNotificationDigestResult: Sendable {
+    let sentence: String
+    let foldedSuggestionIds: Set<UUID>
+}
+
 struct SortAssistantDimensionQuestion: Equatable {
     let goal: String
     let mode: SortAssistantRunMode

@@ -1506,18 +1506,23 @@ private struct SortAssistantFloatingPetContent: View {
 
     private var compactAutoBubble: some View {
         let suggestion = coordinator.compactAutoBubbleSuggestion
+        let digestText = coordinator.proactiveSuggestionDigest?.text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let digestDisplayText = digestText.flatMap { $0.isEmpty ? nil : $0 }
         return Button {
             coordinator.openEntry()
         } label: {
             VStack(alignment: .leading, spacing: 6) {
-                Text(suggestion?.title ?? String(
+                Text(digestDisplayText ?? suggestion?.title ?? String(
                     localized: "sortAssistant.autoBubble.fallbackTitle",
                     defaultValue: "Something needs your attention"
                 ))
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
-                if let reason = suggestion?.reason, !reason.isEmpty {
+                if digestDisplayText == nil,
+                   let reason = suggestion?.reason,
+                   !reason.isEmpty {
                     Text(reason)
                         .font(.system(size: 11))
                         .foregroundStyle(.secondary)

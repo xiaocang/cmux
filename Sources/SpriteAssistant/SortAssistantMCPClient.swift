@@ -4,6 +4,7 @@ import MCP
 
 struct SortAssistantMCPClient: Sendable {
     private static let runTimeoutSeconds: TimeInterval = 60
+    private static let proactiveNotificationDigestTimeoutSeconds: TimeInterval = 18
     private static let semanticRouterServerName = "cmux_semantic_router"
     private static let semanticRouterToolName = "route"
     private static let semanticRouterSearchToolName = "search"
@@ -76,6 +77,250 @@ struct SortAssistantMCPClient: Sendable {
         try await Task.detached(priority: .userInitiated) {
             try Self.perform(request, progressHandler: progressHandler)
         }.value
+    }
+
+    func summarizeProactiveNotifications(
+        _ request: SortAssistantProactiveNotificationDigestRequest
+    ) async throws -> SortAssistantProactiveNotificationDigestResult {
+        try await Task.detached(priority: .utility) {
+            try Self.performProactiveNotificationDigest(request)
+        }.value
+    }
+
+    private static func performProactiveNotificationDigest(
+        _ request: SortAssistantProactiveNotificationDigestRequest
+    ) throws -> SortAssistantProactiveNotificationDigestResult {
+        let executable = claudeCodeExecutable()
+        if executable.contains("/") && !FileManager.default.isExecutableFile(atPath: executable) {
+            throw NSError(domain: "SortAssistantMCPClient", code: 1)
+        }
+
+        let arguments = try proactiveNotificationDigestClaudeArguments(request)
+        request.debugSession?.log(
+            "notificationDigest.claude.begin items=\(request.items.count) sessionReused=\(request.claudeSessionReused ? 1 : 0) \(SortAssistantClaudeCodeRuntime.debugSummary(sessionId: request.claudeSessionId, resumeSession: request.claudeSessionReused))"
+        )
+        let output = try runClaudeCode(
+            executable: executable,
+            arguments: arguments,
+            timeoutSeconds: proactiveNotificationDigestTimeoutSeconds,
+            debugSession: request.debugSession,
+            progressHandler: nil
+        )
+        request.debugSession?.log(
+            "notificationDigest.claude.end status=\(output.status) stdoutBytes=\(output.stdout.utf8.count) stderrBytes=\(output.stderr.utf8.count)"
+        )
+        guard output.status == 0 else {
+            throw SortAssistantMCPClientProcessError(
+                status: output.status,
+                stdout: output.stdout,
+                stderr: output.stderr
+            )
+        }
+        let content = SortAssistantClaudeOutputParser.resultText(from: output.stdout) ?? output.stdout
+        guard let digest = proactiveNotificationDigestResult(from: content, items: request.items) else {
+            throw SortAssistantMCPRunResultParseError(raw: content)
+        }
+        return digest
+    }
+
+    private static func proactiveNotificationDigestClaudeArguments(
+        _ request: SortAssistantProactiveNotificationDigestRequest
+    ) throws -> [String] {
+        [
+            "-p", proactiveNotificationDigestUserPrompt(request),
+            "--output-format", SortAssistantClaudeCodeRuntime.outputFormat,
+            "--model", "haiku",
+        ] +
+            SortAssistantClaudeCodeRuntime.outputFormatArguments +
+            (try SortAssistantClaudeCodeRuntime.isolatedArguments(
+                systemPrompt: proactiveNotificationDigestSystemPrompt,
+                sessionId: request.claudeSessionId,
+                resumeSession: request.claudeSessionReused
+            ))
+    }
+
+    private static let proactiveNotificationDigestSystemPrompt = """
+        You are cmux sprite's notification summarizer. Merge a burst of workspace notifications into one concise semantic sentence for the user, and decide which individual cards are less important or redundant enough to render collapsed.
+        Return only JSON: {"sentence":"...","folded_ids":["..."]}.
+        Requirements:
+        - exactly one sentence
+        - no Markdown, no bullets, no emoji
+        - preserve the important action and workspace names
+        - folded_ids must contain only notification ids from the input
+        - fold items that are redundant, low urgency, or safely covered by the sentence
+        - never fold every item unless all items are redundant or low urgency
+        - keep it under 180 characters when possible
+        - do not invent facts
+        """
+
+    private static func proactiveNotificationDigestUserPrompt(
+        _ request: SortAssistantProactiveNotificationDigestRequest
+    ) -> String {
+        let payload: [String: Any] = [
+            "notifications": request.items.map { item in
+                [
+                    "id": item.id.uuidString,
+                    "workspaceId": item.workspaceId.uuidString,
+                    "workspaceTitle": item.workspaceTitle,
+                    "type": item.type,
+                    "title": item.title,
+                    "reason": item.reason ?? "",
+                    "confidence": item.confidence,
+                ] as [String: Any]
+            },
+            "recentConversation": request.conversationContext,
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]))
+            ?? Data("{}".utf8)
+        let json = String(data: data, encoding: .utf8) ?? "{}"
+        return "Merge these cmux sprite notifications into one user-facing sentence:\n\(json)"
+    }
+
+    private static func proactiveNotificationDigestResult(
+        from content: String,
+        items: [SortAssistantProactiveNotificationDigestItem]
+    ) -> SortAssistantProactiveNotificationDigestResult? {
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if let object = proactiveNotificationDigestJSONObject(from: trimmed),
+           let sentence = object["sentence"] as? String,
+           let normalized = normalizedDigestSentence(sentence) {
+            return SortAssistantProactiveNotificationDigestResult(
+                sentence: normalized,
+                foldedSuggestionIds: foldedSuggestionIds(from: object, validItems: items)
+            )
+        }
+        guard let sentence = normalizedDigestSentence(trimmed) else { return nil }
+        return SortAssistantProactiveNotificationDigestResult(
+            sentence: sentence,
+            foldedSuggestionIds: []
+        )
+    }
+
+    #if DEBUG
+    static func proactiveNotificationDigestResultForTesting(
+        from content: String,
+        items: [SortAssistantProactiveNotificationDigestItem]
+    ) -> SortAssistantProactiveNotificationDigestResult? {
+        proactiveNotificationDigestResult(from: content, items: items)
+    }
+    #endif
+
+    private static func proactiveNotificationDigestJSONObject(from text: String) -> [String: Any]? {
+        if let object = jsonObject(from: text) {
+            return object
+        }
+        for candidate in proactiveNotificationDigestJSONCandidates(from: text) {
+            if let object = jsonObject(from: candidate) {
+                return object
+            }
+        }
+        return nil
+    }
+
+    private static func proactiveNotificationDigestJSONCandidates(from text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var candidates: [String] = []
+
+        if trimmed.hasPrefix("```"),
+           let firstNewline = trimmed.firstIndex(where: \.isNewline) {
+            var body = trimmed[trimmed.index(after: firstNewline)...]
+            if let closingFence = body.range(of: "```", options: .backwards) {
+                body = body[..<closingFence.lowerBound]
+            }
+            candidates.append(String(body).trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+
+        let lowercased = trimmed.lowercased()
+        if lowercased.hasPrefix("json") {
+            let remainder = trimmed.dropFirst(4).trimmingCharacters(in: .whitespacesAndNewlines)
+            candidates.append(remainder)
+        }
+
+        if let embeddedObject = firstJSONObjectSubstring(in: trimmed) {
+            candidates.append(embeddedObject)
+        }
+
+        return candidates
+    }
+
+    private static func firstJSONObjectSubstring(in text: String) -> String? {
+        var start: String.Index?
+        var depth = 0
+        var isInsideString = false
+        var isEscaped = false
+
+        for index in text.indices {
+            let character = text[index]
+            guard let objectStart = start else {
+                if character == "{" {
+                    start = index
+                    depth = 1
+                }
+                continue
+            }
+
+            if isInsideString {
+                if isEscaped {
+                    isEscaped = false
+                } else if character == "\\" {
+                    isEscaped = true
+                } else if character == "\"" {
+                    isInsideString = false
+                }
+                continue
+            }
+
+            if character == "\"" {
+                isInsideString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 {
+                    return String(text[objectStart...index])
+                }
+            }
+        }
+        return nil
+    }
+
+    private static func foldedSuggestionIds(
+        from object: [String: Any],
+        validItems: [SortAssistantProactiveNotificationDigestItem]
+    ) -> Set<UUID> {
+        let validIds = Set(validItems.map(\.id))
+        let rawList = object["folded_ids"] ?? object["foldedIds"] ?? object["collapsed_ids"] ?? object["collapsedIds"]
+        let rawStrings: [String]
+        if let strings = rawList as? [String] {
+            rawStrings = strings
+        } else if let values = rawList as? [Any] {
+            rawStrings = values.compactMap { $0 as? String }
+        } else {
+            rawStrings = []
+        }
+        return Set(rawStrings.compactMap(UUID.init(uuidString:)).filter { validIds.contains($0) })
+    }
+
+    private static func normalizedDigestSentence(_ text: String) -> String? {
+        let normalized = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"`")))
+        guard !normalized.isEmpty else { return nil }
+        if normalized.count <= 240 {
+            return normalized
+        }
+        let end = normalized.index(normalized.startIndex, offsetBy: 240)
+        return String(normalized[..<end]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func jsonObject(from text: String) -> [String: Any]? {
+        guard let data = text.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return object
     }
 
     private static func perform(
