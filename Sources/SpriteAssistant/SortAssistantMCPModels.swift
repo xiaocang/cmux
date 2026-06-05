@@ -450,7 +450,7 @@ struct SortAssistantMCPClientProcessError: LocalizedError, Sendable {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .first { !$0.isEmpty }
             ?? String(localized: "sortAssistant.mcp.claudeNoDetails", defaultValue: "Claude Code exited without details.")
-        if Self.isSessionInUseError(detail) {
+        if SortAssistantClaudeCodeRuntime.isSessionInUseError(detail) {
             return String(
                 localized: "sortAssistant.mcp.claudeSessionInUse",
                 defaultValue: "Claude Code is still finishing the previous Sprite request. Try again in a moment."
@@ -467,11 +467,6 @@ struct SortAssistantMCPClientProcessError: LocalizedError, Sendable {
         guard normalized.count > 420 else { return normalized }
         let end = normalized.index(normalized.startIndex, offsetBy: 420)
         return String(normalized[..<end]) + "..."
-    }
-
-    private static func isSessionInUseError(_ text: String) -> Bool {
-        let normalized = text.lowercased()
-        return normalized.contains("session id") && normalized.contains("already in use")
     }
 }
 

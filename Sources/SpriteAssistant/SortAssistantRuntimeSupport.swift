@@ -117,6 +117,14 @@ enum SortAssistantClaudeCodeRuntime {
         return arguments
     }
 
+    /// Returns `true` when Claude Code output indicates the requested session id
+    /// is already in use by another in-flight Sprite request. Matches per stream
+    /// without allocating a combined, lowercased copy of the full process output.
+    static func isSessionInUseError(_ text: String) -> Bool {
+        text.range(of: "session id", options: .caseInsensitive) != nil
+            && text.range(of: "already in use", options: .caseInsensitive) != nil
+    }
+
     static func debugSummary(sessionId: UUID? = nil, resumeSession: Bool = false) -> String {
         let persistence: String
         if let sessionId {

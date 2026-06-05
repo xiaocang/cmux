@@ -187,16 +187,13 @@ struct SortAssistantMCPClient: Sendable {
            let normalized = normalizedDigestSentence(sentence) {
             return SortAssistantProactiveNotificationDigestResult(
                 sentence: normalized,
-                foldedSuggestionIds: singleVisibleFoldedSuggestionIds(
-                    requestedFoldedIds: foldedSuggestionIds(from: object, validItems: items),
-                    validItems: items
-                )
+                foldedSuggestionIds: SortAssistantProactiveNotificationDigestItem.foldedIdsKeepingPrimary(in: items)
             )
         }
         guard let sentence = normalizedDigestSentence(trimmed) else { return nil }
         return SortAssistantProactiveNotificationDigestResult(
             sentence: sentence,
-            foldedSuggestionIds: singleVisibleFoldedSuggestionIds(requestedFoldedIds: [], validItems: items)
+            foldedSuggestionIds: SortAssistantProactiveNotificationDigestItem.foldedIdsKeepingPrimary(in: items)
         )
     }
 
@@ -286,32 +283,6 @@ struct SortAssistantMCPClient: Sendable {
             }
         }
         return nil
-    }
-
-    private static func foldedSuggestionIds(
-        from object: [String: Any],
-        validItems: [SortAssistantProactiveNotificationDigestItem]
-    ) -> Set<UUID> {
-        let validIds = Set(validItems.map(\.id))
-        let rawList = object["folded_ids"] ?? object["foldedIds"] ?? object["collapsed_ids"] ?? object["collapsedIds"]
-        let rawStrings: [String]
-        if let strings = rawList as? [String] {
-            rawStrings = strings
-        } else if let values = rawList as? [Any] {
-            rawStrings = values.compactMap { $0 as? String }
-        } else {
-            rawStrings = []
-        }
-        return Set(rawStrings.compactMap(UUID.init(uuidString:)).filter { validIds.contains($0) })
-    }
-
-    private static func singleVisibleFoldedSuggestionIds(
-        requestedFoldedIds: Set<UUID>,
-        validItems: [SortAssistantProactiveNotificationDigestItem]
-    ) -> Set<UUID> {
-        guard let primaryId = validItems.first?.id else { return [] }
-        let nonPrimaryIds = Set(validItems.dropFirst().map(\.id))
-        return requestedFoldedIds.union(nonPrimaryIds).subtracting([primaryId])
     }
 
     private static func normalizedDigestSentence(_ text: String) -> String? {
@@ -1621,8 +1592,8 @@ struct SortAssistantMCPClient: Sendable {
     }
 
     private static func isClaudeSessionInUseError(_ output: ProcessOutput) -> Bool {
-        let text = "\(output.stderr)\n\(output.stdout)".lowercased()
-        return text.contains("session id") && text.contains("already in use")
+        SortAssistantClaudeCodeRuntime.isSessionInUseError(output.stderr)
+            || SortAssistantClaudeCodeRuntime.isSessionInUseError(output.stdout)
     }
 
     private static func executableName(_ executable: String) -> String {

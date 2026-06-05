@@ -505,6 +505,10 @@ final class SortAssistantCoordinator: ObservableObject {
         if proactiveNotificationDigestInFlight {
             return
         }
+        if proactiveSuggestionDigestTaskReason == "notification",
+           proactiveSuggestionDigestTask != nil {
+            return
+        }
 
         let now = SortAssistantDebugSession.now()
         let earliestAfterDebounce = now
@@ -514,11 +518,6 @@ final class SortAssistantCoordinator: ObservableObject {
             .addingReportingOverflow(proactiveNotificationDigestMinIntervalNanos)
             .partialValue
         let fireNanos = max(earliestAfterDebounce, earliestAfterInterval ?? 0)
-
-        if proactiveSuggestionDigestTaskReason == "notification",
-           proactiveSuggestionDigestTask != nil {
-            return
-        }
 
         proactiveSuggestionDigestTask?.cancel()
         proactiveSuggestionDigestTaskGeneration &+= 1
@@ -763,7 +762,7 @@ final class SortAssistantCoordinator: ObservableObject {
             signature: signature,
             text: sentence,
             suggestionIds: orderedItems.map(\.id),
-            foldedSuggestionIds: fallbackFoldedSuggestionIds(items: orderedItems)
+            foldedSuggestionIds: SortAssistantProactiveNotificationDigestItem.foldedIdsKeepingPrimary(in: orderedItems)
         )
     }
 
@@ -796,11 +795,6 @@ final class SortAssistantCoordinator: ObservableObject {
         return parts.joined(separator: "; ")
     }
 
-    private static func fallbackFoldedSuggestionIds(
-        items: [SortAssistantProactiveNotificationDigestItem]
-    ) -> Set<UUID> {
-        Set(items.dropFirst().map(\.id))
-    }
 
     private func postMergedProactiveNotification(
         digest: SortAssistantProactiveSuggestionDigest,

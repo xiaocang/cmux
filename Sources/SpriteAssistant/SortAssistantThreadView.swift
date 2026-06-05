@@ -117,12 +117,14 @@ struct SortAssistantThreadView: View {
             if let confirmation = coordinator.semanticActionConfirmation {
                 semanticActionConfirmationCard(confirmation)
             }
-            if let suggestion = primarySuggestionForDisplay {
-                let digest = proactiveSuggestionDigestForDisplay
+            let digest = proactiveSuggestionDigestForDisplay
+            let suggestion = digest.flatMap { primarySuggestion(for: $0) }
+                ?? coordinator.visibleSuggestions.first
+            if let suggestion {
                 suggestionCards(
                     [suggestion],
                     digest: digest,
-                    semanticTitle: semanticTitle(for: digest)
+                    semanticTitle: digest?.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 )
             }
             if let prompt = coordinator.choicePrompt {
@@ -298,25 +300,12 @@ struct SortAssistantThreadView: View {
         return coordinator.visibleSuggestions.first
     }
 
-    private var primarySuggestionForDisplay: ProactiveSuggestion? {
-        if let digest = proactiveSuggestionDigestForDisplay {
-            return primarySuggestion(for: digest)
-        }
-        return coordinator.visibleSuggestions.first
-    }
-
     private var proactiveSuggestionDigestForDisplay: SortAssistantProactiveSuggestionDigest? {
         guard let digest = coordinator.proactiveSuggestionDigest,
               !digest.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
         return digest
-    }
-
-    private func semanticTitle(for digest: SortAssistantProactiveSuggestionDigest?) -> String? {
-        guard let digest else { return nil }
-        let text = digest.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        return text.isEmpty ? nil : text
     }
 
     private func suggestionIcon(for type: String) -> String {

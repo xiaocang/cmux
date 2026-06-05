@@ -65,6 +65,16 @@ struct SortAssistantProactiveNotificationDigestItem: Sendable {
     let confidence: Double
 }
 
+extension SortAssistantProactiveNotificationDigestItem {
+    /// Ids of every item except the first, expressing the digest policy of
+    /// keeping only the most important notification visible and folding the rest.
+    static func foldedIdsKeepingPrimary(
+        in items: [SortAssistantProactiveNotificationDigestItem]
+    ) -> Set<UUID> {
+        Set(items.dropFirst().map(\.id))
+    }
+}
+
 struct SortAssistantProactiveNotificationDigestRequest: Sendable {
     let items: [SortAssistantProactiveNotificationDigestItem]
     let conversationContext: [String]
