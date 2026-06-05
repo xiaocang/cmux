@@ -103,6 +103,9 @@ final class SortAssistantCoordinator: ObservableObject {
     #if DEBUG
     static var debugProactiveSuggestionRecomputeDebounceOverrideNanos: UInt64?
     static var debugProactiveSuggestionDigestDebounceOverrideNanos: UInt64?
+    static var debugProactiveNotificationDigestDebounceOverrideNanos: UInt64?
+    static var debugProactiveNotificationDigestMinIntervalOverrideNanos: UInt64?
+    static var debugProactiveDigestDelayOverrideNanos: UInt64?
     static var debugUseDeterministicProactiveDigestForTesting = false
     #endif
     // Phase 2 surfacing thresholds (see suggestion-sprint-plan.md decision 5).
@@ -126,6 +129,11 @@ final class SortAssistantCoordinator: ObservableObject {
     private var notifiedProactiveSuggestionSurfaceKeys: Set<String> = []
     private var pendingProactiveNotificationSuggestions: [String: ProactiveSuggestion] = [:]
     private var proactiveSuggestionDigestTask: Task<Void, Never>?
+    private var proactiveSuggestionDigestTaskReason: String?
+    private var proactiveSuggestionDigestTaskGeneration: UInt64 = 0
+    private var proactiveSuggestionDigestNeedsActiveRefresh = false
+    private var proactiveNotificationDigestInFlight = false
+    private var lastProactiveNotificationDigestUpdatedAtNanos: UInt64?
     private var proactiveSuggestionDigestDebounceNanos: UInt64 {
         #if DEBUG
         if let override = Self.debugProactiveSuggestionDigestDebounceOverrideNanos {
@@ -135,6 +143,26 @@ final class SortAssistantCoordinator: ObservableObject {
         return Self.proactiveSuggestionDigestDefaultDebounceNanos
     }
     private static let proactiveSuggestionDigestDefaultDebounceNanos: UInt64 = 650_000_000
+    private var proactiveNotificationDigestDebounceNanos: UInt64 {
+        #if DEBUG
+        if let override = Self.debugProactiveNotificationDigestDebounceOverrideNanos
+            ?? Self.debugProactiveSuggestionDigestDebounceOverrideNanos {
+            return override
+        }
+        #endif
+        return Self.proactiveNotificationDigestDefaultDebounceNanos
+    }
+    private var proactiveNotificationDigestMinIntervalNanos: UInt64 {
+        #if DEBUG
+        if let override = Self.debugProactiveNotificationDigestMinIntervalOverrideNanos
+            ?? Self.debugProactiveSuggestionDigestDebounceOverrideNanos {
+            return override
+        }
+        #endif
+        return Self.proactiveNotificationDigestDefaultMinIntervalNanos
+    }
+    private static let proactiveNotificationDigestDefaultDebounceNanos: UInt64 = 3_000_000_000
+    private static let proactiveNotificationDigestDefaultMinIntervalNanos: UInt64 = 10_000_000_000
     private let mcpClient = SortAssistantMCPClient()
     private var pendingExternalGoal: (goal: String, forceApply: Bool)?
     private var pendingPreviewPatch: SortPatch?
@@ -422,22 +450,33 @@ final class SortAssistantCoordinator: ObservableObject {
 
     private func scheduleProactiveSuggestionDigest(from suggestions: [ProactiveSuggestion], reason: String) {
         guard ProactiveSpriteSuggestionsSettings.isEnabled() else {
-            proactiveSuggestionDigestTask?.cancel()
-            proactiveSuggestionDigestTask = nil
+            cancelProactiveSuggestionDigestTask()
             proactiveSuggestionDigest = nil
             pendingProactiveNotificationSuggestions.removeAll()
+            return
+        }
+        if reason != "notification",
+           proactiveSuggestionDigestTaskReason == "notification" || proactiveNotificationDigestInFlight {
+            proactiveSuggestionDigestNeedsActiveRefresh = suggestions.contains(where: Self.isProactiveDigestCandidate)
             return
         }
         let hasDigestInput = suggestions.contains(where: Self.isProactiveDigestCandidate)
             || !pendingProactiveNotificationSuggestions.isEmpty
         guard hasDigestInput else {
-            proactiveSuggestionDigestTask?.cancel()
-            proactiveSuggestionDigestTask = nil
+            cancelProactiveSuggestionDigestTask()
             proactiveSuggestionDigest = nil
             return
         }
 
+        if reason == "notification" {
+            scheduleProactiveNotificationDigestTask(reason: reason)
+            return
+        }
+
         proactiveSuggestionDigestTask?.cancel()
+        proactiveSuggestionDigestTaskGeneration &+= 1
+        let taskGeneration = proactiveSuggestionDigestTaskGeneration
+        proactiveSuggestionDigestTaskReason = reason
         proactiveSuggestionDigestTask = Task { @MainActor [weak self] in
             guard let self else { return }
             let delay = self.proactiveSuggestionDigestDebounceNanos
@@ -449,33 +488,143 @@ final class SortAssistantCoordinator: ObservableObject {
                 }
             }
             guard !Task.isCancelled else { return }
-            await self.resolveProactiveSuggestionDigest(reason: reason)
+            await self.resolveProactiveSuggestionDigest(
+                reason: reason,
+                taskGeneration: taskGeneration
+            )
         }
     }
 
-    private func resolveProactiveSuggestionDigest(reason: String) async {
+    private func canDeliverProactiveNotificationDigest() -> Bool {
+        ProactiveSpriteSuggestionsSettings.isEnabled()
+            && ProactiveSuggestionNotificationsSettings.isEnabled()
+            && !AppFocusState.isAppActive()
+    }
+
+    private func scheduleProactiveNotificationDigestTask(reason: String) {
+        if proactiveNotificationDigestInFlight {
+            return
+        }
+
+        let now = SortAssistantDebugSession.now()
+        let earliestAfterDebounce = now
+            .addingReportingOverflow(proactiveNotificationDigestDebounceNanos)
+            .partialValue
+        let earliestAfterInterval = lastProactiveNotificationDigestUpdatedAtNanos?
+            .addingReportingOverflow(proactiveNotificationDigestMinIntervalNanos)
+            .partialValue
+        let fireNanos = max(earliestAfterDebounce, earliestAfterInterval ?? 0)
+
+        if proactiveSuggestionDigestTaskReason == "notification",
+           proactiveSuggestionDigestTask != nil {
+            return
+        }
+
+        proactiveSuggestionDigestTask?.cancel()
+        proactiveSuggestionDigestTaskGeneration &+= 1
+        let taskGeneration = proactiveSuggestionDigestTaskGeneration
+        proactiveSuggestionDigestTaskReason = reason
+        proactiveSuggestionDigestTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let delay = fireNanos > now ? fireNanos - now : 0
+            if delay > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: delay)
+                } catch {
+                    return
+                }
+            }
+            guard !Task.isCancelled else { return }
+            guard self.canDeliverProactiveNotificationDigest() else {
+                self.pendingProactiveNotificationSuggestions.removeAll()
+                if self.proactiveSuggestionDigestTaskGeneration == taskGeneration {
+                    let needsActiveRefresh = self.proactiveSuggestionDigestNeedsActiveRefresh
+                    self.proactiveSuggestionDigestNeedsActiveRefresh = false
+                    self.proactiveSuggestionDigestTask = nil
+                    self.proactiveSuggestionDigestTaskReason = nil
+                    if needsActiveRefresh {
+                        self.scheduleProactiveSuggestionDigest(
+                            from: self.visibleSuggestions,
+                            reason: "activeSuggestions"
+                        )
+                    }
+                }
+                return
+            }
+            await self.resolveProactiveSuggestionDigest(
+                reason: reason,
+                taskGeneration: taskGeneration
+            )
+        }
+    }
+
+    private func cancelProactiveSuggestionDigestTask() {
+        proactiveSuggestionDigestTask?.cancel()
+        proactiveSuggestionDigestTask = nil
+        proactiveSuggestionDigestTaskReason = nil
+        proactiveSuggestionDigestTaskGeneration &+= 1
+        proactiveSuggestionDigestNeedsActiveRefresh = false
+    }
+
+    private func resolveProactiveSuggestionDigest(reason: String, taskGeneration: UInt64) async {
+        guard proactiveSuggestionDigestTaskGeneration == taskGeneration else { return }
+        let isNotificationDigest = reason == "notification"
+        if isNotificationDigest {
+            proactiveNotificationDigestInFlight = true
+        }
+        defer {
+            let isCurrentTask = proactiveSuggestionDigestTaskGeneration == taskGeneration
+            if isCurrentTask {
+                proactiveSuggestionDigestTask = nil
+                proactiveSuggestionDigestTaskReason = nil
+            }
+            if isNotificationDigest {
+                proactiveNotificationDigestInFlight = false
+                if isCurrentTask, !pendingProactiveNotificationSuggestions.isEmpty {
+                    scheduleProactiveNotificationDigestTask(reason: "notification")
+                } else if isCurrentTask, proactiveSuggestionDigestNeedsActiveRefresh {
+                    proactiveSuggestionDigestNeedsActiveRefresh = false
+                    scheduleProactiveSuggestionDigest(from: visibleSuggestions, reason: "activeSuggestions")
+                }
+            }
+        }
+
         let digestSuggestions = proactiveDigestSuggestions(from: visibleSuggestions)
-        let notificationSuggestions = proactiveDigestSuggestions(
-            from: Array(pendingProactiveNotificationSuggestions.values)
-        )
-        pendingProactiveNotificationSuggestions.removeAll()
+        let notificationSuggestions: [ProactiveSuggestion]
+        if isNotificationDigest {
+            notificationSuggestions = proactiveDigestSuggestions(
+                from: Array(pendingProactiveNotificationSuggestions.values)
+            )
+            pendingProactiveNotificationSuggestions.removeAll()
+        } else {
+            notificationSuggestions = []
+        }
         let digestItems = proactiveDigestItems(for: digestSuggestions + notificationSuggestions)
         guard !digestItems.isEmpty else {
+            guard !Task.isCancelled,
+                  proactiveSuggestionDigestTaskGeneration == taskGeneration else { return }
             proactiveSuggestionDigest = nil
             return
         }
 
         let signature = Self.proactiveDigestSignature(for: digestItems)
         let digest: SortAssistantProactiveSuggestionDigest
+        guard !Task.isCancelled,
+              proactiveSuggestionDigestTaskGeneration == taskGeneration else { return }
         if let existing = proactiveSuggestionDigest, existing.signature == signature {
             digest = existing
         } else {
             digest = await makeProactiveSuggestionDigest(signature: signature, items: digestItems, reason: reason)
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled,
+                  proactiveSuggestionDigestTaskGeneration == taskGeneration else { return }
             proactiveSuggestionDigest = digest
         }
 
         if !notificationSuggestions.isEmpty {
+            if reason == "notification" {
+                guard canDeliverProactiveNotificationDigest() else { return }
+                lastProactiveNotificationDigestUpdatedAtNanos = SortAssistantDebugSession.now()
+            }
             postMergedProactiveNotification(
                 digest: digest,
                 notificationSuggestions: notificationSuggestions,
@@ -561,6 +710,11 @@ final class SortAssistantCoordinator: ObservableObject {
         reason: String
     ) async -> SortAssistantProactiveSuggestionDigest {
         let fallback = Self.fallbackProactiveSuggestionDigest(signature: signature, items: items)
+        #if DEBUG
+        if let delay = Self.debugProactiveDigestDelayOverrideNanos, delay > 0 {
+            try? await Task.sleep(nanoseconds: delay)
+        }
+        #endif
         guard !shouldUseDeterministicProactiveDigest() else {
             return fallback
         }
@@ -570,12 +724,11 @@ final class SortAssistantCoordinator: ObservableObject {
                 SortAssistantProactiveNotificationDigestRequest(
                     items: items,
                     conversationContext: semanticConversationContext(workspaceTarget: nil),
-                    claudeSessionId: claudeConversationSessionId,
-                    claudeSessionReused: claudeConversationSessionStarted,
+                    claudeSessionId: nil,
+                    claudeSessionReused: false,
                     debugSession: nil
                 )
             )
-            claudeConversationSessionStarted = true
             return SortAssistantProactiveSuggestionDigest(
                 signature: signature,
                 text: result.sentence,
@@ -646,15 +799,7 @@ final class SortAssistantCoordinator: ObservableObject {
     private static func fallbackFoldedSuggestionIds(
         items: [SortAssistantProactiveNotificationDigestItem]
     ) -> Set<UUID> {
-        guard let primary = items.first else { return [] }
-        let primaryPriority = proactiveBadgePriority(primary.type)
-        return Set(items.dropFirst().compactMap { item in
-            let priority = proactiveBadgePriority(item.type)
-            if priority < primaryPriority || priority <= proactiveBadgePriority(ProactiveSuggestionTypes.mergeReady) {
-                return item.id
-            }
-            return nil
-        })
+        Set(items.dropFirst().map(\.id))
     }
 
     private func postMergedProactiveNotification(
@@ -832,8 +977,9 @@ final class SortAssistantCoordinator: ObservableObject {
     func debugResetProactiveSurfaceStateForTesting() {
         proactiveSuggestionRecomputeTask?.cancel()
         proactiveSuggestionRecomputeTask = nil
-        proactiveSuggestionDigestTask?.cancel()
-        proactiveSuggestionDigestTask = nil
+        cancelProactiveSuggestionDigestTask()
+        proactiveNotificationDigestInFlight = false
+        lastProactiveNotificationDigestUpdatedAtNanos = nil
         proactiveSuggestionRecomputePending = false
         autoBubbleSeenSuggestionSurfaceKeys.removeAll()
         notifiedProactiveSuggestionSurfaceKeys.removeAll()
@@ -4901,11 +5047,17 @@ final class SortAssistantCoordinator: ObservableObject {
                 )
             }
             guard let patchToApply else { return }
+            let evidence = liveListActionEvidence(
+                workspaceIds: patchToApply.operations.flatMap(\.itemIds),
+                tabManager: tabManager,
+                now: Date()
+            )
             let result = try applySortPatchThroughGateway(
                 patchToApply,
                 tabManager: tabManager,
                 itemSignals: itemSignals,
-                actor: partialLimit == nil ? "sort_assistant_preview_apply" : "sort_assistant_preview_partial_apply"
+                actor: partialLimit == nil ? "sort_assistant_preview_apply" : "sort_assistant_preview_partial_apply",
+                evidence: evidence
             )
             finishAppliedPreview(
                 result,
@@ -5354,7 +5506,8 @@ final class SortAssistantCoordinator: ObservableObject {
         workspaceIds: [UUID],
         suggestionId: UUID? = nil,
         reason: String?,
-        now: Date = Date()
+        now: Date = Date(),
+        evidence: ActionEvidence? = nil
     ) -> ActionIntent {
         reviewedActionIntent(
             requesterId: "cmux_sprite_socket",
@@ -5364,7 +5517,8 @@ final class SortAssistantCoordinator: ObservableObject {
             workspaceIds: workspaceIds,
             suggestionId: suggestionId,
             reason: reason,
-            now: now
+            now: now,
+            evidence: evidence
         )
     }
 
@@ -5375,7 +5529,8 @@ final class SortAssistantCoordinator: ObservableObject {
         workspaceIds: [UUID],
         suggestionId: UUID? = nil,
         reason: String?,
-        now: Date = Date()
+        now: Date = Date(),
+        evidence: ActionEvidence? = nil
     ) -> ActionIntent {
         reviewedActionIntent(
             requesterId: "cmux_sprite_assistant",
@@ -5385,7 +5540,8 @@ final class SortAssistantCoordinator: ObservableObject {
             workspaceIds: workspaceIds,
             suggestionId: suggestionId,
             reason: reason,
-            now: now
+            now: now,
+            evidence: evidence
         )
     }
 
@@ -5397,7 +5553,8 @@ final class SortAssistantCoordinator: ObservableObject {
         workspaceIds: [UUID],
         suggestionId: UUID? = nil,
         reason: String?,
-        now: Date
+        now: Date,
+        evidence: ActionEvidence? = nil
     ) -> ActionIntent {
         ActionIntent(
             id: UUID(),
@@ -5405,8 +5562,25 @@ final class SortAssistantCoordinator: ObservableObject {
             kind: kind,
             arguments: arguments,
             reason: reason,
-            evidence: actionEvidence(workspaceIds: workspaceIds, suggestionId: suggestionId, now: now),
+            evidence: evidence ?? actionEvidence(workspaceIds: workspaceIds, suggestionId: suggestionId, now: now),
             createdAt: now
+        )
+    }
+
+    private func liveListActionEvidence(
+        workspaceIds: [UUID],
+        tabManager: TabManager,
+        suggestionId: UUID? = nil,
+        now: Date
+    ) -> ActionEvidence {
+        let liveWorkspaceIds = Set(tabManager.tabs.map(\.id))
+        let targetIds = orderedUniqueSortAssistant(workspaceIds).filter(liveWorkspaceIds.contains)
+        let revision = SortEngine.revision(for: tabManager.tabs)
+        return ActionEvidence(
+            snapshotVersions: Dictionary(uniqueKeysWithValues: targetIds.map { ($0, revision) }),
+            snapshotUpdatedAt: Dictionary(uniqueKeysWithValues: targetIds.map { ($0, now) }),
+            suggestionId: suggestionId ?? latestResult?.id,
+            rankingSnapshotId: nil
         )
     }
 
@@ -5576,9 +5750,11 @@ final class SortAssistantCoordinator: ObservableObject {
         tabManager: TabManager,
         itemSignals: [UUID: SortAssistantSortContext.ItemSignals] = [:],
         actor: String,
-        requesterId: String = "cmux_sprite_assistant"
+        requesterId: String = "cmux_sprite_assistant",
+        evidence: ActionEvidence? = nil
     ) throws -> SortEngineApplyResult {
         let affectedWorkspaceIds = orderedUniqueSortAssistant(patch.operations.flatMap(\.itemIds))
+        let now = Date()
         let intent = reviewedActionIntent(
             requesterId: requesterId,
             kind: .applySort,
@@ -5589,7 +5765,8 @@ final class SortAssistantCoordinator: ObservableObject {
             ],
             workspaceIds: affectedWorkspaceIds,
             reason: patch.rationale,
-            now: Date()
+            now: now,
+            evidence: evidence
         )
         var appliedResult: SortEngineApplyResult?
         let review = try submitReviewedAction(intent) {
@@ -7287,6 +7464,7 @@ final class SortAssistantCoordinator: ObservableObject {
             return nil
         }
         let patch: SortPatch
+        let isApplyingPendingPreview: Bool
         if let pendingPreviewPatch,
            patchId == nil || pendingPreviewPatch.id == patchId {
             patch = SortPatch(
@@ -7298,6 +7476,7 @@ final class SortAssistantCoordinator: ObservableObject {
                 confidence: pendingPreviewPatch.confidence,
                 requiresConfirmation: false
             )
+            isApplyingPendingPreview = true
         } else if let itemIds, !itemIds.isEmpty {
             patch = sortOperator.makeBatchPatch(
                 orderedIds: itemIds,
@@ -7305,10 +7484,19 @@ final class SortAssistantCoordinator: ObservableObject {
                 rationale: nil,
                 requiresConfirmation: false
             )
+            isApplyingPendingPreview = false
         } else {
             return nil
         }
         let affectedWorkspaceIds = patch.operations.flatMap(\.itemIds)
+        let now = Date()
+        let evidence = isApplyingPendingPreview
+            ? liveListActionEvidence(
+                workspaceIds: affectedWorkspaceIds,
+                tabManager: tabManager,
+                now: now
+            )
+            : nil
         let intent = socketActionIntent(
             kind: .applySort,
             route: .applySort,
@@ -7317,7 +7505,9 @@ final class SortAssistantCoordinator: ObservableObject {
                 "itemIds": affectedWorkspaceIds.map(\.uuidString).joined(separator: ","),
             ],
             workspaceIds: affectedWorkspaceIds,
-            reason: patch.rationale
+            reason: patch.rationale,
+            now: now,
+            evidence: evidence
         )
         var payload: [String: Any]?
         do {

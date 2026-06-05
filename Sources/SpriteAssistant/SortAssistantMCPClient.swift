@@ -5,6 +5,7 @@ import MCP
 struct SortAssistantMCPClient: Sendable {
     private static let runTimeoutSeconds: TimeInterval = 60
     private static let proactiveNotificationDigestTimeoutSeconds: TimeInterval = 18
+    private static let claudeSessionInUseRetryDelays: [TimeInterval] = [0.25, 0.75, 1.5]
     private static let semanticRouterServerName = "cmux_semantic_router"
     private static let semanticRouterToolName = "route"
     private static let semanticRouterSearchToolName = "search"
@@ -99,7 +100,7 @@ struct SortAssistantMCPClient: Sendable {
         request.debugSession?.log(
             "notificationDigest.claude.begin items=\(request.items.count) sessionReused=\(request.claudeSessionReused ? 1 : 0) \(SortAssistantClaudeCodeRuntime.debugSummary(sessionId: request.claudeSessionId, resumeSession: request.claudeSessionReused))"
         )
-        let output = try runClaudeCode(
+        let output = try runClaudeCodeRetryingSessionInUse(
             executable: executable,
             arguments: arguments,
             timeoutSeconds: proactiveNotificationDigestTimeoutSeconds,
@@ -140,15 +141,14 @@ struct SortAssistantMCPClient: Sendable {
     }
 
     private static let proactiveNotificationDigestSystemPrompt = """
-        You are cmux sprite's notification summarizer. Merge a burst of workspace notifications into one concise semantic sentence for the user, and decide which individual cards are less important or redundant enough to render collapsed.
+        You are cmux sprite's notification summarizer. Merge a burst of workspace notifications into one concise semantic sentence for the user, and choose the single most important notification to keep visible.
         Return only JSON: {"sentence":"...","folded_ids":["..."]}.
         Requirements:
         - exactly one sentence
         - no Markdown, no bullets, no emoji
         - preserve the important action and workspace names
-        - folded_ids must contain only notification ids from the input
-        - fold items that are redundant, low urgency, or safely covered by the sentence
-        - never fold every item unless all items are redundant or low urgency
+        - folded_ids must contain every notification id except the single most important one
+        - never fold the most important notification
         - keep it under 180 characters when possible
         - do not invent facts
         """
@@ -187,13 +187,16 @@ struct SortAssistantMCPClient: Sendable {
            let normalized = normalizedDigestSentence(sentence) {
             return SortAssistantProactiveNotificationDigestResult(
                 sentence: normalized,
-                foldedSuggestionIds: foldedSuggestionIds(from: object, validItems: items)
+                foldedSuggestionIds: singleVisibleFoldedSuggestionIds(
+                    requestedFoldedIds: foldedSuggestionIds(from: object, validItems: items),
+                    validItems: items
+                )
             )
         }
         guard let sentence = normalizedDigestSentence(trimmed) else { return nil }
         return SortAssistantProactiveNotificationDigestResult(
             sentence: sentence,
-            foldedSuggestionIds: []
+            foldedSuggestionIds: singleVisibleFoldedSuggestionIds(requestedFoldedIds: [], validItems: items)
         )
     }
 
@@ -302,6 +305,15 @@ struct SortAssistantMCPClient: Sendable {
         return Set(rawStrings.compactMap(UUID.init(uuidString:)).filter { validIds.contains($0) })
     }
 
+    private static func singleVisibleFoldedSuggestionIds(
+        requestedFoldedIds: Set<UUID>,
+        validItems: [SortAssistantProactiveNotificationDigestItem]
+    ) -> Set<UUID> {
+        guard let primaryId = validItems.first?.id else { return [] }
+        let nonPrimaryIds = Set(validItems.dropFirst().map(\.id))
+        return requestedFoldedIds.union(nonPrimaryIds).subtracting([primaryId])
+    }
+
     private static func normalizedDigestSentence(_ text: String) -> String? {
         let normalized = text
             .replacingOccurrences(of: "\n", with: " ")
@@ -386,7 +398,7 @@ struct SortAssistantMCPClient: Sendable {
             "mcp.claude.begin exposure=\(mcpConfig.exposureMode.rawValue) allowedTools=\(mcpConfig.allowedTools.count) externalAllowedTools=\(mcpConfig.externalAllowedTools.count) allowedToolNames=\(mcpConfig.allowedTools.joined(separator: ",")) externalServers=\(mcpConfig.externalServerNames.joined(separator: ",")) mode=\(request.route.mode.rawValue) promptProfile=\(promptBundle.profile.rawValue) routedPromptProfile=\(routedPromptBundle.profile.rawValue) promptFragments=\(routedPromptBundle.fragmentNames.joined(separator: ",")) routeSteps=\(request.routeSteps.debugDescriptionJoined) adjustment=\(request.routeAdjustment.debugDescription) scopeRefresh=\(request.requiresMCPScopeRefresh ? 1 : 0) scopeReason=\(request.scopeRefreshReason) systemPromptChars=\(promptBundle.systemPrompt.count) userPromptChars=\(promptBundle.userPrompt.count) routedSystemPromptChars=\(routedPromptBundle.systemPrompt.count) routedUserPromptChars=\(routedPromptBundle.userPrompt.count) includeContext=\(request.includeConversationContext ? 1 : 0) sessionReused=\(executionResumeSession ? 1 : 0) sessionReason=\(request.claudeSessionReason) \(SortAssistantClaudeCodeRuntime.debugSummary(sessionId: request.claudeSessionId, resumeSession: executionResumeSession))"
         )
         let claudeStart = SortAssistantDebugSession.now()
-        let output = try runClaudeCode(
+        let output = try runClaudeCodeRetryingSessionInUse(
             executable: executable,
             arguments: arguments,
             timeoutSeconds: runTimeoutSeconds,
@@ -453,7 +465,7 @@ struct SortAssistantMCPClient: Sendable {
             "mcp.scope.claude.begin allowedTools=\(mcpConfig.allowedTools.count) allowedToolNames=\(mcpConfig.allowedTools.joined(separator: ",")) sessionReused=\(request.claudeSessionReused ? 1 : 0) \(SortAssistantClaudeCodeRuntime.debugSummary(sessionId: request.claudeSessionId, resumeSession: request.claudeSessionReused))"
         )
         let scopeStart = SortAssistantDebugSession.now()
-        let output = try runClaudeCode(
+        let output = try runClaudeCodeRetryingSessionInUse(
             executable: executable,
             arguments: arguments,
             timeoutSeconds: runTimeoutSeconds,
@@ -1575,6 +1587,42 @@ struct SortAssistantMCPClient: Sendable {
             stderr: String(data: stderrData, encoding: .utf8) ?? "",
             status: process.terminationStatus
         )
+    }
+
+    private static func runClaudeCodeRetryingSessionInUse(
+        executable: String,
+        arguments: [String],
+        timeoutSeconds: TimeInterval,
+        debugSession: SortAssistantDebugSession?,
+        progressHandler: SortAssistantMCPProgressHandler?
+    ) throws -> ProcessOutput {
+        var output = try runClaudeCode(
+            executable: executable,
+            arguments: arguments,
+            timeoutSeconds: timeoutSeconds,
+            debugSession: debugSession,
+            progressHandler: progressHandler
+        )
+        for (index, delay) in claudeSessionInUseRetryDelays.enumerated() where output.status != 0 {
+            guard isClaudeSessionInUseError(output) else { break }
+            debugSession?.log(
+                "mcp.claude.sessionInUseRetry attempt=\(index + 1) delayMs=\(Int((delay * 1000).rounded()))"
+            )
+            Thread.sleep(forTimeInterval: delay)
+            output = try runClaudeCode(
+                executable: executable,
+                arguments: arguments,
+                timeoutSeconds: timeoutSeconds,
+                debugSession: debugSession,
+                progressHandler: progressHandler
+            )
+        }
+        return output
+    }
+
+    private static func isClaudeSessionInUseError(_ output: ProcessOutput) -> Bool {
+        let text = "\(output.stderr)\n\(output.stdout)".lowercased()
+        return text.contains("session id") && text.contains("already in use")
     }
 
     private static func executableName(_ executable: String) -> String {

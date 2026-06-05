@@ -168120,6 +168120,23 @@
         }
       }
     },
+    "sortAssistant.mcp.claudeSessionInUse": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code is still finishing the previous Sprite request. Try again in a moment."
+          }
+        },
+        "ja": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Claude Code は前の Sprite リクエストをまだ終了処理中です。少し待ってからもう一度お試しください。"
+          }
+        }
+      }
+    },
     "sortAssistant.mcp.failed": {
       "extractionState": "manual",
       "localizations": {

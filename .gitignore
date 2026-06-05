@@ -60,3 +60,7 @@ migrate-progress.md
 
 # Local dogfood scratch (screenshots, recordings) - never commit
 artifacts/
+
+# Local diagnostic logs - never commit
+/crash.log
+/error.log

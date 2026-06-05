@@ -117,14 +117,12 @@ struct SortAssistantThreadView: View {
             if let confirmation = coordinator.semanticActionConfirmation {
                 semanticActionConfirmationCard(confirmation)
             }
-            if let digest = coordinator.proactiveSuggestionDigest,
-               !digest.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                proactiveSuggestionDigest(digest)
-            }
-            if !coordinator.visibleSuggestions.isEmpty {
+            if let suggestion = primarySuggestionForDisplay {
+                let digest = proactiveSuggestionDigestForDisplay
                 suggestionCards(
-                    coordinator.visibleSuggestions,
-                    digest: coordinator.proactiveSuggestionDigest
+                    [suggestion],
+                    digest: digest,
+                    semanticTitle: semanticTitle(for: digest)
                 )
             }
             if let prompt = coordinator.choicePrompt {
@@ -262,30 +260,23 @@ struct SortAssistantThreadView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func proactiveSuggestionDigest(_ digest: SortAssistantProactiveSuggestionDigest) -> some View {
-        Text(digest.text)
-            .font(.system(size: 11, weight: .medium))
-            .foregroundStyle(.primary)
-            .fixedSize(horizontal: false, vertical: true)
-            .textSelection(.enabled)
-            .padding(.horizontal, 2)
-    }
-
     private func suggestionCards(
         _ suggestions: [ProactiveSuggestion],
-        digest: SortAssistantProactiveSuggestionDigest?
+        digest: SortAssistantProactiveSuggestionDigest?,
+        semanticTitle: String? = nil
     ) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(String(localized: "sortAssistant.suggestions.title", defaultValue: "Suggestions"))
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(.secondary)
 
-            ForEach(Array(suggestions.prefix(3))) { suggestion in
+            ForEach(Array(suggestions.prefix(1))) { suggestion in
                 SortAssistantSuggestionCardView(
                     suggestion: suggestion,
                     workspaceMetadata: workspaceMetadata(for: suggestion.workspaceId).displayText,
                     icon: suggestionIcon(for: suggestion.type),
                     isCollapsed: digest?.foldedSuggestionIds.contains(suggestion.id) ?? false,
+                    semanticTitle: semanticTitle,
                     onOpen: {
                         coordinator.acceptVisibleSuggestion(suggestion)
                     },
@@ -296,6 +287,36 @@ struct SortAssistantThreadView: View {
             }
         }
         .accessibilityIdentifier(SortAssistantAccessibility.suggestionList)
+    }
+
+    private func primarySuggestion(for digest: SortAssistantProactiveSuggestionDigest) -> ProactiveSuggestion? {
+        for suggestionId in digest.suggestionIds {
+            if let suggestion = coordinator.visibleSuggestions.first(where: { $0.id == suggestionId }) {
+                return suggestion
+            }
+        }
+        return coordinator.visibleSuggestions.first
+    }
+
+    private var primarySuggestionForDisplay: ProactiveSuggestion? {
+        if let digest = proactiveSuggestionDigestForDisplay {
+            return primarySuggestion(for: digest)
+        }
+        return coordinator.visibleSuggestions.first
+    }
+
+    private var proactiveSuggestionDigestForDisplay: SortAssistantProactiveSuggestionDigest? {
+        guard let digest = coordinator.proactiveSuggestionDigest,
+              !digest.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return digest
+    }
+
+    private func semanticTitle(for digest: SortAssistantProactiveSuggestionDigest?) -> String? {
+        guard let digest else { return nil }
+        let text = digest.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 
     private func suggestionIcon(for type: String) -> String {
@@ -1390,6 +1411,7 @@ private struct SortAssistantSuggestionCardView: View {
     let workspaceMetadata: String
     let icon: String
     let isCollapsed: Bool
+    let semanticTitle: String?
     let onOpen: () -> Void
     let onDismiss: () -> Void
 
@@ -1402,17 +1424,18 @@ private struct SortAssistantSuggestionCardView: View {
                     .frame(width: 16, height: 16)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(suggestion.title)
+                    Text(semanticTitle ?? suggestion.title)
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(.primary)
-                        .lineLimit(2)
+                        .lineLimit(semanticTitle == nil ? 2 : 3)
                         .fixedSize(horizontal: false, vertical: true)
                         .accessibilityIdentifier(SortAssistantAccessibility.suggestionCard(suggestion))
                     Text(workspaceMetadata)
                         .font(.system(size: 9, weight: .medium))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
-                    if !isCollapsed,
+                    if semanticTitle == nil,
+                       !isCollapsed,
                        let reason = suggestion.reason?.trimmingCharacters(in: .whitespacesAndNewlines),
                        !reason.isEmpty {
                         Text(reason)

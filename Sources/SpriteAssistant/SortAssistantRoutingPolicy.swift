@@ -67,6 +67,7 @@ let sortAssistantKnownInternalTools: Set<String> = [
     "sprite_memory_forget",
     "sprite_memory_query",
     "sprite_memory_write",
+    "sprite_memory_write_candidate",
     "workspace_color_clear",
     "workspace_color_get",
     "workspace_color_set",
@@ -90,6 +91,7 @@ let sortAssistantMutatingInternalTools: Set<String> = [
     "sort_undo",
     "sprite_memory_forget",
     "sprite_memory_write",
+    "sprite_memory_write_candidate",
     "workspace_color_clear",
     "workspace_color_set",
 ]

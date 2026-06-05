@@ -24,6 +24,9 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
         // Remove the debounce delay so the recompute Task is awaitable deterministically.
         SortAssistantCoordinator.debugProactiveSuggestionRecomputeDebounceOverrideNanos = 0
         SortAssistantCoordinator.debugProactiveSuggestionDigestDebounceOverrideNanos = 0
+        SortAssistantCoordinator.debugProactiveNotificationDigestDebounceOverrideNanos = nil
+        SortAssistantCoordinator.debugProactiveNotificationDigestMinIntervalOverrideNanos = nil
+        SortAssistantCoordinator.debugProactiveDigestDelayOverrideNanos = nil
         SortAssistantCoordinator.debugUseDeterministicProactiveDigestForTesting = true
         SortAssistantCoordinator.shared.debugResetProactiveSurfaceStateForTesting()
     }
@@ -35,6 +38,9 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
         UserDefaults.standard.removeObject(forKey: ProactiveSuggestionNotificationsSettings.key)
         SortAssistantCoordinator.debugProactiveSuggestionRecomputeDebounceOverrideNanos = nil
         SortAssistantCoordinator.debugProactiveSuggestionDigestDebounceOverrideNanos = nil
+        SortAssistantCoordinator.debugProactiveNotificationDigestDebounceOverrideNanos = nil
+        SortAssistantCoordinator.debugProactiveNotificationDigestMinIntervalOverrideNanos = nil
+        SortAssistantCoordinator.debugProactiveDigestDelayOverrideNanos = nil
         SortAssistantCoordinator.debugUseDeterministicProactiveDigestForTesting = false
         super.tearDown()
     }
@@ -288,7 +294,7 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
         })
     }
 
-    func testDigestMergesMultipleNotificationSuggestionsAndKeepsFoldedCardOpenable() async throws {
+    func testDigestMergesMultipleNotificationSuggestionsAndKeepsOnlyPrimaryVisible() async throws {
         let coordinator = SortAssistantCoordinator.shared
         let store = TerminalNotificationStore.shared
         let appDelegate = AppDelegate.shared ?? AppDelegate()
@@ -373,7 +379,12 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
         XCTAssertTrue(digest.text.contains("Release"))
         XCTAssertTrue(
             digest.foldedSuggestionIds.contains(foldedSuggestion.id),
-            "The lower-priority merge-ready card should be collapsed by the digest while remaining available."
+            "The lower-priority merge-ready card should be folded by the digest."
+        )
+        XCTAssertEqual(
+            digest.foldedSuggestionIds,
+            Set(digest.suggestionIds.dropFirst()),
+            "The Sprite notification digest should keep only the most important suggestion visible."
         )
         XCTAssertTrue(coordinator.visibleSuggestions.contains { $0.id == foldedSuggestion.id })
         XCTAssertEqual(deliveredNotifications.count, 1)
@@ -410,7 +421,324 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
 
         XCTAssertEqual(result.sentence, "Review a debug-injected suggestion in the livesh workspace.")
         XCTAssertFalse(result.sentence.contains("json"))
-        XCTAssertEqual(result.foldedSuggestionIds, Set([itemId]))
+        XCTAssertTrue(
+            result.foldedSuggestionIds.isEmpty,
+            "A single digest item is the primary item and must remain visible even if Claude asks to fold it."
+        )
+    }
+
+    func testDigestParserFoldsEveryNonPrimaryNotification() throws {
+        let primaryId = UUID(uuidString: "99999999-9999-9999-9999-999999999999")!
+        let secondaryId = UUID(uuidString: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")!
+        let workspaceId = UUID(uuidString: "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")!
+        let result = try XCTUnwrap(SortAssistantMCPClient.proactiveNotificationDigestResultForTesting(
+            from: #"{"sentence":"Review Queue needs your decision; Release is ready to merge.","folded_ids":[]}"#,
+            items: [
+                SortAssistantProactiveNotificationDigestItem(
+                    id: primaryId,
+                    workspaceId: workspaceId,
+                    workspaceTitle: "Review Queue",
+                    type: ProactiveSuggestionTypes.reviewAgentWaitingUser,
+                    title: "Review the agent's question",
+                    reason: "Agent is waiting for your decision.",
+                    confidence: 0.96
+                ),
+                SortAssistantProactiveNotificationDigestItem(
+                    id: secondaryId,
+                    workspaceId: workspaceId,
+                    workspaceTitle: "Release",
+                    type: ProactiveSuggestionTypes.mergeReady,
+                    title: "Merge the release PR",
+                    reason: "Release is ready to merge.",
+                    confidence: 0.95
+                ),
+            ]
+        ))
+
+        XCTAssertEqual(result.foldedSuggestionIds, Set([secondaryId]))
+    }
+
+    func testNotificationDigestBatchesBurstAndThrottlesUpdates() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        let store = TerminalNotificationStore.shared
+        let appDelegate = AppDelegate.shared ?? AppDelegate()
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+
+        let originalTabManager = appDelegate.tabManager
+        let originalNotificationStore = appDelegate.notificationStore
+        let originalAppFocusOverride = AppFocusState.overrideIsFocused
+        var deliveredNotifications: [TerminalNotification] = []
+
+        SortAssistantCoordinator.debugProactiveNotificationDigestDebounceOverrideNanos = 80_000_000
+        SortAssistantCoordinator.debugProactiveNotificationDigestMinIntervalOverrideNanos = 500_000_000
+        UserDefaults.standard.set(true, forKey: flagKey)
+        UserDefaults.standard.set(true, forKey: ProactiveSuggestionNotificationsSettings.key)
+        await coordinator.workspaceSnapshotStore.replace(AssistantWorkingContext(
+            activeWorkspaceId: nil,
+            snapshots: [],
+            freshness: ContextFreshness(providers: [], overallConfidence: 1),
+            activeSuggestions: [],
+            latestRanking: nil
+        ))
+        store.replaceNotificationsForTesting([])
+        store.configureNotificationDeliveryHandlerForTesting { _, notification in
+            deliveredNotifications.append(notification)
+        }
+        appDelegate.tabManager = tabManager
+        appDelegate.notificationStore = store
+        AppFocusState.overrideIsFocused = false
+        defer {
+            coordinator.debugResetProactiveSurfaceStateForTesting()
+            store.replaceNotificationsForTesting([])
+            store.resetNotificationDeliveryHandlerForTesting()
+            appDelegate.tabManager = originalTabManager
+            appDelegate.notificationStore = originalNotificationStore
+            AppFocusState.overrideIsFocused = originalAppFocusOverride
+        }
+
+        let reviewWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        let ciWorkspace = tabManager.addWorkspace(
+            title: "CI",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        let releaseWorkspace = tabManager.addWorkspace(
+            title: "Release",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        coordinator.attach(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+
+        await coordinator.workspaceSnapshotStore.write(
+            Self.waitingUserSnapshot(
+                workspaceId: reviewWorkspace.id,
+                title: "Review Queue",
+                contextHash: "digest-burst-review"
+            )
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [reviewWorkspace.id], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        try await Task.sleep(nanoseconds: 20_000_000)
+        await coordinator.workspaceSnapshotStore.write(
+            Self.attentionSnapshot(
+                workspaceId: ciWorkspace.id,
+                title: "CI",
+                status: "ci_failed",
+                attention: 0.95,
+                nextAction: "Fix the failed CI job",
+                contextHash: "digest-burst-ci",
+                nativeOrder: 1
+            )
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [ciWorkspace.id], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        XCTAssertTrue(
+            deliveredNotifications.isEmpty,
+            "Notifications arriving during the digest delay window should be summarized together, not delivered immediately."
+        )
+
+        await coordinator.debugAwaitProactiveSuggestionDigestForTesting()
+        XCTAssertEqual(deliveredNotifications.count, 1)
+        XCTAssertTrue(deliveredNotifications[0].body.contains("Review Queue"))
+        XCTAssertTrue(deliveredNotifications[0].body.contains("CI"))
+
+        await coordinator.workspaceSnapshotStore.write(
+            Self.attentionSnapshot(
+                workspaceId: releaseWorkspace.id,
+                title: "Release",
+                status: "ready_to_merge",
+                attention: 0.95,
+                nextAction: "Merge the release PR",
+                contextHash: "digest-throttle-release",
+                nativeOrder: 2
+            )
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [releaseWorkspace.id], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(
+            deliveredNotifications.count,
+            1,
+            "A second notification digest should wait for the minimum update interval, even after its debounce elapsed."
+        )
+
+        await coordinator.debugAwaitProactiveSuggestionDigestForTesting()
+        XCTAssertEqual(deliveredNotifications.count, 2)
+        XCTAssertTrue(deliveredNotifications[1].body.contains("Release"))
+    }
+
+    func testDelayedNotificationDigestDoesNotDeliverAfterAppRegainsFocus() async throws {
+        try await assertDelayedNotificationDigestDoesNotDeliverAfterGateChange(contextHash: "digest-focus-cancel") {
+            AppFocusState.overrideIsFocused = true
+        }
+    }
+
+    func testDelayedNotificationDigestDoesNotDeliverAfterNotificationSettingDisabled() async throws {
+        try await assertDelayedNotificationDigestDoesNotDeliverAfterGateChange(contextHash: "digest-setting-cancel") {
+            UserDefaults.standard.set(false, forKey: ProactiveSuggestionNotificationsSettings.key)
+        }
+    }
+
+    func testNotificationDigestWaitsForInFlightSummaryBeforeThrottledUpdate() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        let store = TerminalNotificationStore.shared
+        let appDelegate = AppDelegate.shared ?? AppDelegate()
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+
+        let originalTabManager = appDelegate.tabManager
+        let originalNotificationStore = appDelegate.notificationStore
+        let originalAppFocusOverride = AppFocusState.overrideIsFocused
+        var deliveredNotifications: [TerminalNotification] = []
+
+        SortAssistantCoordinator.debugProactiveNotificationDigestDebounceOverrideNanos = 40_000_000
+        SortAssistantCoordinator.debugProactiveNotificationDigestMinIntervalOverrideNanos = 220_000_000
+        SortAssistantCoordinator.debugProactiveDigestDelayOverrideNanos = 180_000_000
+        UserDefaults.standard.set(true, forKey: flagKey)
+        UserDefaults.standard.set(true, forKey: ProactiveSuggestionNotificationsSettings.key)
+        await coordinator.workspaceSnapshotStore.replace(AssistantWorkingContext(
+            activeWorkspaceId: nil,
+            snapshots: [],
+            freshness: ContextFreshness(providers: [], overallConfidence: 1),
+            activeSuggestions: [],
+            latestRanking: nil
+        ))
+        store.replaceNotificationsForTesting([])
+        store.configureNotificationDeliveryHandlerForTesting { _, notification in
+            deliveredNotifications.append(notification)
+        }
+        appDelegate.tabManager = tabManager
+        appDelegate.notificationStore = store
+        AppFocusState.overrideIsFocused = false
+        defer {
+            coordinator.debugResetProactiveSurfaceStateForTesting()
+            store.replaceNotificationsForTesting([])
+            store.resetNotificationDeliveryHandlerForTesting()
+            appDelegate.tabManager = originalTabManager
+            appDelegate.notificationStore = originalNotificationStore
+            AppFocusState.overrideIsFocused = originalAppFocusOverride
+        }
+
+        let firstWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        let secondWorkspace = tabManager.addWorkspace(
+            title: "CI",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        coordinator.attach(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+
+        await coordinator.workspaceSnapshotStore.write(
+            Self.waitingUserSnapshot(
+                workspaceId: firstWorkspace.id,
+                title: "Review Queue",
+                contextHash: "digest-inflight-review"
+            )
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [firstWorkspace.id], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        try await Task.sleep(nanoseconds: 90_000_000)
+        await coordinator.workspaceSnapshotStore.write(
+            Self.attentionSnapshot(
+                workspaceId: secondWorkspace.id,
+                title: "CI",
+                status: "ci_failed",
+                attention: 0.95,
+                nextAction: "Fix the failed CI job",
+                contextHash: "digest-inflight-ci",
+                nativeOrder: 1
+            )
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [secondWorkspace.id], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        await waitForDeliveredNotificationCount(1, in: { deliveredNotifications.count })
+        XCTAssertEqual(deliveredNotifications.count, 1)
+        XCTAssertTrue(deliveredNotifications[0].body.contains("Review Queue"))
+
+        try await Task.sleep(nanoseconds: 120_000_000)
+        XCTAssertEqual(
+            deliveredNotifications.count,
+            1,
+            "A notification arriving while Claude is summarizing should wait for the first update and the minimum interval."
+        )
+
+        await coordinator.debugAwaitProactiveSuggestionDigestForTesting()
+        XCTAssertEqual(deliveredNotifications.count, 2)
+        XCTAssertTrue(deliveredNotifications[1].body.contains("CI"))
+    }
+
+    func testActiveDigestCancellationPreventsStaleSummaryOverwrite() async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        UserDefaults.standard.set(true, forKey: flagKey)
+        SortAssistantCoordinator.debugProactiveDigestDelayOverrideNanos = 180_000_000
+
+        let staleWorkspaceId = UUID(uuidString: "cccccccc-cccc-cccc-cccc-cccccccccccc")!
+        let currentWorkspaceId = UUID(uuidString: "dddddddd-dddd-dddd-dddd-dddddddddddd")!
+
+        await coordinator.workspaceSnapshotStore.replace(Self.workingContext(snapshots: [
+            Self.attentionSnapshot(
+                workspaceId: staleWorkspaceId,
+                title: "Stale Queue",
+                status: "waiting_user",
+                attention: 0.95,
+                nextAction: "Review the stale queue",
+                contextHash: "digest-race-stale"
+            ),
+        ]))
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [staleWorkspaceId], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+
+        try await Task.sleep(nanoseconds: 40_000_000)
+
+        await coordinator.workspaceSnapshotStore.replace(Self.workingContext(snapshots: [
+            Self.attentionSnapshot(
+                workspaceId: currentWorkspaceId,
+                title: "Current Queue",
+                status: "waiting_user",
+                attention: 0.95,
+                nextAction: "Review the current queue",
+                contextHash: "digest-race-current"
+            ),
+        ]))
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [currentWorkspaceId], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+        await coordinator.debugAwaitProactiveSuggestionDigestForTesting()
+
+        let digest = try XCTUnwrap(coordinator.proactiveSuggestionDigest)
+        XCTAssertTrue(digest.text.contains("Review the current queue"))
+        XCTAssertFalse(
+            digest.text.contains("Review the stale queue"),
+            "A canceled active-suggestions digest must not publish after a newer digest has been scheduled."
+        )
+        XCTAssertEqual(coordinator.visibleSuggestions.map(\.workspaceId), [currentWorkspaceId])
+        await coordinator.workspaceSnapshotStore.replace(Self.workingContext(snapshots: []))
     }
 
     func testRealAgentHookEventTriggersProactiveSuggestionWhenDefaultEnabled() async throws {
@@ -446,6 +774,16 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
         XCTAssertEqual(
             coordinator.proactiveBadgeByWorkspaceId()[workspaceId]?.type,
             ProactiveSuggestionTypes.workspaceNeedsAttention
+        )
+    }
+
+    private static func workingContext(snapshots: [WorkspaceSnapshot]) -> AssistantWorkingContext {
+        AssistantWorkingContext(
+            activeWorkspaceId: nil,
+            snapshots: snapshots,
+            freshness: ContextFreshness(providers: [], overallConfidence: snapshots.isEmpty ? 0 : 1),
+            activeSuggestions: [],
+            latestRanking: nil
         )
     }
 
@@ -514,6 +852,89 @@ final class ProactiveSpriteSuggestionLoopTests: XCTestCase {
             freshness: freshness,
             contextHash: contextHash
         )
+    }
+
+    private func waitForDeliveredNotificationCount(
+        _ expectedCount: Int,
+        in count: @escaping () -> Int
+    ) async {
+        for _ in 0..<50 {
+            if count() >= expectedCount {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+        }
+    }
+
+    private func assertDelayedNotificationDigestDoesNotDeliverAfterGateChange(
+        contextHash: String,
+        changeGate: () -> Void,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let coordinator = SortAssistantCoordinator.shared
+        let store = TerminalNotificationStore.shared
+        let appDelegate = AppDelegate.shared ?? AppDelegate()
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+
+        let originalTabManager = appDelegate.tabManager
+        let originalNotificationStore = appDelegate.notificationStore
+        let originalAppFocusOverride = AppFocusState.overrideIsFocused
+        var deliveredNotifications: [TerminalNotification] = []
+
+        SortAssistantCoordinator.debugProactiveNotificationDigestDebounceOverrideNanos = 120_000_000
+        SortAssistantCoordinator.debugProactiveNotificationDigestMinIntervalOverrideNanos = 0
+        UserDefaults.standard.set(true, forKey: flagKey)
+        UserDefaults.standard.set(true, forKey: ProactiveSuggestionNotificationsSettings.key)
+        await coordinator.workspaceSnapshotStore.replace(AssistantWorkingContext(
+            activeWorkspaceId: nil,
+            snapshots: [],
+            freshness: ContextFreshness(providers: [], overallConfidence: 1),
+            activeSuggestions: [],
+            latestRanking: nil
+        ))
+        store.replaceNotificationsForTesting([])
+        store.configureNotificationDeliveryHandlerForTesting { _, notification in
+            deliveredNotifications.append(notification)
+        }
+        appDelegate.tabManager = tabManager
+        appDelegate.notificationStore = store
+        AppFocusState.overrideIsFocused = false
+        defer {
+            coordinator.debugResetProactiveSurfaceStateForTesting()
+            store.replaceNotificationsForTesting([])
+            store.resetNotificationDeliveryHandlerForTesting()
+            appDelegate.tabManager = originalTabManager
+            appDelegate.notificationStore = originalNotificationStore
+            AppFocusState.overrideIsFocused = originalAppFocusOverride
+        }
+
+        let reviewWorkspace = tabManager.addWorkspace(
+            title: "Review Queue",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        coordinator.attach(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+
+        await coordinator.workspaceSnapshotStore.write(
+            Self.waitingUserSnapshot(
+                workspaceId: reviewWorkspace.id,
+                title: "Review Queue",
+                contextHash: contextHash
+            )
+        )
+        await coordinator.handleContextAgentBatch(
+            ContextAgentBatchResult(updatedWorkspaceIds: [reviewWorkspace.id], failures: [])
+        )
+        await coordinator.debugAwaitProactiveSuggestionRecompute()
+        XCTAssertTrue(deliveredNotifications.isEmpty, file: file, line: line)
+
+        changeGate()
+        await coordinator.debugAwaitProactiveSuggestionDigestForTesting()
+
+        XCTAssertTrue(deliveredNotifications.isEmpty, file: file, line: line)
+        XCTAssertEqual(store.notifications.count, 0, file: file, line: line)
     }
 
     private func waitForSuggestion(workspaceId: UUID) async -> ProactiveSuggestion? {

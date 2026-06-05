@@ -6353,6 +6353,16 @@ struct CMUXCLI {
                 required: ["text"]
             ),
             spriteMCPTool(
+                name: "sprite_memory_write_candidate",
+                description: "Write a sprite workspace memory candidate to the current workspace memory.md. Use for project/session facts, not sorting preferences.",
+                properties: [
+                    "text": stringSchema(description: "The sprite memory text to save."),
+                    "sourceSummary": stringSchema(description: "Optional short reason or source for the memory."),
+                    "directory": stringSchema(description: "Optional workspace directory. Defaults to the active workspace directory."),
+                ],
+                required: ["text"]
+            ),
+            spriteMCPTool(
                 name: "sprite_memory_forget",
                 description: "Delete a sprite workspace memory from memory.md by id or by contained text.",
                 properties: [

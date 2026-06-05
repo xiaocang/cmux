@@ -125,6 +125,55 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         XCTAssertTrue(sortAssistantProductionAssistantTools.contains("workspace_digest_get"))
         XCTAssertTrue(sortAssistantProductionAssistantTools.contains("suggestion_accept"))
         XCTAssertTrue(sortAssistantProductionAssistantTools.contains("suggestion_dismiss"))
+        XCTAssertTrue(sortAssistantProductionAssistantTools.contains("sprite_memory_write_candidate"))
+    }
+
+    func testProductionAssistantToolSetMatchesExposedSpriteMCPProductionCatalog() {
+        XCTAssertEqual(sortAssistantProductionAssistantTools, [
+            "assistant_working_context_get",
+            "context_agent_collect",
+            "context_freshness_get",
+            "list_lock",
+            "list_pin",
+            "list_state",
+            "memory_forget",
+            "memory_query",
+            "memory_write_candidate",
+            "proactive_signal_report",
+            "proactive_suggestions_refresh",
+            "ranking_latest_get",
+            "sort_apply",
+            "sort_explain",
+            "sort_preview",
+            "sort_undo",
+            "sprite_memory_forget",
+            "sprite_memory_query",
+            "sprite_memory_write",
+            "sprite_memory_write_candidate",
+            "suggestion_accept",
+            "suggestion_dismiss",
+            "suggestions_active_get",
+            "workspace_color_clear",
+            "workspace_color_get",
+            "workspace_color_set",
+            "workspace_digest_get",
+            "workspace_snapshot_get",
+        ])
+    }
+
+    func testDebugOnlyContextToolSetMatchesOptInSpriteMCPDebugCatalog() {
+        XCTAssertEqual(sortAssistantDebugOnlyContextTools, [
+            "context_collect",
+            "ghpr_context",
+            "ghpr_refresh",
+            "ghpr_status",
+            "github_context",
+            "github_pr_context",
+            "repository_context",
+            "sort_context",
+            "workspace_digest_progress",
+            "workspace_digest_refresh",
+        ])
     }
 
     func testProductionToolNormalizerRejectsDebugContextToolsEvenWhenQualified() {
@@ -2071,6 +2120,57 @@ final class SortAssistantIntentRouterTests: XCTestCase {
         XCTAssertEqual(payload["reviewReasons"] as? [String], ["stale snapshot evidence"])
         XCTAssertEqual(payload["requiresConfirmation"] as? Bool, true)
         XCTAssertEqual(tabManager.tabs.map(\.id), orderBefore)
+    }
+
+    @MainActor
+    func testSocketSortApplyPendingColorPreviewUsesFreshListEvidence() throws {
+        let coordinator = SortAssistantCoordinator.shared
+        coordinator.clearCurrentSession()
+        defer { coordinator.clearCurrentSession() }
+
+        let tabManager = TabManager()
+        let workspaceTabStore = WorkspaceTabStore()
+        let firstUncolored = try XCTUnwrap(tabManager.selectedWorkspace)
+        let redWorkspace = tabManager.addWorkspace(
+            title: "Red Review",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        let secondUncolored = tabManager.addWorkspace(
+            title: "No Color",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        let blueWorkspace = tabManager.addWorkspace(
+            title: "Blue Build",
+            select: false,
+            autoWelcomeIfNeeded: false
+        )
+        tabManager.setTabColor(tabId: redWorkspace.id, color: "#C0392B")
+        tabManager.setTabColor(tabId: blueWorkspace.id, color: "#1565C0")
+        coordinator.attach(tabManager: tabManager, workspaceTabStore: workspaceTabStore)
+
+        let groupedOrder = [
+            redWorkspace.id,
+            blueWorkspace.id,
+            firstUncolored.id,
+            secondUncolored.id,
+        ]
+        let previewPayload = try XCTUnwrap(coordinator.socketSortPreview(
+            goal: "Group by color, place uncolored last",
+            itemIds: groupedOrder
+        ))
+        let patchPayload = try XCTUnwrap(previewPayload["patch"] as? [String: Any])
+        let patchId = try XCTUnwrap((patchPayload["id"] as? String).flatMap(UUID.init(uuidString:)))
+
+        let applyPayload = try XCTUnwrap(coordinator.socketSortApply(
+            patchId: patchId,
+            itemIds: nil
+        ))
+
+        XCTAssertEqual(applyPayload["applied"] as? Bool, true)
+        XCTAssertNil(applyPayload["reviewDecision"])
+        XCTAssertEqual(tabManager.tabs.map(\.id), groupedOrder)
     }
 
     @MainActor

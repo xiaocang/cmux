@@ -43,6 +43,369 @@ final class CMUXOpenCommandTests: XCTestCase {
         }
     }
 
+    private static let spriteMCPProductionSocketToolMethods: [(tool: String, method: String)] = [
+        ("memory_query", "memory.query"),
+        ("memory_write_candidate", "memory.write_candidate"),
+        ("memory_forget", "memory.forget"),
+        ("sprite_memory_query", "sprite.memory.query"),
+        ("sprite_memory_write", "sprite.memory.write"),
+        ("sprite_memory_write_candidate", "sprite.memory.write_candidate"),
+        ("sprite_memory_forget", "sprite.memory.forget"),
+        ("sort_preview", "sort.preview"),
+        ("sort_apply", "sort.apply"),
+        ("sort_undo", "sort.undo"),
+        ("sort_explain", "sort.explain"),
+        ("list_state", "list.state"),
+        ("list_lock", "list.lock"),
+        ("list_pin", "list.pin"),
+        ("assistant_working_context_get", "assistant.working_context.get"),
+        ("workspace_snapshot_get", "workspace.snapshot.get"),
+        ("context_freshness_get", "context.freshness.get"),
+        ("suggestions_active_get", "suggestions.active.get"),
+        ("context_agent_collect", "context.agent.collect"),
+        ("proactive_suggestions_refresh", "proactive.suggestions.refresh"),
+        ("proactive_signal_report", "proactive.signal.report"),
+        ("suggestion_accept", "suggestion.accept"),
+        ("suggestion_dismiss", "suggestion.dismiss"),
+        ("ranking_latest_get", "ranking.latest.get"),
+        ("workspace_color_get", "sprite.workspace_color.get"),
+        ("workspace_color_set", "sprite.workspace_color.set"),
+        ("workspace_color_clear", "sprite.workspace_color.clear"),
+        ("workspace_digest_get", "plugin.digest.get"),
+    ]
+
+    private static let spriteMCPDebugSocketToolMethods: [(tool: String, method: String)] = [
+        ("context_collect", "plugin.context.collect"),
+        ("ghpr_context", "plugin.ghpr.context"),
+        ("github_pr_context", "plugin.ghpr.context"),
+        ("ghpr_status", "plugin.ghpr.status"),
+        ("ghpr_refresh", "plugin.ghpr.refresh"),
+        ("github_context", "github.context"),
+        ("sort_context", "sort.context"),
+        ("workspace_digest_refresh", "plugin.digest.refresh"),
+        ("workspace_digest_progress", "plugin.digest.progress"),
+    ]
+
+    func testSemanticRouterMCPServerReturnsConfiguredRouteBundle() throws {
+        let cliPath = try bundledCLIPath()
+        let payloadURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-semantic-router-\(UUID().uuidString).json", isDirectory: false)
+        let payload: [String: Any] = [
+            "systemPrompt": "system fixture",
+            "userPrompt": "user fixture",
+            "taskPlan": [
+                "steps": [
+                    ["intent": "ask_context"],
+                ],
+            ],
+            "mcpList": [
+                [
+                    "name": "cmux_sprite",
+                    "qualifiedTools": ["mcp__cmux_sprite__assistant_working_context_get"],
+                ],
+            ],
+            "executionAllowedTools": ["mcp__cmux_sprite__assistant_working_context_get"],
+        ]
+        let payloadData = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        try payloadData.write(to: payloadURL, options: .atomic)
+        defer { try? FileManager.default.removeItem(at: payloadURL) }
+
+        var environment = ProcessInfo.processInfo.environment
+        environment["CMUX_CLI_SENTRY_DISABLED"] = "1"
+        environment["CMUX_CLAUDE_HOOK_SENTRY_DISABLED"] = "1"
+        environment["CMUX_SPRITE_SEMANTIC_ROUTER_PAYLOAD_PATH"] = payloadURL.path
+
+        let result = runProcess(
+            executablePath: cliPath,
+            arguments: ["mcp", "semantic-router"],
+            environment: environment,
+            timeout: 5,
+            stdinText: [
+                Self.jsonLine(["jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [:]]),
+                Self.jsonLine([
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "search",
+                        "arguments": ["goal": "summarize context"],
+                    ],
+                ]),
+                Self.jsonLine([
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": [
+                        "name": "route",
+                        "arguments": ["goal": "apply route"],
+                    ],
+                ]),
+            ].joined(separator: "\n") + "\n"
+        )
+
+        XCTAssertFalse(result.timedOut, result.stderr)
+        XCTAssertEqual(result.status, 0, result.stderr)
+
+        let toolsResult = try mcpResult(id: 1, stdout: result.stdout)
+        let tools = try XCTUnwrap(toolsResult["tools"] as? [[String: Any]])
+        XCTAssertEqual(Set(tools.compactMap { $0["name"] as? String }), ["search", "route"])
+
+        let routeBundle = try mcpTextContentJSON(id: 2, stdout: result.stdout)
+        XCTAssertEqual(routeBundle["systemPrompt"] as? String, "system fixture")
+        XCTAssertEqual(routeBundle["userPrompt"] as? String, "user fixture")
+        XCTAssertEqual(routeBundle["executionAllowedTools"] as? [String], [
+            "mcp__cmux_sprite__assistant_working_context_get",
+        ])
+        let routeToolBundle = try mcpTextContentJSON(id: 3, stdout: result.stdout)
+        XCTAssertEqual(routeToolBundle["systemPrompt"] as? String, "system fixture")
+        XCTAssertEqual(routeToolBundle["executionAllowedTools"] as? [String], [
+            "mcp__cmux_sprite__assistant_working_context_get",
+        ])
+    }
+
+    func testSpriteAssistantMCPDefaultProductionToolListMatchesExposedSocketCatalog() throws {
+        let cliPath = try bundledCLIPath()
+        let socketPath = makeSocketPath("mcp-def")
+        let listenerFD = try bindUnixSocket(at: socketPath)
+        let state = MockSocketServerState()
+        defer {
+            Darwin.close(listenerFD)
+            unlink(socketPath)
+        }
+
+        let serverHandled = startMockServer(listenerFD: listenerFD, state: state) { line in
+            guard let payload = Self.v2Payload(from: line),
+                  let id = payload["id"] as? String else {
+                return Self.v2Response(id: "unknown", ok: false, error: ["code": "unexpected"])
+            }
+            return Self.v2Response(id: id, ok: false, error: ["code": "unexpected"])
+        }
+
+        let result = runCLI(
+            cliPath: cliPath,
+            socketPath: socketPath,
+            arguments: ["mcp", "sprite-assistant"],
+            environmentOverrides: [
+                "CMUX_SOCKET": socketPath,
+                "CMUX_SOCKET_PASSWORD": "",
+            ],
+            stdinText: Self.jsonLine(["jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [:]]) + "\n"
+        )
+
+        wait(for: [serverHandled], timeout: 5)
+        XCTAssertFalse(result.timedOut, result.stderr)
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertTrue(state.commands.isEmpty)
+
+        let toolsResult = try mcpResult(id: 1, stdout: result.stdout)
+        let tools = try XCTUnwrap(toolsResult["tools"] as? [[String: Any]])
+        let toolNames = Set(tools.compactMap { $0["name"] as? String })
+        XCTAssertEqual(toolNames, Set(Self.spriteMCPProductionSocketToolMethods.map(\.tool)))
+        XCTAssertFalse(toolNames.contains("repository_context"))
+        for (tool, _) in Self.spriteMCPDebugSocketToolMethods {
+            XCTAssertFalse(toolNames.contains(tool), "\(tool) must require debug context opt-in")
+        }
+    }
+
+    func testSpriteAssistantMCPListsAllowedProductionToolsAndFiltersDebugTools() throws {
+        let cliPath = try bundledCLIPath()
+        let socketPath = makeSocketPath("mcp-list")
+        let listenerFD = try bindUnixSocket(at: socketPath)
+        let state = MockSocketServerState()
+        defer {
+            Darwin.close(listenerFD)
+            unlink(socketPath)
+        }
+
+        let serverHandled = startMockServer(listenerFD: listenerFD, state: state) { line in
+            guard let payload = Self.v2Payload(from: line),
+                  let id = payload["id"] as? String else {
+                return Self.v2Response(id: "unknown", ok: false, error: ["code": "unexpected"])
+            }
+            return Self.v2Response(id: id, ok: false, error: ["code": "unexpected"])
+        }
+
+        let result = runCLI(
+            cliPath: cliPath,
+            socketPath: socketPath,
+            arguments: ["mcp", "sprite-assistant"],
+            environmentOverrides: [
+                "CMUX_SOCKET": socketPath,
+                "CMUX_SOCKET_PASSWORD": "",
+                "CMUX_SPRITE_ALLOWED_TOOLS": [
+                    "mcp__cmux_sprite__workspace_color_get",
+                    "context_collect",
+                    "sprite_memory_write_candidate",
+                    "sort_apply",
+                ].joined(separator: ","),
+            ],
+            stdinText: Self.jsonLine(["jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": [:]]) + "\n"
+        )
+
+        wait(for: [serverHandled], timeout: 5)
+        XCTAssertFalse(result.timedOut, result.stderr)
+        XCTAssertEqual(result.status, 0, result.stderr)
+
+        let toolsResult = try mcpResult(id: 1, stdout: result.stdout)
+        let tools = try XCTUnwrap(toolsResult["tools"] as? [[String: Any]])
+        let toolsByName = Dictionary(uniqueKeysWithValues: tools.compactMap { tool -> (String, [String: Any])? in
+            guard let name = tool["name"] as? String else { return nil }
+            return (name, tool)
+        })
+
+        XCTAssertEqual(Set(toolsByName.keys), [
+            "sort_apply",
+            "sprite_memory_write_candidate",
+            "workspace_color_get",
+        ])
+        XCTAssertNil(toolsByName["context_collect"], "debug-only context tools must not be listed in production mode")
+        let candidateSchema = try XCTUnwrap(toolsByName["sprite_memory_write_candidate"]?["inputSchema"] as? [String: Any])
+        XCTAssertEqual(candidateSchema["required"] as? [String], ["text"])
+    }
+
+    func testSpriteAssistantMCPAllProductionSocketToolsCallExpectedCmuxMethods() throws {
+        try assertSpriteAssistantMCPSocketToolsCallExpectedMethods(
+            tools: Self.spriteMCPProductionSocketToolMethods,
+            debugContextToolsEnabled: false,
+            socketName: "mcp-prod"
+        )
+    }
+
+    func testSpriteAssistantMCPDebugContextSocketToolsRequireOptInAndCallExpectedCmuxMethods() throws {
+        try assertSpriteAssistantMCPSocketToolsCallExpectedMethods(
+            tools: Self.spriteMCPDebugSocketToolMethods,
+            debugContextToolsEnabled: true,
+            socketName: "mcp-dbg"
+        )
+    }
+
+    func testSpriteAssistantMCPRepositoryContextRunsLocallyWhenDebugContextToolsEnabled() throws {
+        let cliPath = try bundledCLIPath()
+        let socketPath = makeSocketPath("mcp-rep")
+        let listenerFD = try bindUnixSocket(at: socketPath)
+        let state = MockSocketServerState()
+        let directoryURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("cmux-mcp-repository-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        defer {
+            Darwin.close(listenerFD)
+            unlink(socketPath)
+            try? FileManager.default.removeItem(at: directoryURL)
+        }
+
+        let serverHandled = startMockServer(listenerFD: listenerFD, state: state) { line in
+            guard let payload = Self.v2Payload(from: line),
+                  let id = payload["id"] as? String else {
+                return Self.v2Response(id: "unknown", ok: false, error: ["code": "unexpected"])
+            }
+            return Self.v2Response(id: id, ok: false, error: ["code": "unexpected"])
+        }
+
+        let result = runCLI(
+            cliPath: cliPath,
+            socketPath: socketPath,
+            arguments: ["mcp", "sprite-assistant"],
+            environmentOverrides: [
+                "CMUX_SOCKET": socketPath,
+                "CMUX_SOCKET_PASSWORD": "",
+                "CMUX_SPRITE_ENABLE_DEBUG_CONTEXT_TOOLS": "1",
+                "CMUX_SPRITE_ALLOWED_TOOLS": "repository_context",
+            ],
+            stdinText: Self.jsonLine([
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": [
+                    "name": "repository_context",
+                    "arguments": ["directory": directoryURL.path],
+                ],
+            ]) + "\n"
+        )
+
+        wait(for: [serverHandled], timeout: 5)
+        XCTAssertFalse(result.timedOut, result.stderr)
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertTrue(state.commands.isEmpty, "repository_context is local and must not require a cmux socket command")
+
+        let payload = try mcpTextContentJSON(id: 1, stdout: result.stdout)
+        XCTAssertEqual(payload["isRepository"] as? Bool, false)
+        XCTAssertEqual(payload["directory"] as? String, directoryURL.path)
+        XCTAssertNotNil(payload["error"] as? String)
+    }
+
+    func testSpriteAssistantMCPColorToolCallsSocketCommandWithNormalizedParams() throws {
+        let cliPath = try bundledCLIPath()
+        let socketPath = makeSocketPath("mcp-call")
+        let workspaceId = "11111111-2222-3333-4444-555555555555"
+        let listenerFD = try bindUnixSocket(at: socketPath)
+        let state = MockSocketServerState()
+        defer {
+            Darwin.close(listenerFD)
+            unlink(socketPath)
+        }
+
+        let serverHandled = startMockServer(listenerFD: listenerFD, state: state) { line in
+            guard let payload = Self.v2Payload(from: line),
+                  let id = payload["id"] as? String,
+                  let method = payload["method"] as? String else {
+                return Self.v2Response(id: "unknown", ok: false, error: ["code": "unexpected"])
+            }
+            guard method == "sprite.workspace_color.get" else {
+                return Self.v2Response(id: id, ok: false, error: ["code": "unexpected-method", "message": method])
+            }
+            return Self.v2Response(
+                id: id,
+                ok: true,
+                result: [
+                    "workspaceId": workspaceId,
+                    "customColor": "#123456",
+                ]
+            )
+        }
+
+        let result = runCLI(
+            cliPath: cliPath,
+            socketPath: socketPath,
+            arguments: ["mcp", "sprite-assistant"],
+            environmentOverrides: [
+                "CMUX_SOCKET": socketPath,
+                "CMUX_SOCKET_PASSWORD": "",
+                "CMUX_SPRITE_ALLOWED_TOOLS": "workspace_color_get",
+            ],
+            stdinText: Self.jsonLine([
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": [
+                    "name": "workspace_color_get",
+                    "arguments": [
+                        "workspaceId": workspaceId,
+                        "includePalette": true,
+                    ],
+                ],
+            ]) + "\n"
+        )
+
+        wait(for: [serverHandled], timeout: 5)
+        XCTAssertFalse(result.timedOut, result.stderr)
+        XCTAssertEqual(result.status, 0, result.stderr)
+
+        let commandPayload = try XCTUnwrap(
+            state.commands.compactMap { Self.v2Payload(from: $0) }.first { payload in
+                payload["method"] as? String == "sprite.workspace_color.get"
+            }
+        )
+        let params = try XCTUnwrap(commandPayload["params"] as? [String: Any])
+        XCTAssertEqual(params["workspace_id"] as? String, workspaceId)
+        XCTAssertEqual(params["include_palette"] as? Bool, true)
+        XCTAssertNil(params["workspaceId"])
+        XCTAssertNil(params["includePalette"])
+
+        let toolPayload = try mcpTextContentJSON(id: 1, stdout: result.stdout)
+        XCTAssertEqual(toolPayload["workspaceId"] as? String, workspaceId)
+        XCTAssertEqual(toolPayload["customColor"] as? String, "#123456")
+    }
+
     func testOpenCommandHonorsTerminatorForDashPrefixedPath() throws {
         let cliPath = try bundledCLIPath()
         let socketPath = makeSocketPath("open-dash")
@@ -2681,8 +3044,241 @@ final class CMUXOpenCommandTests: XCTestCase {
         ]
     }
 
+    private func assertSpriteAssistantMCPSocketToolsCallExpectedMethods(
+        tools: [(tool: String, method: String)],
+        debugContextToolsEnabled: Bool,
+        socketName: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) throws {
+        let cliPath = try bundledCLIPath()
+        let socketPath = makeSocketPath(socketName)
+        let workspaceId = "11111111-2222-3333-4444-555555555555"
+        let workspaceDirectory = "/tmp/cmux-mcp-workspace"
+        let listenerFD = try bindUnixSocket(at: socketPath)
+        let state = MockSocketServerState()
+        defer {
+            Darwin.close(listenerFD)
+            unlink(socketPath)
+        }
+
+        let expectedMethods = tools.map(\.method)
+        let serverHandled = startMockServer(listenerFD: listenerFD, state: state) { line in
+            guard let payload = Self.v2Payload(from: line),
+                  let id = payload["id"] as? String,
+                  let method = payload["method"] as? String else {
+                return Self.v2Response(id: "unknown", ok: false, error: ["code": "unexpected"])
+            }
+            guard expectedMethods.contains(method) else {
+                return Self.v2Response(id: id, ok: false, error: ["code": "unexpected-method", "message": method])
+            }
+            return Self.v2Response(
+                id: id,
+                ok: true,
+                result: [
+                    "socketMethod": method,
+                    "params": payload["params"] as? [String: Any] ?? [:],
+                ]
+            )
+        }
+
+        let stdinText = tools.enumerated().map { index, entry in
+            Self.jsonLine([
+                "jsonrpc": "2.0",
+                "id": index + 1,
+                "method": "tools/call",
+                "params": [
+                    "name": entry.tool,
+                    "arguments": Self.spriteMCPArguments(
+                        for: entry.tool,
+                        workspaceId: workspaceId,
+                        workspaceDirectory: workspaceDirectory
+                    ),
+                ],
+            ])
+        }.joined(separator: "\n") + "\n"
+
+        var environment: [String: String] = [
+            "CMUX_SOCKET": socketPath,
+            "CMUX_SOCKET_PASSWORD": "",
+            "CMUX_WORKSPACE_ID": workspaceId,
+            "CMUX_WORKSPACE_DIRECTORY": workspaceDirectory,
+            "CMUX_SPRITE_ALLOWED_TOOLS": tools.map(\.tool).joined(separator: ","),
+        ]
+        if debugContextToolsEnabled {
+            environment["CMUX_SPRITE_ENABLE_DEBUG_CONTEXT_TOOLS"] = "1"
+        }
+
+        let result = runCLI(
+            cliPath: cliPath,
+            socketPath: socketPath,
+            arguments: ["mcp", "sprite-assistant"],
+            environmentOverrides: environment,
+            stdinText: stdinText
+        )
+
+        wait(for: [serverHandled], timeout: 5)
+        XCTAssertFalse(result.timedOut, result.stderr, file: file, line: line)
+        XCTAssertEqual(result.status, 0, result.stderr, file: file, line: line)
+
+        let commandPayloads = state.commands.compactMap(Self.v2Payload(from:))
+        XCTAssertEqual(
+            commandPayloads.compactMap { $0["method"] as? String },
+            expectedMethods,
+            file: file,
+            line: line
+        )
+
+        for (index, entry) in tools.enumerated() {
+            let payload = try mcpTextContentJSON(id: index + 1, stdout: result.stdout)
+            XCTAssertEqual(payload["socketMethod"] as? String, entry.method, file: file, line: line)
+            let commandParams = try XCTUnwrap(commandPayloads[index]["params"] as? [String: Any], file: file, line: line)
+            Self.assertSpriteMCPParams(
+                commandParams,
+                for: entry.tool,
+                workspaceId: workspaceId,
+                workspaceDirectory: workspaceDirectory,
+                file: file,
+                line: line
+            )
+        }
+    }
+
+    private static func spriteMCPArguments(
+        for tool: String,
+        workspaceId: String,
+        workspaceDirectory: String
+    ) -> [String: Any] {
+        switch tool {
+        case "memory_write_candidate":
+            return ["text": "Keep active PRs near the top.", "sourceSummary": "unit test"]
+        case "memory_forget":
+            return ["id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"]
+        case "sprite_memory_write", "sprite_memory_write_candidate":
+            return ["text": "This workspace uses bun.", "sourceSummary": "unit test"]
+        case "sprite_memory_forget":
+            return ["text": "obsolete workspace fact"]
+        case "sort_context":
+            return ["goal": "Explain current order."]
+        case "sort_preview":
+            return [
+                "goal": "Group by color.",
+                "itemIds": [
+                    "11111111-1111-1111-1111-111111111111",
+                    "22222222-2222-2222-2222-222222222222",
+                ],
+            ]
+        case "sort_apply":
+            return ["patchId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"]
+        case "list_lock":
+            return ["itemId": workspaceId, "locked": true]
+        case "list_pin":
+            return ["itemId": workspaceId, "pinned": true]
+        case "context_collect":
+            return ["conversationId": "conversation-1", "taskId": "task-1"]
+        case "context_agent_collect":
+            return ["providerIds": ["summary_priority"], "reason": "unit test"]
+        case "proactive_signal_report":
+            return [
+                "status": "waiting_user",
+                "title": "Review Queue",
+                "rankReason": "Agent needs input.",
+                "nextAction": "Review the agent question.",
+                "summary": "The agent is blocked.",
+                "priorityScore": 95,
+                "userAttentionNeeded": 0.95,
+                "source": "unit-test",
+            ]
+        case "suggestion_accept", "suggestion_dismiss":
+            return ["suggestionId": "cccccccc-cccc-cccc-cccc-cccccccccccc"]
+        case "workspace_color_get":
+            return ["includePalette": true]
+        case "workspace_color_set":
+            return ["color": "#123456"]
+        case "workspace_digest_get", "workspace_digest_refresh":
+            return ["conversationId": "conversation-1", "taskId": "task-1"]
+        case "repository_context":
+            return ["directory": workspaceDirectory]
+        default:
+            return [:]
+        }
+    }
+
+    private static func assertSpriteMCPParams(
+        _ params: [String: Any],
+        for tool: String,
+        workspaceId: String,
+        workspaceDirectory: String,
+        file: StaticString,
+        line: UInt
+    ) {
+        switch tool {
+        case "sprite_memory_query",
+             "sprite_memory_write",
+             "sprite_memory_write_candidate",
+             "sprite_memory_forget":
+            XCTAssertEqual(params["directory"] as? String, workspaceDirectory, file: file, line: line)
+        case "workspace_snapshot_get",
+             "context_freshness_get",
+             "context_agent_collect",
+             "proactive_signal_report",
+             "github_context",
+             "ghpr_context",
+             "github_pr_context",
+             "ghpr_refresh",
+             "workspace_digest_get",
+             "workspace_digest_refresh":
+            XCTAssertEqual(params["workspaceId"] as? String, workspaceId, file: file, line: line)
+        case "workspace_color_get",
+             "workspace_color_set",
+             "workspace_color_clear":
+            XCTAssertEqual(params["workspace_id"] as? String, workspaceId, file: file, line: line)
+            XCTAssertNil(params["workspaceId"], file: file, line: line)
+            if tool == "workspace_color_get" {
+                XCTAssertEqual(params["include_palette"] as? Bool, true, file: file, line: line)
+                XCTAssertNil(params["includePalette"], file: file, line: line)
+            }
+        default:
+            break
+        }
+    }
+
     private func outputLines(_ output: String) -> [String] {
         output.split(separator: "\n").map(String.init)
+    }
+
+    private static func jsonLine(_ object: [String: Any]) -> String {
+        let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return String(data: data ?? Data("{}".utf8), encoding: .utf8) ?? "{}"
+    }
+
+    private func mcpResult(id: Int, stdout: String) throws -> [String: Any] {
+        let response = try mcpResponse(id: id, stdout: stdout)
+        return try XCTUnwrap(response["result"] as? [String: Any], stdout)
+    }
+
+    private func mcpTextContentJSON(id: Int, stdout: String) throws -> [String: Any] {
+        let result = try mcpResult(id: id, stdout: stdout)
+        let content = try XCTUnwrap(result["content"] as? [[String: Any]], stdout)
+        let text = try XCTUnwrap(content.first?["text"] as? String, stdout)
+        let data = try XCTUnwrap(text.data(using: .utf8), stdout)
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any], stdout)
+    }
+
+    private func mcpResponse(id: Int, stdout: String) throws -> [String: Any] {
+        let responses = try stdout.split(separator: "\n").map { line -> [String: Any] in
+            let data = Data(String(line).utf8)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any], stdout)
+        }
+        return try XCTUnwrap(responses.first { response in
+            if let value = response["id"] as? Int {
+                return value == id
+            }
+            if let value = response["id"] as? NSNumber {
+                return value.intValue == id
+            }
+            return false
+        }, stdout)
     }
 
     private static func v2Payload(from line: String) -> [String: Any]? {
