@@ -3,7 +3,6 @@ import CmuxSocketControl
 import Bonsplit
 import CMUXPluginAPI
 import Combine
-import CMUXExtensionClient
 import CmuxSidebarInterpreterClient
 @_spi(CmuxHostTransport) import CmuxExtensionKit
 import CmuxSidebarProviderKit
@@ -1665,7 +1664,7 @@ struct ContentView: View {
     @FocusState private var isCommandPaletteRenameFocused: Bool
 
     init(
-        updateViewModel: UpdateViewModel,
+        updateViewModel: UpdateStateModel,
         windowId: UUID,
         pluginSystem: CMUXPluginAppProviding = CMUXPluginSystem.shared
     ) {

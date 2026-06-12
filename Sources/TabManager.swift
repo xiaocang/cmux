@@ -1096,6 +1096,10 @@ struct WorkspaceGroup: Identifiable, Equatable, Sendable {
     var iconSymbol: String?
 }
 
+// @unchecked Sendable: every mutable field is guarded by `lock`. This is
+// DEBUG-only test scaffolding, touched synchronously from the FSEvents callback,
+// the synthetic-event producer thread, and the measuring helper — a synchronous
+// compare-and-set guard, not ongoing domain state, so a lock is the right shape.
 @MainActor
 class TabManager: ObservableObject {
     private enum WorkspacePullRequestSnapshot: Equatable, Sendable {
@@ -1136,154 +1140,28 @@ class TabManager: ObservableObject {
         case inFlight(rerunPending: Bool)
     }
 
-    private struct WorkspacePullRequestCandidate: Sendable {
-        let workspaceId: UUID
-        let panelId: UUID
-        let branch: String
-        let repoSlugs: [String]
+    private struct ResolvedGitRepository: Equatable, Sendable {
+        let workTreeRoot: String
+        let gitDirectory: String
+        let commonDirectory: String
     }
 
-    private struct WorkspacePullRequestCandidateSeed: Sendable {
-        let workspaceId: UUID
-        let panelId: UUID
-        let branch: String
-        let directory: String?
+    private struct GitIndexEntryStat: Sendable {
+        let path: String
+        let mode: UInt32
+        let objectID: String
+        let mtimeSeconds: UInt32
+        let mtimeNanoseconds: UInt32
+        let size: UInt32
     }
 
-    private struct WorkspacePullRequestCandidateResolution: Sendable {
-        let candidates: [WorkspacePullRequestCandidate]
-        let candidateBranchesByRepo: [String: Set<String>]
-        let repoDirectoriesBySlug: [String: String]
+    private struct GitIndexSnapshot: Sendable {
+        let entries: [GitIndexEntryStat]
+        let signature: String
+        let contentSignature: String
     }
 
     typealias WorkspacePullRequestShellRefreshTarget = CMUXGitHubPullRequestRefreshTarget
-
-    struct WorkspacePullRequestResolvedItem: Sendable, Equatable {
-        let number: Int
-        let urlString: String
-        let statusRawValue: String
-        let branch: String
-    }
-
-    struct WorkspacePullRequestRefreshResult: Sendable {
-        enum Resolution: Sendable, Equatable {
-            case unsupportedRepository
-            case notFound
-            case resolved(WorkspacePullRequestResolvedItem)
-            case rateLimited(retryAt: Date)
-            case transientFailure
-        }
-
-        let workspaceId: UUID
-        let panelId: UUID
-        let resolution: Resolution
-        let usedCachedRepoData: Bool
-    }
-
-    struct WorkspacePullRequestRepoCacheEntry: Sendable, Equatable {
-        let fetchedAt: Date
-        let pullRequestsByBranch: [String: GitHubPullRequestProbeItem]
-        let knownAbsentBranches: Set<String>
-
-        init(
-            fetchedAt: Date,
-            pullRequestsByBranch: [String: GitHubPullRequestProbeItem],
-            knownAbsentBranches: Set<String> = []
-        ) {
-            self.fetchedAt = fetchedAt
-            self.pullRequestsByBranch = pullRequestsByBranch
-            self.knownAbsentBranches = knownAbsentBranches
-        }
-    }
-
-    enum WorkspacePullRequestRepoFetchResult: Sendable, Equatable {
-        case success(
-            WorkspacePullRequestRepoCacheEntry,
-            usedCache: Bool,
-            transientBranches: Set<String>,
-            rateLimitedBranches: [String: Date]
-        )
-        case rateLimited(until: Date)
-        case transientFailure
-    }
-
-    private enum WorkspacePullRequestFetchResult: Sendable, Equatable {
-        case found(GitHubPullRequestProbeItem)
-        case notFound
-        case rateLimited(until: Date)
-        case transientFailure
-    }
-
-    private struct WorkspacePullRequestBranchLookupOutcome: Sendable {
-        let cacheEntry: WorkspacePullRequestRepoCacheEntry
-        let transientBranches: Set<String>
-        let rateLimitedBranches: [String: Date]
-    }
-
-    private struct WorkspacePullRequestHTTPResponse: Sendable {
-        let statusCode: Int
-        let data: Data
-        let retryAfter: String?
-        let rateLimitRemaining: String?
-        let rateLimitReset: String?
-    }
-
-    enum WorkspacePullRequestHTTPFailureClassification: Equatable {
-        case rateLimited(retryAt: Date)
-        case transientFailure
-    }
-
-    private struct WorkspacePullRequestRESTItem: Decodable, Sendable {
-        struct Ref: Decodable, Sendable {
-            let ref: String
-        }
-
-        let number: Int
-        let state: String
-        let htmlURL: String
-        let updatedAt: String?
-        let mergedAt: String?
-        let head: Ref
-        let base: Ref?
-
-        enum CodingKeys: String, CodingKey {
-            case number
-            case state
-            case htmlURL = "html_url"
-            case updatedAt = "updated_at"
-            case mergedAt = "merged_at"
-            case head
-            case base
-        }
-    }
-
-    struct GitHubPullRequestProbeItem: Decodable, Equatable, Sendable {
-        let number: Int
-        let state: String
-        let url: String
-        let updatedAt: String?
-        let mergedAt: String?
-        let headRefName: String?
-        let baseRefName: String?
-
-        init(
-            number: Int,
-            state: String,
-            url: String,
-            updatedAt: String?,
-            mergedAt: String? = nil,
-            headRefName: String? = nil,
-            baseRefName: String? = nil
-        ) {
-            self.number = number
-            self.state = state
-            self.url = url
-            self.updatedAt = updatedAt
-            self.mergedAt = mergedAt
-            self.headRefName = headRefName
-            self.baseRefName = baseRefName
-        }
-    }
 
     /// The window that owns this TabManager. Set by AppDelegate.registerMainWindow().
     /// Used to apply title updates to the correct window instead of NSApp.keyWindow.
@@ -1466,7 +1344,6 @@ class TabManager: ObservableObject {
     private var workspacePullRequestLastTerminalStateRefreshAtByKey: [WorkspaceGitProbeKey: Date] = [:]
     private var workspacePullRequestTransientFailureCountByKey: [WorkspaceGitProbeKey: Int] = [:]
     private var workspacePullRequestRepoCacheBySlug: [String: WorkspacePullRequestRepoCacheEntry] = [:]
-    private var workspacePullRequestRateLimitedUntilByRepoSlug: [String: Date] = [:]
     private var workspacePullRequestPollTask: Task<Void, Never>?
     private var workspacePullRequestRefreshTask: Task<Void, Never>?
     private var workspacePullRequestFollowUpShouldBypassRepoCache = false
@@ -2167,7 +2044,6 @@ class TabManager: ObservableObject {
         }
 
         let cacheBySlug = workspacePullRequestRepoCacheBySlug
-        let rateLimitedUntilByRepoSlug = workspacePullRequestRateLimitedUntilByRepoSlug
         let allowCachedResults = allowCachedResultsOverride
             ?? PullRequestProbeService.refreshAllowsRepoCache(reason: reason)
         let gitMetadataService = gitMetadataService
@@ -2182,7 +2058,6 @@ class TabManager: ObservableObject {
                 repoDirectoriesBySlug: candidateResolution.repoDirectoriesBySlug,
                 candidateBranchesByRepo: candidateResolution.candidateBranchesByRepo,
                 cacheBySlug: cacheBySlug,
-                rateLimitedUntilByRepoSlug: rateLimitedUntilByRepoSlug,
                 now: now,
                 allowCachedResults: allowCachedResults
             )
@@ -2231,57 +2106,6 @@ class TabManager: ObservableObject {
             panelId: panelId,
             branch: branch,
             directory: directory
-        )
-    }
-
-    #if compiler(>=6.2)
-    @concurrent
-    #endif
-    private nonisolated static func resolveWorkspacePullRequestCandidateSeeds(
-        _ seeds: [WorkspacePullRequestCandidateSeed]
-    ) async -> WorkspacePullRequestCandidateResolution {
-        var candidates: [WorkspacePullRequestCandidate] = []
-        candidates.reserveCapacity(seeds.count)
-        var candidateBranchesByRepo: [String: Set<String>] = [:]
-        var repoDirectoriesBySlug: [String: String] = [:]
-        var repoSlugsByDirectory: [String: [String]] = [:]
-
-        for seed in seeds {
-            let repoSlugs: [String]
-            if let directory = seed.directory {
-                if let cachedRepoSlugs = repoSlugsByDirectory[directory] {
-                    repoSlugs = cachedRepoSlugs
-                } else {
-                    let resolvedRepoSlugs = await githubRepositorySlugs(directory: directory)
-                    repoSlugsByDirectory[directory] = resolvedRepoSlugs
-                    repoSlugs = resolvedRepoSlugs
-                }
-            } else {
-                repoSlugs = []
-            }
-
-            candidates.append(
-                WorkspacePullRequestCandidate(
-                    workspaceId: seed.workspaceId,
-                    panelId: seed.panelId,
-                    branch: seed.branch,
-                    repoSlugs: repoSlugs
-                )
-            )
-            for repoSlug in repoSlugs {
-                candidateBranchesByRepo[repoSlug, default: []].insert(seed.branch)
-            }
-            if let directory = seed.directory {
-                for repoSlug in repoSlugs where repoDirectoriesBySlug[repoSlug] == nil {
-                    repoDirectoriesBySlug[repoSlug] = directory
-                }
-            }
-        }
-
-        return WorkspacePullRequestCandidateResolution(
-            candidates: candidates,
-            candidateBranchesByRepo: candidateBranchesByRepo,
-            repoDirectoriesBySlug: repoDirectoriesBySlug
         )
     }
 
@@ -2473,22 +2297,11 @@ class TabManager: ObservableObject {
         }
 
         for (repoSlug, repoResult) in repoResults {
-            switch repoResult {
-            case .success(let cacheEntry, let usedCache, _, let rateLimitedBranches):
-                if let rateLimitedUntil = rateLimitedBranches.values.max() {
-                    let existingUntil = workspacePullRequestRateLimitedUntilByRepoSlug[repoSlug] ?? .distantPast
-                    workspacePullRequestRateLimitedUntilByRepoSlug[repoSlug] = max(existingUntil, rateLimitedUntil)
-                } else {
-                    workspacePullRequestRateLimitedUntilByRepoSlug.removeValue(forKey: repoSlug)
-                }
-                guard !usedCache else { continue }
-                workspacePullRequestRepoCacheBySlug[repoSlug] = cacheEntry
-            case .rateLimited(let until):
-                let existingUntil = workspacePullRequestRateLimitedUntilByRepoSlug[repoSlug] ?? .distantPast
-                workspacePullRequestRateLimitedUntilByRepoSlug[repoSlug] = max(existingUntil, until)
-            case .transientFailure:
+            guard case .success(let cacheEntry, let usedCache, _) = repoResult,
+                  !usedCache else {
                 continue
             }
+            workspacePullRequestRepoCacheBySlug[repoSlug] = cacheEntry
         }
 
         let requestedKeySet = Set(requestedKeys)
@@ -2555,16 +2368,22 @@ class TabManager: ObservableObject {
                     isStale: false
                 )
                 requestGHPRMetadataRefresh(workspace.id.uuidString)
-            case .notFound, .unsupportedRepository:
+            case .notFound:
                 workspacePullRequestTransientFailureCountByKey[key] = 0
                 workspacePullRequestLastTerminalStateRefreshAtByKey.removeValue(forKey: key)
                 if workspace.panelPullRequests[result.panelId] != nil {
                     workspace.clearPanelPullRequest(panelId: result.panelId)
                 }
-            case .rateLimited, .transientFailure:
+            case .unsupportedRepository:
+                workspacePullRequestTransientFailureCountByKey[key] = 0
+                workspacePullRequestLastTerminalStateRefreshAtByKey.removeValue(forKey: key)
+                if workspace.panelPullRequests[result.panelId] != nil {
+                    workspace.clearPanelPullRequest(panelId: result.panelId)
+                }
+            case .transientFailure:
                 let nextFailureCount = (workspacePullRequestTransientFailureCountByKey[key] ?? 0) + 1
                 workspacePullRequestTransientFailureCountByKey[key] = nextFailureCount
-                if nextFailureCount >= Self.workspacePullRequestStaleThreshold,
+                if nextFailureCount >= 3,
                    let currentPullRequest = workspace.panelPullRequests[result.panelId] {
                     workspace.updatePanelPullRequest(
                         panelId: result.panelId,
@@ -2597,8 +2416,6 @@ class TabManager: ObservableObject {
                     return "unsupported"
                 case .notFound:
                     return "none"
-                case .rateLimited:
-                    return "rateLimited"
                 case .transientFailure:
                     return "transientFailure"
                 case .resolved(let resolvedPullRequest):
@@ -2627,27 +2444,31 @@ class TabManager: ObservableObject {
             workspacePullRequestLastTerminalStateRefreshAtByKey[key] = now
         }
 
-        switch resolution {
-        case .resolved(let resolvedPullRequest):
-            if SidebarPullRequestStatus(rawValue: resolvedPullRequest.statusRawValue) != .open {
-                workspacePullRequestLastTerminalStateRefreshAtByKey[key] = now
-            } else {
-                workspacePullRequestLastTerminalStateRefreshAtByKey.removeValue(forKey: key)
-            }
-        case .notFound, .unsupportedRepository:
-            workspacePullRequestLastTerminalStateRefreshAtByKey.removeValue(forKey: key)
-        case .rateLimited, .transientFailure:
-            break
+        if case .resolved(let resolvedPullRequest) = resolution,
+           let status = SidebarPullRequestStatus(rawValue: resolvedPullRequest.statusRawValue),
+           status != .open {
+            workspacePullRequestLastTerminalStateRefreshAtByKey[key] = now
+            workspacePullRequestNextPollAtByKey[key] = now.addingTimeInterval(PullRequestProbeService.terminalStateSweepInterval)
+            return
         }
 
-        let hasTerminalStateSweepContext = workspacePullRequestLastTerminalStateRefreshAtByKey[key] != nil
-        workspacePullRequestNextPollAtByKey[key] = Self.workspacePullRequestNextPollAt(
-            now: now,
-            resolution: resolution,
-            hasTerminalStateSweepContext: hasTerminalStateSweepContext,
-            isSelectedFocusedPanel: isSelectedFocusedPanel(workspace: workspace, panelId: panelId),
-            transientFailureCount: workspacePullRequestTransientFailureCountByKey[key] ?? 0
-        )
+        if case .transientFailure = resolution,
+           workspacePullRequestLastTerminalStateRefreshAtByKey[key] != nil {
+            workspacePullRequestNextPollAtByKey[key] = now.addingTimeInterval(PullRequestProbeService.terminalStateSweepInterval)
+            return
+        }
+
+        if case .unsupportedRepository = resolution {
+            workspacePullRequestLastTerminalStateRefreshAtByKey.removeValue(forKey: key)
+            workspacePullRequestNextPollAtByKey[key] = now.addingTimeInterval(Self.jitteredPollInterval(base: Self.backgroundPollInterval))
+            return
+        }
+
+        workspacePullRequestLastTerminalStateRefreshAtByKey.removeValue(forKey: key)
+        let baseInterval = isSelectedFocusedPanel(workspace: workspace, panelId: panelId)
+            ? Self.selectedPollInterval
+            : Self.backgroundPollInterval
+        workspacePullRequestNextPollAtByKey[key] = now.addingTimeInterval(Self.jitteredPollInterval(base: baseInterval))
     }
 
     @discardableResult
@@ -2714,9 +2535,6 @@ class TabManager: ObservableObject {
         workspacePullRequestRepoCacheBySlug = workspacePullRequestRepoCacheBySlug.filter {
             $0.value.fetchedAt >= repoCacheCutoff
         }
-        workspacePullRequestRateLimitedUntilByRepoSlug = workspacePullRequestRateLimitedUntilByRepoSlug.filter {
-            $0.value > pruneNow
-        }
         pruneWorkspacePullRequestShellRefreshQueue(validKeys: validKeys)
         updateWorkspacePullRequestPollTimer()
     }
@@ -2755,7 +2573,6 @@ class TabManager: ObservableObject {
         workspacePullRequestLastTerminalStateRefreshAtByKey.removeAll()
         workspacePullRequestTransientFailureCountByKey.removeAll()
         workspacePullRequestRepoCacheBySlug.removeAll()
-        workspacePullRequestRateLimitedUntilByRepoSlug.removeAll()
         let githubEnhancement = enhancementSystem.github
         for workspaceId in Set(tabs.map(\.id)) {
             githubEnhancement.removeQueuedRefreshes(workspaceId: workspaceId)
@@ -2819,57 +2636,6 @@ class TabManager: ObservableObject {
         return base + Double.random(in: -jitter...jitter)
     }
 
-    nonisolated static func workspacePullRequestTransientFailureDelay(
-        baseInterval: TimeInterval,
-        failureCount: Int
-    ) -> TimeInterval {
-        let exponent = Double(max(0, max(1, failureCount) - 1))
-        return min(
-            baseInterval * pow(2.0, exponent),
-            Self.workspacePullRequestFailureBackoffMaxInterval
-        )
-    }
-
-    nonisolated static func workspacePullRequestNextPollAt(
-        now: Date,
-        resolution: WorkspacePullRequestRefreshResult.Resolution,
-        hasTerminalStateSweepContext: Bool,
-        isSelectedFocusedPanel: Bool,
-        transientFailureCount: Int
-    ) -> Date {
-        switch resolution {
-        case .rateLimited(let retryAt):
-            return max(retryAt, now)
-        case .resolved(let resolvedPullRequest):
-            if SidebarPullRequestStatus(rawValue: resolvedPullRequest.statusRawValue) != .open {
-                return now.addingTimeInterval(Self.workspacePullRequestTerminalStateSweepInterval)
-            }
-        case .transientFailure:
-            if hasTerminalStateSweepContext {
-                return now.addingTimeInterval(Self.workspacePullRequestTerminalStateSweepInterval)
-            }
-
-            let baseInterval = isSelectedFocusedPanel
-                ? Self.selectedPollInterval
-                : Self.backgroundPollInterval
-            return now.addingTimeInterval(
-                Self.workspacePullRequestTransientFailureDelay(
-                    baseInterval: baseInterval,
-                    failureCount: transientFailureCount
-                )
-            )
-        case .unsupportedRepository:
-            return now.addingTimeInterval(Self.jitteredPollInterval(base: Self.backgroundPollInterval))
-        case .notFound:
-            break
-        }
-
-        let baseInterval = isSelectedFocusedPanel
-            ? Self.selectedPollInterval
-            : Self.backgroundPollInterval
-        return now.addingTimeInterval(Self.jitteredPollInterval(base: baseInterval))
-    }
-
     nonisolated static func workspacePullRequestRefreshAllowsRepoCache(reason: String) -> Bool {
         let periodicPrefixes = [
             "periodicPoll",
@@ -2880,26 +2646,6 @@ class TabManager: ObservableObject {
         return periodicPrefixes.contains { prefix in
             reason == prefix || reason.hasPrefix("\(prefix).")
         }
-    }
-
-    nonisolated static func shouldRefreshWorkspacePullRequest(
-        now: Date,
-        nextPollAt: Date?,
-        lastTerminalStateRefreshAt: Date?,
-        currentPullRequestStatus: SidebarPullRequestStatus?
-    ) -> Bool {
-        let nextPollAt = nextPollAt ?? .distantPast
-        if nextPollAt <= now {
-            return true
-        }
-
-        guard let currentPullRequestStatus,
-              currentPullRequestStatus != .open else {
-            return false
-        }
-
-        let lastTerminalRefreshAt = lastTerminalStateRefreshAt ?? .distantPast
-        return now.timeIntervalSince(lastTerminalRefreshAt) >= Self.workspacePullRequestTerminalStateSweepInterval
     }
 
     /// User-triggered force refresh of all tracked workspace pull requests.
@@ -4201,35 +3947,6 @@ class TabManager: ObservableObject {
             .path
     }
 
-    private nonisolated static func workspaceGitMetadataWatcherDescriptor(
-        for directory: String
-    ) -> WorkspaceGitMetadataWatcher.Descriptor? {
-        guard let repository = resolveGitRepository(containing: directory) else {
-            return nil
-        }
-
-        let candidatePaths = [
-            repository.workTreeRoot,
-        ] + gitRepositoryMetadataWatchPaths(repository: repository)
-            + gitlinkMetadataWatchPaths(repository: repository)
-        var watchedPaths: [String] = []
-        var seen: Set<String> = []
-        for path in candidatePaths {
-            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
-            guard seen.insert(normalized).inserted else { continue }
-            var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: normalized, isDirectory: &isDirectory) else {
-                continue
-            }
-            watchedPaths.append(normalized)
-        }
-
-        return WorkspaceGitMetadataWatcher.Descriptor(
-            directory: repository.workTreeRoot,
-            watchedPaths: watchedPaths.sorted()
-        )
-    }
-
     private nonisolated static func gitRepositoryMetadataWatchPaths(
         repository: ResolvedGitRepository
     ) -> [String] {
@@ -5086,746 +4803,6 @@ class TabManager: ObservableObject {
             UInt32(bytes[offset + 3])
     }
 
-    private nonisolated static func fetchWorkspacePullRequestRepoResults(
-        repoDirectoriesBySlug: [String: String],
-        candidateBranchesByRepo: [String: Set<String>],
-        cacheBySlug: [String: WorkspacePullRequestRepoCacheEntry],
-        rateLimitedUntilByRepoSlug: [String: Date],
-        now: Date,
-        allowCachedResults: Bool,
-        commandRunner: any CommandRunning
-    ) async -> [String: WorkspacePullRequestRepoFetchResult] {
-        guard !repoDirectoriesBySlug.isEmpty else { return [:] }
-
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = max(Self.workspacePullRequestProbeTimeout, 8)
-        configuration.timeoutIntervalForResource = max(Self.workspacePullRequestProbeTimeout, 8)
-        let session = URLSession(configuration: configuration)
-        let authHeader = await workspacePullRequestAuthHeaderValue(commandRunner: commandRunner)
-        var results: [String: WorkspacePullRequestRepoFetchResult] = [:]
-
-        let fetchedResults = await withTaskGroup(
-            of: (String, WorkspacePullRequestRepoFetchResult).self,
-            returning: [(String, WorkspacePullRequestRepoFetchResult)].self
-        ) { group in
-            for repoSlug in repoDirectoriesBySlug.keys {
-                group.addTask {
-                    let result = await Self.workspacePullRequestRepoFetchResult(
-                        repoSlug: repoSlug,
-                        candidateBranches: candidateBranchesByRepo[repoSlug] ?? [],
-                        cachedEntry: cacheBySlug[repoSlug],
-                        useCachedRecentWindow: allowCachedResults
-                            && (cacheBySlug[repoSlug].map {
-                                now.timeIntervalSince($0.fetchedAt) < Self.workspacePullRequestRepoCacheLifetime
-                            } ?? false),
-                        rateLimitedUntil: rateLimitedUntilByRepoSlug[repoSlug],
-                        now: now,
-                        session: session,
-                        authHeader: authHeader
-                    )
-                    return (repoSlug, result)
-                }
-            }
-
-            var collected: [(String, WorkspacePullRequestRepoFetchResult)] = []
-            for await result in group {
-                collected.append(result)
-            }
-            return collected
-        }
-
-        for (repoSlug, result) in fetchedResults {
-            results[repoSlug] = result
-        }
-        return results
-    }
-
-    nonisolated static func workspacePullRequestResolution(
-        branch: String,
-        repoSlugs: [String],
-        repoResults: [String: WorkspacePullRequestRepoFetchResult]
-    ) -> (resolution: WorkspacePullRequestRefreshResult.Resolution, usedCachedRepoData: Bool) {
-        var matchedPullRequest: GitHubPullRequestProbeItem?
-        var matchedPullRequestUsedCache = false
-        var latestRateLimitedRetryAt: Date?
-        var sawTransientFailure = false
-        var sawCachedSuccess = false
-
-        for repoSlug in repoSlugs {
-            guard let repoResult = repoResults[repoSlug] else { continue }
-            switch repoResult {
-            case .success(let cacheEntry, let usedCache, let transientBranches, let rateLimitedBranches):
-                if usedCache {
-                    sawCachedSuccess = true
-                }
-                if let candidateMatch = cacheEntry.pullRequestsByBranch[branch] {
-                    matchedPullRequest = candidateMatch
-                    matchedPullRequestUsedCache = usedCache
-                    break
-                }
-                if let retryAt = rateLimitedBranches[branch] {
-                    latestRateLimitedRetryAt = max(latestRateLimitedRetryAt ?? .distantPast, retryAt)
-                }
-                if transientBranches.contains(branch) {
-                    sawTransientFailure = true
-                }
-            case .rateLimited(let until):
-                latestRateLimitedRetryAt = max(latestRateLimitedRetryAt ?? .distantPast, until)
-            case .transientFailure:
-                sawTransientFailure = true
-            }
-        }
-
-        if let matchedPullRequest,
-           let status = pullRequestStatus(from: matchedPullRequest.state) {
-            return (
-                .resolved(
-                    WorkspacePullRequestResolvedItem(
-                        number: matchedPullRequest.number,
-                        urlString: matchedPullRequest.url,
-                        statusRawValue: status.rawValue,
-                        branch: branch
-                    )
-                ),
-                matchedPullRequestUsedCache
-            )
-        }
-
-        if let retryAt = latestRateLimitedRetryAt {
-            return (.rateLimited(retryAt: retryAt), false)
-        }
-
-        if sawTransientFailure {
-            return (.transientFailure, false)
-        }
-
-        return (.notFound, sawCachedSuccess)
-    }
-
-    private nonisolated static func resolveWorkspacePullRequestRefreshResults(
-        candidates: [WorkspacePullRequestCandidate],
-        repoResults: [String: WorkspacePullRequestRepoFetchResult]
-    ) -> [WorkspacePullRequestRefreshResult] {
-        candidates.map { candidate in
-            if candidate.repoSlugs.isEmpty {
-                return WorkspacePullRequestRefreshResult(
-                    workspaceId: candidate.workspaceId,
-                    panelId: candidate.panelId,
-                    resolution: .unsupportedRepository,
-                    usedCachedRepoData: false
-                )
-            }
-
-            let (resolution, usedCachedRepoData) = workspacePullRequestResolution(
-                branch: candidate.branch,
-                repoSlugs: candidate.repoSlugs,
-                repoResults: repoResults
-            )
-
-            return WorkspacePullRequestRefreshResult(
-                workspaceId: candidate.workspaceId,
-                panelId: candidate.panelId,
-                resolution: resolution,
-                usedCachedRepoData: usedCachedRepoData
-            )
-        }
-    }
-
-    nonisolated static func workspacePullRequestRepoFetchResult(
-        repoSlug: String,
-        candidateBranches: Set<String>,
-        cachedEntry: WorkspacePullRequestRepoCacheEntry?,
-        useCachedRecentWindow: Bool,
-        rateLimitedUntil: Date? = nil,
-        now: Date = Date(),
-        session: URLSession,
-        authHeader: String?
-    ) async -> WorkspacePullRequestRepoFetchResult {
-        let normalizedCandidateBranches = Set(candidateBranches.compactMap(normalizedBranchName))
-        if let rateLimitedUntil,
-           now < rateLimitedUntil {
-            return .rateLimited(until: rateLimitedUntil)
-        }
-
-        if useCachedRecentWindow,
-           let cachedEntry {
-            let unresolvedBranches = unresolvedWorkspacePullRequestBranches(
-                normalizedCandidateBranches,
-                in: cachedEntry
-            )
-            if unresolvedBranches.isEmpty {
-#if DEBUG
-                cmuxDebugLog(
-                    "workspace.prRefresh.repo.cache repo=\(repoSlug) " +
-                    "branches=\(cachedEntry.pullRequestsByBranch.count)"
-                )
-#endif
-                return .success(
-                    cachedEntry,
-                    usedCache: true,
-                    transientBranches: [],
-                    rateLimitedBranches: [:]
-                )
-            }
-
-            let lookupOutcome = await workspacePullRequestBranchLookupOutcome(
-                repoSlug: repoSlug,
-                candidateBranches: unresolvedBranches,
-                baseEntry: cachedEntry,
-                refreshedAt: Date(),
-                session: session,
-                authHeader: authHeader
-            )
-#if DEBUG
-            cmuxDebugLog(
-                "workspace.prRefresh.repo.cache.miss repo=\(repoSlug) " +
-                "branchLookups=\(unresolvedBranches.count) transient=\(lookupOutcome.transientBranches.count)"
-            )
-#endif
-            return .success(
-                lookupOutcome.cacheEntry,
-                usedCache: false,
-                transientBranches: lookupOutcome.transientBranches,
-                rateLimitedBranches: lookupOutcome.rateLimitedBranches
-            )
-        }
-
-        let fetchTimestamp = now
-        var page = 1
-        var fetchedPageCount = 0
-        var allPullRequests: [GitHubPullRequestProbeItem] = []
-
-        while page <= Self.workspacePullRequestRepoPageLimit {
-            let endpoint = "repos/\(repoSlug)/pulls?state=all&sort=updated&direction=desc&per_page=\(Self.workspacePullRequestRepoPageSize)&page=\(page)"
-            guard let response = await performWorkspacePullRequestRequest(
-                session: session,
-                endpoint: endpoint,
-                authHeader: authHeader
-            ) else {
-#if DEBUG
-                cmuxDebugLog("workspace.prRefresh.repo.fail repo=\(repoSlug) page=\(page) status=nil")
-#endif
-                return .transientFailure
-            }
-
-            if response.statusCode != 200 {
-#if DEBUG
-                cmuxDebugLog("workspace.prRefresh.repo.fail repo=\(repoSlug) page=\(page) status=\(response.statusCode)")
-#endif
-                switch classifyWorkspacePullRequestHTTPFailure(
-                    statusCode: response.statusCode,
-                    retryAfter: response.retryAfter,
-                    rateLimitRemaining: response.rateLimitRemaining,
-                    rateLimitReset: response.rateLimitReset,
-                    body: response.data,
-                    now: now
-                ) {
-                case .rateLimited(let retryAt):
-                    return .rateLimited(until: retryAt)
-                case .transientFailure:
-                    return .transientFailure
-                }
-            }
-
-            guard let pullRequests = decodeJSON([WorkspacePullRequestRESTItem].self, from: response.data) else {
-                return .transientFailure
-            }
-
-            fetchedPageCount += 1
-            allPullRequests.append(contentsOf: pullRequests.map(Self.workspacePullRequestProbeItem))
-            if pullRequests.count < Self.workspacePullRequestRepoPageSize {
-                break
-            }
-            page += 1
-        }
-
-        let recentWindowEntry = WorkspacePullRequestRepoCacheEntry(
-            fetchedAt: fetchTimestamp,
-            pullRequestsByBranch: pullRequestMapByNormalizedBranch(from: allPullRequests)
-        )
-        let unresolvedBranches = unresolvedWorkspacePullRequestBranches(
-            normalizedCandidateBranches,
-            in: recentWindowEntry
-        )
-        let lookupOutcome: WorkspacePullRequestBranchLookupOutcome
-        if unresolvedBranches.isEmpty {
-            lookupOutcome = WorkspacePullRequestBranchLookupOutcome(
-                cacheEntry: recentWindowEntry,
-                transientBranches: [],
-                rateLimitedBranches: [:]
-            )
-        } else {
-            lookupOutcome = await workspacePullRequestBranchLookupOutcome(
-                repoSlug: repoSlug,
-                candidateBranches: unresolvedBranches,
-                baseEntry: recentWindowEntry,
-                refreshedAt: fetchTimestamp,
-                session: session,
-                authHeader: authHeader
-            )
-        }
-#if DEBUG
-        cmuxDebugLog(
-            "workspace.prRefresh.repo.success repo=\(repoSlug) pages=\(fetchedPageCount) " +
-            "branches=\(lookupOutcome.cacheEntry.pullRequestsByBranch.count) " +
-            "branchLookups=\(unresolvedBranches.count) transient=\(lookupOutcome.transientBranches.count)"
-        )
-#endif
-        return .success(
-            lookupOutcome.cacheEntry,
-            usedCache: false,
-            transientBranches: lookupOutcome.transientBranches,
-            rateLimitedBranches: lookupOutcome.rateLimitedBranches
-        )
-    }
-
-    private nonisolated static func unresolvedWorkspacePullRequestBranches(
-        _ candidateBranches: Set<String>,
-        in cacheEntry: WorkspacePullRequestRepoCacheEntry
-    ) -> [String] {
-        candidateBranches
-            .filter {
-                cacheEntry.pullRequestsByBranch[$0] == nil
-                    && !cacheEntry.knownAbsentBranches.contains($0)
-            }
-            .sorted()
-    }
-
-    private nonisolated static func workspacePullRequestBranchLookupOutcome(
-        repoSlug: String,
-        candidateBranches: [String],
-        baseEntry: WorkspacePullRequestRepoCacheEntry,
-        refreshedAt: Date,
-        session: URLSession,
-        authHeader: String?
-    ) async -> WorkspacePullRequestBranchLookupOutcome {
-        guard !candidateBranches.isEmpty else {
-            return WorkspacePullRequestBranchLookupOutcome(
-                cacheEntry: baseEntry,
-                transientBranches: [],
-                rateLimitedBranches: [:]
-            )
-        }
-
-        let branchResults = await withTaskGroup(
-            of: (String, WorkspacePullRequestFetchResult).self,
-            returning: [(String, WorkspacePullRequestFetchResult)].self
-        ) { group in
-            for branch in candidateBranches {
-                group.addTask {
-                    let result = await Self.workspacePullRequestBranchFetchResult(
-                        repoSlug: repoSlug,
-                        branch: branch,
-                        session: session,
-                        authHeader: authHeader
-                    )
-                    return (branch, result)
-                }
-            }
-
-            var collected: [(String, WorkspacePullRequestFetchResult)] = []
-            for await result in group {
-                collected.append(result)
-            }
-            return collected
-        }
-
-        var pullRequestsByBranch = baseEntry.pullRequestsByBranch
-        var knownAbsentBranches = baseEntry.knownAbsentBranches
-        var transientBranches: Set<String> = []
-        var rateLimitedBranches: [String: Date] = [:]
-
-        for (branch, result) in branchResults {
-            switch result {
-            case .found(let pullRequest):
-                pullRequestsByBranch[branch] = pullRequest
-                knownAbsentBranches.remove(branch)
-            case .notFound:
-                knownAbsentBranches.insert(branch)
-            case .rateLimited(let until):
-                let existingUntil = rateLimitedBranches[branch] ?? .distantPast
-                rateLimitedBranches[branch] = max(existingUntil, until)
-            case .transientFailure:
-                transientBranches.insert(branch)
-            }
-        }
-
-        return WorkspacePullRequestBranchLookupOutcome(
-            cacheEntry: WorkspacePullRequestRepoCacheEntry(
-                fetchedAt: refreshedAt,
-                pullRequestsByBranch: pullRequestsByBranch,
-                knownAbsentBranches: knownAbsentBranches
-            ),
-            transientBranches: transientBranches,
-            rateLimitedBranches: rateLimitedBranches
-        )
-    }
-
-    private nonisolated static func workspacePullRequestBranchFetchResult(
-        repoSlug: String,
-        branch: String,
-        session: URLSession,
-        authHeader: String?
-    ) async -> WorkspacePullRequestFetchResult {
-        guard let endpoint = workspacePullRequestBranchEndpoint(
-            repoSlug: repoSlug,
-            branch: branch
-        ) else {
-            return .transientFailure
-        }
-
-        guard let response = await performWorkspacePullRequestRequest(
-            session: session,
-            endpoint: endpoint,
-            authHeader: authHeader
-        ) else {
-#if DEBUG
-            cmuxDebugLog("workspace.prRefresh.branch.fail repo=\(repoSlug) branch=\(branch) status=nil")
-#endif
-            return .transientFailure
-        }
-
-        if response.statusCode != 200 {
-#if DEBUG
-            cmuxDebugLog(
-                "workspace.prRefresh.branch.fail repo=\(repoSlug) " +
-                "branch=\(branch) status=\(response.statusCode)"
-            )
-#endif
-            switch classifyWorkspacePullRequestHTTPFailure(
-                statusCode: response.statusCode,
-                retryAfter: response.retryAfter,
-                rateLimitRemaining: response.rateLimitRemaining,
-                rateLimitReset: response.rateLimitReset,
-                body: response.data,
-                now: Date()
-            ) {
-            case .rateLimited(let retryAt):
-                return .rateLimited(until: retryAt)
-            case .transientFailure:
-                return .transientFailure
-            }
-        }
-
-        guard let pullRequests = decodeJSON([WorkspacePullRequestRESTItem].self, from: response.data) else {
-            return .transientFailure
-        }
-
-        let matchingPullRequests = pullRequests
-            .map(Self.workspacePullRequestProbeItem)
-            .filter { normalizedBranchName($0.headRefName) == branch }
-        if let preferredPullRequest = preferredPullRequest(from: matchingPullRequests) {
-            return .found(preferredPullRequest)
-        }
-        return .notFound
-    }
-
-    private nonisolated static func workspacePullRequestCommitFetchResult(
-        repoSlug: String,
-        commitSHA: String,
-        session: URLSession,
-        authHeader: String?
-    ) async -> WorkspacePullRequestFetchResult {
-        guard let endpoint = workspacePullRequestCommitEndpoint(
-            repoSlug: repoSlug,
-            commitSHA: commitSHA
-        ) else {
-            return .transientFailure
-        }
-
-        guard let response = await performWorkspacePullRequestRequest(
-            session: session,
-            endpoint: endpoint,
-            authHeader: authHeader
-        ) else {
-#if DEBUG
-            cmuxDebugLog("workspace.gitProbe.detachedPR.fail repo=\(repoSlug) status=nil")
-#endif
-            return .transientFailure
-        }
-
-        if response.statusCode == 404 {
-            return .notFound
-        }
-        if response.statusCode != 200 {
-#if DEBUG
-            cmuxDebugLog(
-                "workspace.gitProbe.detachedPR.fail repo=\(repoSlug) status=\(response.statusCode)"
-            )
-#endif
-            switch classifyWorkspacePullRequestHTTPFailure(
-                statusCode: response.statusCode,
-                retryAfter: response.retryAfter,
-                rateLimitRemaining: response.rateLimitRemaining,
-                rateLimitReset: response.rateLimitReset,
-                body: response.data,
-                now: Date()
-            ) {
-            case .rateLimited(let retryAt):
-                return .rateLimited(until: retryAt)
-            case .transientFailure:
-                return .transientFailure
-            }
-        }
-
-        guard let pullRequests = decodeJSON([WorkspacePullRequestRESTItem].self, from: response.data) else {
-            return .transientFailure
-        }
-
-        if let preferredPullRequest = preferredPullRequest(
-            from: pullRequests.map(Self.workspacePullRequestProbeItem)
-        ) {
-            return .found(preferredPullRequest)
-        }
-        return .notFound
-    }
-
-    private nonisolated static func workspacePullRequestBranchEndpoint(
-        repoSlug: String,
-        branch: String
-    ) -> String? {
-        let components = repoSlug.split(separator: "/", maxSplits: 1).map(String.init)
-        guard components.count == 2,
-              !components[0].isEmpty,
-              !components[1].isEmpty else {
-            return nil
-        }
-
-        var query = URLComponents()
-        query.queryItems = [
-            URLQueryItem(name: "state", value: "all"),
-            URLQueryItem(name: "head", value: "\(components[0]):\(branch)"),
-            URLQueryItem(name: "sort", value: "updated"),
-            URLQueryItem(name: "direction", value: "desc"),
-            URLQueryItem(name: "per_page", value: String(Self.workspacePullRequestRepoPageSize)),
-        ]
-        guard let percentEncodedQuery = query.percentEncodedQuery else {
-            return nil
-        }
-        return "repos/\(repoSlug)/pulls?\(percentEncodedQuery)"
-    }
-
-    private nonisolated static func workspacePullRequestCommitEndpoint(
-        repoSlug: String,
-        commitSHA: String
-    ) -> String? {
-        guard let normalizedRepoSlug = normalizedGitHubRepositorySlug(repoSlug),
-              let normalizedSHA = normalizedCommitSHA(commitSHA) else {
-            return nil
-        }
-        return "repos/\(normalizedRepoSlug)/commits/\(normalizedSHA)/pulls"
-    }
-
-    private nonisolated static func workspacePullRequestProbeItem(
-        from pullRequest: WorkspacePullRequestRESTItem
-    ) -> GitHubPullRequestProbeItem {
-        let rawState = pullRequest.mergedAt?.isEmpty == false ? "MERGED" : pullRequest.state
-        return GitHubPullRequestProbeItem(
-            number: pullRequest.number,
-            state: rawState,
-            url: pullRequest.htmlURL,
-            updatedAt: pullRequest.updatedAt,
-            mergedAt: pullRequest.mergedAt,
-            headRefName: pullRequest.head.ref,
-            baseRefName: pullRequest.base?.ref
-        )
-    }
-
-    private nonisolated static func performWorkspacePullRequestRequest(
-        session: URLSession,
-        endpoint: String,
-        authHeader: String?
-    ) async -> WorkspacePullRequestHTTPResponse? {
-        guard let url = URL(string: "https://api.github.com/\(endpoint)") else {
-            return nil
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
-        request.setValue("cmux-workspace-pr-poller", forHTTPHeaderField: "User-Agent")
-        if let authHeader, !authHeader.isEmpty {
-            request.setValue(authHeader, forHTTPHeaderField: "Authorization")
-        }
-
-        do {
-            let (data, response) = try await session.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                return nil
-            }
-            return WorkspacePullRequestHTTPResponse(
-                statusCode: httpResponse.statusCode,
-                data: data,
-                retryAfter: httpResponse.value(forHTTPHeaderField: "Retry-After"),
-                rateLimitRemaining: httpResponse.value(forHTTPHeaderField: "X-RateLimit-Remaining"),
-                rateLimitReset: httpResponse.value(forHTTPHeaderField: "X-RateLimit-Reset")
-            )
-        } catch {
-            return nil
-        }
-    }
-
-    private nonisolated static let workspacePullRequestRetryAfterHTTPDateFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-        formatter.dateFormat = "EEE',' dd MMM yyyy HH':'mm':'ss z"
-        return formatter
-    }()
-
-    nonisolated static func classifyWorkspacePullRequestHTTPFailure(
-        statusCode: Int,
-        retryAfter: String?,
-        rateLimitRemaining: String?,
-        rateLimitReset: String?,
-        body: Data,
-        now: Date
-    ) -> WorkspacePullRequestHTTPFailureClassification {
-        if statusCode == 429 {
-            return .rateLimited(
-                retryAt: workspacePullRequestRateLimitRetryAt(
-                    retryAfter: retryAfter,
-                    rateLimitReset: rateLimitReset,
-                    now: now
-                )
-            )
-        }
-
-        guard statusCode == 403 else {
-            return .transientFailure
-        }
-
-        let hasRetryAfter = retryAfter?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .isEmpty == false
-        let trimmedRemaining = rateLimitRemaining?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let isPrimaryRateLimited = trimmedRemaining == "0"
-
-        let bodyPrefix = body.prefix(2048)
-        let bodyText = String(data: bodyPrefix, encoding: .utf8)?.lowercased() ?? ""
-        let indicatesRateLimit = bodyText.contains("secondary rate limit")
-            || bodyText.contains("rate limit")
-            || bodyText.contains("abuse detection")
-
-        if hasRetryAfter || isPrimaryRateLimited || indicatesRateLimit {
-            return .rateLimited(
-                retryAt: workspacePullRequestRateLimitRetryAt(
-                    retryAfter: retryAfter,
-                    rateLimitReset: rateLimitReset,
-                    now: now
-                )
-            )
-        }
-
-        return .transientFailure
-    }
-
-    nonisolated static func workspacePullRequestRateLimitRetryAt(
-        retryAfter: String?,
-        rateLimitReset: String?,
-        now: Date
-    ) -> Date {
-        if let date = workspacePullRequestRetryAfterDate(retryAfter: retryAfter, now: now) {
-            return date
-        }
-
-        if let resetDate = workspacePullRequestRateLimitResetDate(rateLimitReset: rateLimitReset, now: now) {
-            return resetDate
-        }
-
-        return now.addingTimeInterval(Self.workspacePullRequestRateLimitFallbackCooldown)
-    }
-
-    private nonisolated static func workspacePullRequestRetryAfterDate(
-        retryAfter: String?,
-        now: Date
-    ) -> Date? {
-        guard let rawRetryAfter = retryAfter?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !rawRetryAfter.isEmpty else {
-            return nil
-        }
-
-        if let seconds = TimeInterval(rawRetryAfter) {
-            return now.addingTimeInterval(max(1, seconds))
-        }
-
-        if let date = workspacePullRequestRetryAfterHTTPDateFormatter.date(from: rawRetryAfter) {
-            return max(date, now)
-        }
-        return nil
-    }
-
-    private nonisolated static func workspacePullRequestRateLimitResetDate(
-        rateLimitReset: String?,
-        now: Date
-    ) -> Date? {
-        guard let rawReset = rateLimitReset?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-            !rawReset.isEmpty,
-            let resetTimestamp = TimeInterval(rawReset) else {
-            return nil
-        }
-
-        return max(Date(timeIntervalSince1970: resetTimestamp), now)
-    }
-
-    private nonisolated static func workspacePullRequestAuthHeaderValue(
-        commandRunner: any CommandRunning
-    ) async -> String? {
-        let environment = ProcessInfo.processInfo.environment
-        if let envToken = environment["GH_TOKEN"] ?? environment["GITHUB_TOKEN"] {
-            let trimmed = envToken.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !trimmed.isEmpty {
-                return "Bearer \(trimmed)"
-            }
-        }
-
-        let directory = FileManager.default.currentDirectoryPath
-        let token = await commandRunner.runStandardOutput(
-            directory: directory,
-            executable: "gh",
-            arguments: ["auth", "token"],
-            timeout: workspacePullRequestProbeTimeout
-        )?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !token.isEmpty else { return nil }
-        return "Bearer \(token)"
-    }
-
-    nonisolated static func pullRequestMapByNormalizedBranchForTesting(
-        from pullRequests: [GitHubPullRequestProbeItem],
-        now: Date
-    ) -> [String: GitHubPullRequestProbeItem] {
-        pullRequestMapByNormalizedBranch(from: pullRequests, now: now)
-    }
-
-    private nonisolated static func pullRequestMapByNormalizedBranch(
-        from pullRequests: [GitHubPullRequestProbeItem],
-        now: Date = Date()
-    ) -> [String: GitHubPullRequestProbeItem] {
-        var pullRequestsByBranch: [String: GitHubPullRequestProbeItem] = [:]
-
-        for pullRequest in pullRequests {
-            guard let branch = normalizedBranchName(pullRequest.headRefName),
-                  isSidebarPullRequestCandidate(pullRequest, now: now) else {
-                continue
-            }
-
-            if let currentBest = pullRequestsByBranch[branch] {
-                // Both `currentBest` and `pullRequest` already passed `isSidebarPullRequestCandidate`,
-                // so skip re-filtering and directly compare. Saves an O(N²) candidate check on duplicates.
-                if isPreferredCandidate(candidate: pullRequest, over: currentBest) {
-                    pullRequestsByBranch[branch] = pullRequest
-                }
-            } else {
-                pullRequestsByBranch[branch] = pullRequest
-            }
-        }
-
-        return pullRequestsByBranch
-    }
-
     private nonisolated static func sidebarPullRequestState(
         from pullRequest: GitHubPullRequestProbeItem,
         branch: String?
@@ -6082,79 +5059,6 @@ class TabManager: ObservableObject {
         return orderedSlugs
     }
 
-#if DEBUG
-    nonisolated static func workspaceGitMetadataWatchedPathsForTesting(directory: String) -> [String] {
-        workspaceGitMetadataWatcherDescriptor(for: directory)?.watchedPaths ?? []
-    }
-
-    nonisolated static func workspaceGitMetadataWatcherFirstRefreshDelayDuringStormForTesting(
-        eventCount: Int,
-        eventInterval: TimeInterval,
-        waitTimeout: TimeInterval
-    ) -> TimeInterval? {
-        let semaphore = DispatchSemaphore(value: 0)
-        let recorder = WorkspaceGitMetadataWatcherRefreshRecorder()
-
-        // Watch a unique, empty temp directory so only simulated events reach the
-        // watcher. Pointing it at the shared NSTemporaryDirectory() would let
-        // unrelated temp-dir traffic from other processes or tests trip the watcher
-        // and skew the measured first-refresh delay.
-        let temporaryDirectoryURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try? FileManager.default.createDirectory(at: temporaryDirectoryURL, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: temporaryDirectoryURL) }
-
-        let createdWatcher = WorkspaceGitMetadataWatcher(
-            descriptor: WorkspaceGitMetadataWatcher.Descriptor(
-                directory: temporaryDirectoryURL.path,
-                watchedPaths: [temporaryDirectoryURL.path]
-            )
-        ) {
-            recorder.recordFirstRefresh()
-            semaphore.signal()
-        }
-        guard let watcher = createdWatcher else {
-            return nil
-        }
-        // Cancel the producer before tearing down the watcher so a timeout doesn't
-        // leave synthetic events landing on the shared watcher queue after this
-        // helper returns (which would bleed into later tests). Deferred blocks run
-        // last-in-first-out, so this runs before the temp-directory cleanup above.
-        defer {
-            recorder.cancel()
-            watcher.stop()
-        }
-
-        DispatchQueue.global(qos: .utility).async {
-            // Start the clock only once the storm actually begins; the watcher is
-            // already constructed here, so setup time isn't counted as delay.
-            recorder.start()
-            for _ in 0..<eventCount {
-                if recorder.isCancelled { return }
-                watcher.simulateEventForTesting()
-                Thread.sleep(forTimeInterval: eventInterval)
-            }
-        }
-
-        guard semaphore.wait(timeout: .now() + waitTimeout) == .success else {
-            return nil
-        }
-
-        return recorder.delay
-    }
-
-    nonisolated static func githubRepositorySlugs(fromGitConfigForTesting config: String) -> [String] {
-        githubRepositorySlugs(fromGitRemoteVOutput: gitRemoteVLines(fromConfig: config).joined())
-    }
-
-    nonisolated static func githubRepositorySlugs(directoryForTesting directory: String) -> [String] {
-        guard let repository = resolveGitRepository(containing: directory),
-              let output = gitRemoteVOutput(repository: repository) else {
-            return []
-        }
-        return githubRepositorySlugs(fromGitRemoteVOutput: output)
-    }
-#endif
 
     #if compiler(>=6.2)
     @concurrent

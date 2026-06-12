@@ -1332,8 +1332,8 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         branch: String = "feature/work",
         url: String = "https://github.com/manaflow-ai/cmux/pull/1888",
         updatedAt: String = "2026-03-20T18:00:00Z"
-    ) -> TabManager.GitHubPullRequestProbeItem {
-        TabManager.GitHubPullRequestProbeItem(
+    ) -> GitHubPullRequestProbeItem {
+        GitHubPullRequestProbeItem(
             number: number,
             state: state,
             url: url,
@@ -1637,19 +1637,19 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
 
     func testPreferredPullRequestPrefersOpenOverMergedAndClosed() {
         let candidates = [
-            TabManager.GitHubPullRequestProbeItem(
+            GitHubPullRequestProbeItem(
                 number: 1889,
                 state: "MERGED",
                 url: "https://github.com/manaflow-ai/cmux/pull/1889",
                 updatedAt: "2026-03-20T18:00:00Z"
             ),
-            TabManager.GitHubPullRequestProbeItem(
+            GitHubPullRequestProbeItem(
                 number: 1891,
                 state: "OPEN",
                 url: "https://github.com/manaflow-ai/cmux/pull/1891",
                 updatedAt: "2026-03-19T18:00:00Z"
             ),
-            TabManager.GitHubPullRequestProbeItem(
+            GitHubPullRequestProbeItem(
                 number: 1800,
                 state: "CLOSED",
                 url: "https://github.com/manaflow-ai/cmux/pull/1800",
@@ -1664,13 +1664,13 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
     }
 
     func testPreferredPullRequestPrefersMostRecentlyUpdatedWithinSameStatus() {
-        let olderOpen = TabManager.GitHubPullRequestProbeItem(
+        let olderOpen = GitHubPullRequestProbeItem(
             number: 1880,
             state: "OPEN",
             url: "https://github.com/manaflow-ai/cmux/pull/1880",
             updatedAt: "2026-03-18T18:00:00Z"
         )
-        let newerOpen = TabManager.GitHubPullRequestProbeItem(
+        let newerOpen = GitHubPullRequestProbeItem(
             number: 1890,
             state: "OPEN",
             url: "https://github.com/manaflow-ai/cmux/pull/1890",
@@ -1684,7 +1684,7 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
     }
 
     func testPreferredPullRequestIgnoresMalformedCandidates() {
-        let valid = TabManager.GitHubPullRequestProbeItem(
+        let valid = GitHubPullRequestProbeItem(
             number: 1888,
             state: "OPEN",
             url: "https://github.com/manaflow-ai/cmux/pull/1888",
@@ -1693,13 +1693,13 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
 
         XCTAssertEqual(
             TabManager.preferredPullRequest(from: [
-                TabManager.GitHubPullRequestProbeItem(
+                GitHubPullRequestProbeItem(
                     number: 9999,
                     state: "WHATEVER",
                     url: "https://github.com/manaflow-ai/cmux/pull/9999",
                     updatedAt: "2026-03-21T18:00:00Z"
                 ),
-                TabManager.GitHubPullRequestProbeItem(
+                GitHubPullRequestProbeItem(
                     number: 10000,
                     state: "OPEN",
                     url: "not a url",
@@ -1709,47 +1709,6 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
             ]),
             valid
         )
-    }
-
-    func testPullRequestMapDropsStaleMergedHeadPullRequestForLongLivedBaseBranch() throws {
-        let now = try XCTUnwrap(ISO8601DateFormatter().date(from: "2026-04-20T12:00:00Z"))
-        let pullRequests = [
-            TabManager.GitHubPullRequestProbeItem(
-                number: 2400,
-                state: "MERGED",
-                url: "https://github.com/manaflow-ai/cmux/pull/2400",
-                updatedAt: "2026-03-06T12:00:00Z",
-                mergedAt: "2026-03-06T12:00:00Z",
-                headRefName: "develop",
-                baseRefName: "main"
-            ),
-            TabManager.GitHubPullRequestProbeItem(
-                number: 2501,
-                state: "MERGED",
-                url: "https://github.com/manaflow-ai/cmux/pull/2501",
-                updatedAt: "2026-04-19T12:00:00Z",
-                mergedAt: "2026-04-19T12:00:00Z",
-                headRefName: "feature/recent-one",
-                baseRefName: "develop"
-            ),
-            TabManager.GitHubPullRequestProbeItem(
-                number: 2502,
-                state: "OPEN",
-                url: "https://github.com/manaflow-ai/cmux/pull/2502",
-                updatedAt: "2026-04-20T12:00:00Z",
-                headRefName: "feature/recent-two",
-                baseRefName: "develop"
-            ),
-        ]
-
-        let pullRequestsByBranch = TabManager.pullRequestMapByNormalizedBranchForTesting(
-            from: pullRequests,
-            now: now
-        )
-
-        XCTAssertNil(pullRequestsByBranch["develop"])
-        XCTAssertEqual(pullRequestsByBranch["feature/recent-one"]?.number, 2501)
-        XCTAssertEqual(pullRequestsByBranch["feature/recent-two"]?.number, 2502)
     }
 
     func testShouldSkipWorkspacePullRequestLookupOnlyForExactMainAndMaster() {
@@ -1776,220 +1735,6 @@ final class TabManagerPullRequestProbeTests: XCTestCase {
         XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "branchChange"))
         XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "branchChange.followUp"))
         XCTAssertFalse(TabManager.workspacePullRequestRefreshAllowsRepoCache(reason: "commandHint:merge"))
-    }
-
-    func testWorkspacePullRequestHTTPFailureClassificationTreatsRetryAfterAsRateLimited() {
-        let now = Date(timeIntervalSince1970: 1_000)
-
-        XCTAssertEqual(
-            TabManager.classifyWorkspacePullRequestHTTPFailure(
-                statusCode: 429,
-                retryAfter: "120",
-                rateLimitRemaining: nil,
-                rateLimitReset: nil,
-                body: Data(),
-                now: now
-            ),
-            .rateLimited(retryAt: now.addingTimeInterval(120))
-        )
-    }
-
-    func testWorkspacePullRequestHTTPFailureClassificationUsesRateLimitResetHeader() {
-        let now = Date(timeIntervalSince1970: 1_000)
-        let retryAt = Date(timeIntervalSince1970: 1_234)
-
-        XCTAssertEqual(
-            TabManager.classifyWorkspacePullRequestHTTPFailure(
-                statusCode: 403,
-                retryAfter: nil,
-                rateLimitRemaining: "0",
-                rateLimitReset: "1234",
-                body: Data(),
-                now: now
-            ),
-            .rateLimited(retryAt: retryAt)
-        )
-    }
-
-    func testWorkspacePullRequestHTTPFailureClassificationUsesFallbackCooldownForSecondaryRateLimitBody() {
-        let now = Date(timeIntervalSince1970: 1_000)
-
-        XCTAssertEqual(
-            TabManager.classifyWorkspacePullRequestHTTPFailure(
-                statusCode: 403,
-                retryAfter: nil,
-                rateLimitRemaining: nil,
-                rateLimitReset: nil,
-                body: Data("You have exceeded a secondary rate limit.".utf8),
-                now: now
-            ),
-            .rateLimited(retryAt: now.addingTimeInterval(300))
-        )
-    }
-
-    func testWorkspacePullRequestHTTPFailureClassificationKeeps500AsTransientFailure() {
-        XCTAssertEqual(
-            TabManager.classifyWorkspacePullRequestHTTPFailure(
-                statusCode: 500,
-                retryAfter: nil,
-                rateLimitRemaining: nil,
-                rateLimitReset: nil,
-                body: Data("server error".utf8),
-                now: Date(timeIntervalSince1970: 1_000)
-            ),
-            .transientFailure
-        )
-    }
-
-    func testWorkspacePullRequestTransientFailureDelayUsesExponentialBackoffWithCap() {
-        XCTAssertEqual(
-            TabManager.workspacePullRequestTransientFailureDelay(baseInterval: 10, failureCount: 1),
-            10
-        )
-        XCTAssertEqual(
-            TabManager.workspacePullRequestTransientFailureDelay(baseInterval: 10, failureCount: 2),
-            20
-        )
-        XCTAssertEqual(
-            TabManager.workspacePullRequestTransientFailureDelay(baseInterval: 10, failureCount: 6),
-            300
-        )
-        XCTAssertEqual(
-            TabManager.workspacePullRequestTransientFailureDelay(baseInterval: 60, failureCount: 1),
-            60
-        )
-        XCTAssertEqual(
-            TabManager.workspacePullRequestTransientFailureDelay(baseInterval: 60, failureCount: 3),
-            240
-        )
-        XCTAssertEqual(
-            TabManager.workspacePullRequestTransientFailureDelay(baseInterval: 60, failureCount: 4),
-            300
-        )
-    }
-
-    func testWorkspacePullRequestNextPollAtUsesRetryAtForRateLimit() {
-        let now = Date(timeIntervalSince1970: 1_000)
-        let retryAt = now.addingTimeInterval(180)
-
-        XCTAssertEqual(
-            TabManager.workspacePullRequestNextPollAt(
-                now: now,
-                resolution: .rateLimited(retryAt: retryAt),
-                hasTerminalStateSweepContext: true,
-                isSelectedFocusedPanel: true,
-                transientFailureCount: 4
-            ),
-            retryAt
-        )
-    }
-
-    func testWorkspacePullRequestNextPollAtUsesBackoffForTransientFailures() {
-        let now = Date(timeIntervalSince1970: 1_000)
-
-        XCTAssertEqual(
-            TabManager.workspacePullRequestNextPollAt(
-                now: now,
-                resolution: .transientFailure,
-                hasTerminalStateSweepContext: false,
-                isSelectedFocusedPanel: true,
-                transientFailureCount: 3
-            ),
-            now.addingTimeInterval(40)
-        )
-        XCTAssertEqual(
-            TabManager.workspacePullRequestNextPollAt(
-                now: now,
-                resolution: .transientFailure,
-                hasTerminalStateSweepContext: false,
-                isSelectedFocusedPanel: false,
-                transientFailureCount: 3
-            ),
-            now.addingTimeInterval(240)
-        )
-    }
-
-    func testWorkspacePullRequestResolutionPrefersResolvedOverRateLimitedRepo() {
-        let pullRequest = makePullRequestProbeItem()
-        let cacheEntry = TabManager.WorkspacePullRequestRepoCacheEntry(
-            fetchedAt: Date(timeIntervalSince1970: 1_000),
-            pullRequestsByBranch: ["feature/work": pullRequest]
-        )
-        let retryAt = Date(timeIntervalSince1970: 1_300)
-
-        let (resolution, usedCachedRepoData) = TabManager.workspacePullRequestResolution(
-            branch: "feature/work",
-            repoSlugs: ["upstream", "origin"],
-            repoResults: [
-                "upstream": .rateLimited(until: retryAt),
-                "origin": .success(
-                    cacheEntry,
-                    usedCache: true,
-                    transientBranches: [],
-                    rateLimitedBranches: [:]
-                ),
-            ]
-        )
-
-        XCTAssertEqual(
-            resolution,
-            .resolved(
-                TabManager.WorkspacePullRequestResolvedItem(
-                    number: 1888,
-                    urlString: "https://github.com/manaflow-ai/cmux/pull/1888",
-                    statusRawValue: "open",
-                    branch: "feature/work"
-                )
-            )
-        )
-        XCTAssertTrue(usedCachedRepoData)
-    }
-
-    func testWorkspacePullRequestResolutionReturnsRateLimitedWhenNoRepoMatches() {
-        let cacheEntry = TabManager.WorkspacePullRequestRepoCacheEntry(
-            fetchedAt: Date(timeIntervalSince1970: 1_000),
-            pullRequestsByBranch: [:]
-        )
-        let retryAt = Date(timeIntervalSince1970: 1_420)
-
-        let (resolution, usedCachedRepoData) = TabManager.workspacePullRequestResolution(
-            branch: "feature/work",
-            repoSlugs: ["origin"],
-            repoResults: [
-                "origin": .success(
-                    cacheEntry,
-                    usedCache: false,
-                    transientBranches: [],
-                    rateLimitedBranches: ["feature/work": retryAt]
-                )
-            ]
-        )
-
-        XCTAssertEqual(resolution, .rateLimited(retryAt: retryAt))
-        XCTAssertFalse(usedCachedRepoData)
-    }
-
-    func testWorkspacePullRequestRepoFetchResultReturnsCooldownWithoutRequest() async {
-        WorkspacePullRequestProbeTestURLProtocol.requestCount = 0
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [WorkspacePullRequestProbeTestURLProtocol.self]
-        let session = URLSession(configuration: configuration)
-        let now = Date(timeIntervalSince1970: 1_000)
-        let retryAt = now.addingTimeInterval(300)
-
-        let result = await TabManager.workspacePullRequestRepoFetchResult(
-            repoSlug: "manaflow-ai/cmux",
-            candidateBranches: ["feature/work"],
-            cachedEntry: nil,
-            useCachedRecentWindow: false,
-            rateLimitedUntil: retryAt,
-            now: now,
-            session: session,
-            authHeader: nil
-        )
-
-        XCTAssertEqual(result, .rateLimited(until: retryAt))
-        XCTAssertEqual(WorkspacePullRequestProbeTestURLProtocol.requestCount, 0)
     }
 
     func testScheduleWorkspacePullRequestRefreshRunsImmediatelyWhenShellDebounceDisabled() {

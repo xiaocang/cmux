@@ -1,4 +1,5 @@
 import AppKit
+import CmuxAuthRuntime
 import CmuxSidebarInterpreterClient
 import CmuxSidebarRemoteRender
 import CmuxSocketControl
@@ -6139,7 +6140,10 @@ struct SettingsView: View {
     private var rightSidebarDockEnabled = RightSidebarBetaFeatureSettings.defaultDockEnabled
 
     @ObservedObject private var notificationStore = TerminalNotificationStore.shared
-    @ObservedObject private var authManager = AuthManager.shared
+    // Auth state moved to CmuxAuthRuntime; the coordinator + browser flow are
+    // attached to TerminalController once at startup (AppDelegate configure).
+    private var authCoordinator: AuthCoordinator? { TerminalController.shared.authCoordinator }
+    private var browserSignInFlow: HostBrowserSignInFlow? { TerminalController.shared.browserSignInFlow }
     @StateObject private var keyboardShortcutSettingsObserver = KeyboardShortcutSettingsObserver.shared
     @State private var shortcutResetToken = UUID()
     @State private var leaderKeyResetToken = UUID()
@@ -7462,7 +7466,7 @@ struct SettingsView: View {
                     SettingsSectionHeader(title: String(localized: "settings.section.account", defaultValue: "Account"))
                         .settingsSearchAnchor(SettingsSearchIndex.sectionID(for: .account))
                     SettingsCard {
-                        AuthSettingsRow(authManager: authManager)
+                        AuthSettingsRow(auth: authCoordinator, signIn: browserSignInFlow)
                     }
                     .settingsSearchAnchor(SettingsSearchIndex.settingID(for: .account, idSuffix: "account"))
 
@@ -9950,7 +9954,12 @@ struct SettingsSectionHeader: View {
 }
 
 private struct AuthSettingsRow: View {
-    @ObservedObject var authManager: AuthManager
+    let auth: AuthCoordinator?
+    let signIn: HostBrowserSignInFlow?
+
+    private var isWorking: Bool {
+        (auth?.isLoading ?? false) || (auth?.isRestoringSession ?? false) || (signIn?.isSigningIn ?? false)
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -9964,22 +9973,22 @@ private struct AuthSettingsRow: View {
                 }
             }
             Spacer(minLength: 12)
-            if authManager.isLoading || authManager.isRestoringSession {
+            if isWorking {
                 ProgressView().controlSize(.small)
             }
             Button(action: buttonAction) {
                 Text(buttonTitle)
             }
             .controlSize(.small)
-            .disabled(authManager.isLoading || authManager.isRestoringSession)
+            .disabled(isWorking)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
     }
 
     private var titleText: String {
-        if authManager.isAuthenticated {
-            if let email = authManager.currentUser?.primaryEmail, !email.isEmpty {
+        if auth?.isAuthenticated == true {
+            if let email = auth?.currentUser?.primaryEmail, !email.isEmpty {
                 return email
             }
             return String(
@@ -9994,8 +10003,8 @@ private struct AuthSettingsRow: View {
     }
 
     private var subtitleText: String? {
-        if authManager.isAuthenticated {
-            return authManager.currentUser?.displayName
+        if auth?.isAuthenticated == true {
+            return auth?.currentUser?.displayName
         }
         return String(
             localized: "settings.account.signedOut.subtitle",
@@ -10004,7 +10013,7 @@ private struct AuthSettingsRow: View {
     }
 
     private var buttonTitle: String {
-        if authManager.isAuthenticated {
+        if auth?.isAuthenticated == true {
             return String(
                 localized: "settings.account.signOut",
                 defaultValue: "Sign Out"
@@ -10017,12 +10026,12 @@ private struct AuthSettingsRow: View {
     }
 
     private func buttonAction() {
-        if authManager.isAuthenticated {
+        if auth?.isAuthenticated == true {
             Task { @MainActor in
-                await authManager.signOut()
+                await signIn?.signOut()
             }
         } else {
-            authManager.beginSignIn()
+            signIn?.beginSignIn()
         }
     }
 }

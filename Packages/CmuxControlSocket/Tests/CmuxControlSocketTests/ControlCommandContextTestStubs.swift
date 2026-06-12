@@ -63,7 +63,8 @@ extension ControlNotificationContext {
         explicitSurfaceID: UUID?,
         title: String,
         subtitle: String,
-        body: String
+        body: String,
+        source: String?
     ) -> ControlNotificationCreateResolution { .tabManagerUnavailable }
 
     func controlNotificationCreateForSurface(
@@ -71,7 +72,8 @@ extension ControlNotificationContext {
         surfaceID: UUID,
         title: String,
         subtitle: String,
-        body: String
+        body: String,
+        source: String?
     ) -> ControlNotificationTargetedDeliveryResolution { .tabManagerUnavailable }
 
     func controlNotificationCreateForTarget(
@@ -80,7 +82,8 @@ extension ControlNotificationContext {
         surfaceID: UUID,
         title: String,
         subtitle: String,
-        body: String
+        body: String,
+        source: String?
     ) -> ControlNotificationTargetedDeliveryResolution { .tabManagerUnavailable }
 
     func controlNotificationList() -> [ControlNotificationSnapshot] { [] }
