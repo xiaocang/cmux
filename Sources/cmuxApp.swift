@@ -1,20 +1,50 @@
 import AppKit
+import CmuxSidebarInterpreterClient
+import CmuxSidebarRemoteRender
 import CmuxSocketControl
 import CmuxSettings
 import CmuxSettingsUI
+import CmuxUpdater
+import CmuxUpdaterUI
 import SwiftUI
 import Observation
 import Darwin
 import Bonsplit
 import UniformTypeIdentifiers
 
+/// The process entry point. When the binary is launched with a sidebar worker
+/// flag (the app re-executes its own binary that way so a crash in the
+/// interpreter or renderer kills only the worker process), run that worker
+/// loop instead of the app:
+/// - the render worker hosts its own faceless AppKit session and shares the
+///   rendered layer tree with the host;
+/// - the interpreter worker (stage-1 fallback path) runs before any
+///   AppKit/SwiftUI setup.
 @main
+enum CmuxMain {
+    static func main() {
+        if CommandLine.arguments.contains(RenderWorkerClient.workerModeArgument) {
+            runSidebarRenderWorker()
+        }
+        if CommandLine.arguments.contains(InterpreterClient.workerModeArgument) {
+            runSidebarInterpreterWorker()
+            exit(0)
+        }
+        cmuxApp.main()
+    }
+}
+
 struct cmuxApp: App {
     /// Dependency container for the new settings packages. Constructed
     /// once at app launch and injected into the SwiftUI environment via
     /// `.settingsRuntime(_:)`; descendant views resolve their settings
     /// through it via the `@LiveSetting` property wrapper.
     private let settingsRuntime: SettingsRuntime
+
+    /// The de-singletonized auth graph (shared AuthCoordinator + the macOS
+    /// hosted-browser sign-in flow). Constructed once at app launch and
+    /// injected into AppDelegate and the auth-consuming services.
+    private let authComposition: MacAuthComposition
 
     @StateObject private var tabManager: TabManager
     @StateObject private var notificationStore = TerminalNotificationStore.shared
@@ -31,6 +61,7 @@ struct cmuxApp: App {
     @AppStorage("digest.model") private var digestModel = ""
     @AppStorage("digest.claudeCodeModel") private var digestClaudeCodeModel = ""
     @AppStorage(BrowserToolbarAccessorySpacingDebugSettings.key) private var browserToolbarAccessorySpacingRaw = BrowserToolbarAccessorySpacingDebugSettings.defaultSpacing
+    @State private var browserFocusModeMenuRevision = 0
     @StateObject var focusHistoryMenuInvalidator = FocusHistoryMenuInvalidator()
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.openWindow) private var openWindow
@@ -48,16 +79,23 @@ struct cmuxApp: App {
         // shared static.
         let settingsCatalog = SettingCatalog()
         let configFileURL = CmuxConfigLocation().userConfigFile
-        // Secrets live in their own 0600 files under Application Support/cmux,
+        // Relocate a pre-existing socket password out of the legacy
+        // Application Support directory before any store reads it. The CLI reads
+        // this file on every agent hook, and a cross-identity reach into
+        // Application Support triggers the macOS Sequoia "access data from other
+        // apps" prompt; the password now lives in the non-protected cmux state
+        // directory (https://github.com/manaflow-ai/cmux/issues/5146). The app
+        // owns its Application Support data, so it can perform this move silently.
+        // This App initializer is the composition root, so it is where the
+        // concrete `FileManager.default` is named for the package's injected seams.
+        SocketControlPasswordStore.migrateLegacyApplicationSupportPasswordFileIfNeeded(fileManager: .default)
+        // Secrets live in their own 0600 files under the cmux state directory,
         // the same directory (and `socket-control-password` file) the socket
         // auth path reads via SocketControlPasswordStore, so the Settings UI
         // and the listener share one source of truth.
-        let secretBaseDirectory = SocketControlPasswordStore.defaultPasswordFileURL()?
+        let secretBaseDirectory = SocketControlPasswordStore.defaultPasswordFileURL(fileManager: .default)?
             .deletingLastPathComponent()
-            ?? FileManager.default
-                .urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
-                .appendingPathComponent("cmux", isDirectory: true)
-            ?? FileManager.default.temporaryDirectory
+            ?? CmuxStateDirectory.url(homeDirectory: FileManager.default.homeDirectoryForCurrentUser)
         let secretStore = SecretFileStore(baseDirectory: secretBaseDirectory)
 
         // Lift any plaintext socket-control password out of `cmux.json` into the
@@ -83,6 +121,8 @@ struct cmuxApp: App {
             saveSecret: { try socketPasswordStore.savePassword($0) },
             backupTimestamp: secretMigrationTimestamp
         )
+        let authComposition = MacAuthComposition()
+        self.authComposition = authComposition
         self.settingsRuntime = SettingsRuntime(
             catalog: settingsCatalog,
             userDefaultsStore: UserDefaultsSettingsStore(
@@ -92,7 +132,10 @@ struct cmuxApp: App {
             jsonStore: JSONConfigStore(fileURL: configFileURL),
             secretStore: secretStore,
             errorLog: SettingsErrorLog(),
-            accountFlow: HostAccountFlow(authManager: .shared),
+            accountFlow: HostAccountFlow(
+                coordinator: authComposition.coordinator,
+                browserSignIn: authComposition.browserSignIn
+            ),
             hostActions: HostSettingsActions(configFileURL: configFileURL)
         )
 
@@ -102,6 +145,20 @@ struct cmuxApp: App {
         // (which happens for any shell descended from this process), bare `cmux`
         // resolves here instead of the CLI. See
         // https://github.com/manaflow-ai/cmux/issues/4678.
+        // cmux ships a universal binary so it still supports Intel Macs, but a
+        // stale LaunchServices architecture preference can pin the app to its
+        // x86_64 slice on Apple Silicon, running the whole process tree under
+        // Rosetta (macOS 26 deprecation dialog; translated child shells and
+        // toolchains). `LSArchitecturePriority` in Info.plist fixes future
+        // launches; this corrects an already-mis-pinned install by re-execing the
+        // arm64 slice in place. It runs *before* CLI forwarding so a translated
+        // GUI binary invoked with CLI-style arguments is re-execed natively first
+        // and the forwarded bundled CLI then inherits the native arch too. The
+        // re-exec preserves argv and re-enters this initializer, so forwarding
+        // proceeds normally in the native process. No-op on Intel and on native
+        // launches. See https://github.com/manaflow-ai/cmux/issues/753.
+        RosettaNativeRelaunch.relaunchNativelyIfNeeded()
+
         CLIForwardingLaunchRouter.forwardToBundledCLIIfNeeded()
 
         StartupBreadcrumbLog.append("app.init.begin")
@@ -170,7 +227,13 @@ struct cmuxApp: App {
         // UI tests depend on AppDelegate wiring happening even if SwiftUI view appearance
         // callbacks (e.g. `.onAppear`) are delayed or skipped.
         StartupBreadcrumbLog.append("app.init.delegate.configure.begin")
-        appDelegate.configure(tabManager: tabManager, notificationStore: notificationStore, sidebarState: sidebarState, settingsRuntime: settingsRuntime)
+        appDelegate.configure(
+            tabManager: tabManager,
+            notificationStore: notificationStore,
+            sidebarState: sidebarState,
+            settingsRuntime: settingsRuntime,
+            auth: authComposition
+        )
         StartupBreadcrumbLog.append("app.init.delegate.configured")
     }
 
@@ -336,7 +399,7 @@ struct cmuxApp: App {
                     )
 #if DEBUG
                     if ProcessInfo.processInfo.environment["CMUX_UI_TEST_MODE"] == "1" {
-                        UpdateLogStore.shared.append("ui test: cmuxApp onAppear")
+                        AppDelegate.shared?.updateLog.append("ui test: cmuxApp onAppear")
                     }
 #endif
                     bootstrapMainWindowScene()
@@ -365,6 +428,9 @@ struct cmuxApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     enhancementSystem.shutdown()
                     pluginSystem.shutdown()
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .browserFocusModeStateDidChange)) { _ in
+                    browserFocusModeMenuRevision &+= 1
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -413,6 +479,13 @@ struct cmuxApp: App {
                 }
                 Button("Show Loading State") {
                     appDelegate.showUpdatePillLoading(nil)
+                }
+                Menu("Show Update Error…") {
+                    ForEach(DebugUpdateErrorScenario.allCases, id: \.self) { scenario in
+                        Button(scenario.menuTitle) {
+                            appDelegate.updateViewModel.debugShowUpdateError(scenario)
+                        }
+                    }
                 }
                 Button("Hide Update Pill") {
                     appDelegate.hideUpdatePill(nil)
@@ -476,6 +549,11 @@ struct cmuxApp: App {
                     appDelegate.openDebugScrollbackTab(nil)
                 }
 
+                AgentSessionDebugMenuButtons(
+                    openReact: { appDelegate.openDebugAgentSessionReact(nil) },
+                    openSolid: { appDelegate.openDebugAgentSessionSolid(nil) }
+                )
+
                 Button("Open Workspaces for All Workspace Colors") {
                     appDelegate.openDebugColorComparisonWorkspaces(nil)
                 }
@@ -527,6 +605,14 @@ struct cmuxApp: App {
                     }
                     Button("Debug Window Controls…") {
                         DebugWindowControlsWindowController.shared.show()
+                    }
+                    Button(
+                        String(
+                            localized: "debug.menu.devWindowDisplay",
+                            defaultValue: "Dev Window Display…"
+                        )
+                    ) {
+                        DevWindowDisplayDebugWindowController.shared.show()
                     }
                     Button("Feed Preview…") {
                         FeedPreviewWindowController.shared.show()
@@ -674,6 +760,20 @@ struct cmuxApp: App {
                         )
                     } else {
                         activeTabManager.addWorkspace()
+                    }
+                }
+
+                splitCommandButton(title: String(localized: "menu.file.newBrowserWorkspace", defaultValue: "New Browser Workspace"), shortcut: menuShortcut(for: .newBrowserWorkspace)) {
+                    if let appDelegate = AppDelegate.shared {
+                        appDelegate.performNewBrowserWorkspaceAction(
+                            tabManager: activeTabManager,
+                            debugSource: "menu.newBrowserWorkspace"
+                        )
+                    } else if BrowserAvailabilitySettings.isEnabled() {
+                        // Last-resort fallback for a missing AppDelegate; keep
+                        // the browser-availability gate identical to the
+                        // shared action path.
+                        activeTabManager.addWorkspace(initialSurface: .browser)
                     }
                 }
 
@@ -893,6 +993,14 @@ struct cmuxApp: App {
                 }
             }
 
+            let browserFocusModeMenu = browserFocusModeMenuSnapshot
+            Button(browserFocusModeMenu.title) {
+                if !activeTabManager.toggleBrowserFocusModeForFocusedBrowser(reason: "viewMenu") {
+                    NSSound.beep()
+                }
+            }
+            .disabled(!browserFocusModeMenu.canToggle)
+
             splitCommandButton(title: String(localized: "menu.view.zoomIn", defaultValue: "Zoom In"), shortcut: menuShortcut(for: .browserZoomIn)) {
                 _ = activeTabManager.zoomInFocusedBrowser()
             }
@@ -960,6 +1068,10 @@ struct cmuxApp: App {
 
             // Numbered workspace selection (9 = last workspace)
             ForEach(1...9, id: \.self) { number in
+                // `menuShortcut(for:)` already returns `.unbound` when the action
+                // carries a configured `shortcuts.when` clause, so a context-gated
+                // workspace shortcut takes the no-key-equivalent branch and the
+                // gated keyDown handler owns dispatch (issue #5189).
                 let selectWorkspaceByNumberShortcut = menuShortcut(for: .selectWorkspaceByNumber)
                 if selectWorkspaceByNumberShortcut.isUnbound || selectWorkspaceByNumberShortcut.hasChord {
                     Button(String(localized: "menu.view.workspace", defaultValue: "Workspace \(number)")) {
@@ -1050,6 +1162,17 @@ struct cmuxApp: App {
 
     private var notificationMenuSnapshot: NotificationMenuSnapshot {
         notificationStore.notificationMenuSnapshot
+    }
+
+    private var browserFocusModeMenuSnapshot: (title: String, canToggle: Bool) {
+        let _ = browserFocusModeMenuRevision
+        let panel = activeTabManager.focusedBrowserPanel
+        return (
+            title: panel?.isBrowserFocusModeActive == true
+                ? String(localized: "menu.view.exitBrowserFocusMode", defaultValue: "Exit Browser Focus Mode")
+                : String(localized: "menu.view.enterBrowserFocusMode", defaultValue: "Enter Browser Focus Mode"),
+            canToggle: panel?.canToggleBrowserFocusMode == true
+        )
     }
 
     var activeTabManager: TabManager {
@@ -1379,6 +1502,7 @@ private let cmuxAuxiliaryWindowIdentifiers: Set<String> = [
     "cmux.startupAppearanceDebug",
     "cmux.bonsplitTabBarDebug",
     "cmux.titlebarLayoutDebug",
+    "cmux.devWindowDisplay",
 ]
 
 /// Returns whether the given window should handle the standard close shortcut
@@ -5167,6 +5291,18 @@ enum KiroIntegrationSettings {
     }
 }
 
+enum AmpIntegrationSettings {
+    static let hooksEnabledKey = "ampHooksEnabled"
+    static let defaultHooksEnabled = true
+
+    static func hooksEnabled(defaults: UserDefaults = .standard) -> Bool {
+        if defaults.object(forKey: hooksEnabledKey) == nil {
+            return defaultHooksEnabled
+        }
+        return defaults.bool(forKey: hooksEnabledKey)
+    }
+}
+
 enum WelcomeSettings {
     static let shownKey = "cmuxWelcomeShown"
 }
@@ -5389,78 +5525,6 @@ enum CmuxUITestCapture {
     }
 }
 
-enum CmuxRuntimeDebugCapture {
-    private struct Configuration {
-        let baseURL: URL
-        let token: String
-        let sessionID: String
-    }
-
-    private static let configuration: Configuration? = {
-        let env = ProcessInfo.processInfo.environment
-        guard let baseURLString = env["CMUX_RUNTIME_DEBUG_BASE_URL"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-              let baseURL = URL(string: baseURLString),
-              let token = env["CMUX_RUNTIME_DEBUG_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !token.isEmpty,
-              let sessionID = env["CMUX_RUNTIME_DEBUG_SESSION_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !sessionID.isEmpty else {
-            return nil
-        }
-        return Configuration(baseURL: baseURL, token: token, sessionID: sessionID)
-    }()
-
-    private static let lock = NSLock()
-    private static var sequence: Int = 0
-
-    static func logIfConfigured(
-        hypothesisID: String,
-        source: String,
-        name: String,
-        expected: String? = nil,
-        actual: String? = nil,
-        data: [String: Any] = [:]
-    ) {
-        guard let configuration else { return }
-
-        var payload: [String: Any] = [
-            "session_id": configuration.sessionID,
-            "hypothesis_id": hypothesisID,
-            "service": "cmux-macos",
-            "source": source,
-            "name": name,
-            "ts": ISO8601DateFormatter().string(from: Date()),
-            "mono_ms": ProcessInfo.processInfo.systemUptime * 1000,
-            "seq": nextSequence(),
-            "data": data
-        ]
-        if let expected {
-            payload["expected"] = expected
-        }
-        if let actual {
-            payload["actual"] = actual
-        }
-
-        guard JSONSerialization.isValidJSONObject(payload),
-              let requestBody = try? JSONSerialization.data(withJSONObject: payload, options: []) else {
-            return
-        }
-
-        var request = URLRequest(url: configuration.baseURL.appendingPathComponent("api/logs"))
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(configuration.token, forHTTPHeaderField: "X-Debug-Token")
-        request.httpBody = requestBody
-
-        URLSession.shared.dataTask(with: request).resume()
-    }
-
-    private static func nextSequence() -> Int {
-        lock.lock()
-        defer { lock.unlock() }
-        sequence += 1
-        return sequence
-    }
-}
 func openCmuxSettingsFileInEditor() {
     let url = KeyboardShortcutSettings.settingsFileStore.settingsFileURLForEditing()
     PreferredEditorSettings.open(url)

@@ -104,6 +104,11 @@ extension CmuxSettingsFileStore {
                         "idleSeconds": Int(AgentHibernationSettings.defaultIdleSeconds),
                         "maxLiveTerminals": AgentHibernationSettings.defaultMaxLiveTerminals,
                     ],
+                    "rendererRealization": [
+                        "enabled": RendererRealizationSettings.defaultEnabled,
+                        "idleSeconds": Int(RendererRealizationSettings.defaultIdleSeconds),
+                        "maxWarmRenderers": RendererRealizationSettings.defaultMaxWarmRenderers,
+                    ],
                     "textBoxMaxLines": TerminalTextBoxInputSettings.defaultMaxLines,
                     "resumeCommands": [],
                 ],
@@ -170,6 +175,7 @@ extension CmuxSettingsFileStore {
                     "claudeBinaryPath": "",
                     "ripgrepBinaryPath": "",
                     "suppressSubagentNotifications": AgentSubagentNotificationSettings.defaultSuppressNotifications,
+                    "ampIntegration": AmpIntegrationSettings.defaultHooksEnabled,
                     "cursorIntegration": CursorIntegrationSettings.defaultHooksEnabled,
                     "geminiIntegration": GeminiIntegrationSettings.defaultHooksEnabled,
                     "sidebarPullRequestShellDebounceEnabled": SidebarPullRequestShellDebounceSettings.defaultEnabled,
@@ -216,6 +222,23 @@ extension CmuxSettingsFileStore {
                     "insecureHttpHostsAllowedInEmbeddedBrowser": BrowserInsecureHTTPSettings.defaultAllowlistPatterns,
                     "showImportHintOnBlankTabs": BrowserImportHintSettings.defaultShowOnBlankTabs,
                     "reactGrabVersion": ReactGrabSettings.defaultVersion,
+                ],
+            ],
+            [
+                "markdown": [
+                    "fontSize": Int(MarkdownFontSizeSettings.defaultPointSize),
+                    "fontFamily": "",
+                    "maxWidth": Int(MarkdownMaxWidthSettings.defaultCSSPixels),
+                ],
+            ],
+            [
+                "fileEditor": [
+                    "wordWrap": FilePreviewWordWrapSettings.defaultEnabled,
+                ],
+            ],
+            [
+                "diffViewer": [
+                    "defaultLayout": "unified",
                 ],
             ],
             [

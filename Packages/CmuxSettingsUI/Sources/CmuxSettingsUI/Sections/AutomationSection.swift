@@ -18,6 +18,7 @@ public struct AutomationSection: View {
     @State private var claudePathModel: DefaultsValueModel<String>
     @State private var ripgrepPathModel: DefaultsValueModel<String>
     @State private var suppressSubagentModel: DefaultsValueModel<Bool>
+    @State private var ampModel: DefaultsValueModel<Bool>
     @State private var cursorModel: DefaultsValueModel<Bool>
     @State private var geminiModel: DefaultsValueModel<Bool>
     @State private var kiroModel: DefaultsValueModel<Bool>
@@ -69,6 +70,7 @@ public struct AutomationSection: View {
         _claudePathModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.claudeCodeCustomClaudePath))
         _ripgrepPathModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.ripgrepCustomBinaryPath))
         _suppressSubagentModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.suppressSubagentNotifications))
+        _ampModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.ampHooksEnabled))
         _cursorModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.cursorHooksEnabled))
         _geminiModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.geminiHooksEnabled))
         _kiroModel = State(initialValue: DefaultsValueModel(store: defaultsStore, key: catalog.integrations.kiroHooksEnabled))
@@ -96,6 +98,7 @@ public struct AutomationSection: View {
                 claudePathCard
                 ripgrepPathCard
                 suppressSubagentCard
+                ampCard
                 cursorCard
                 geminiCard
                 kiroCard
@@ -303,6 +306,26 @@ public struct AutomationSection: View {
             }
             SettingsCardDivider()
             SettingsCardNote(String(localized: "settings.automation.suppressSubagentNotifications.note", defaultValue: "Uses process ancestry from hook processes. Disable if nested Codex or Claude sessions should trigger completion notifications."))
+        }
+    }
+
+    @ViewBuilder
+    private var ampCard: some View {
+        SettingsCard {
+            SettingsCardRow(
+                configurationReview: .json("automation.ampIntegration"),
+                String(localized: "settings.automation.amp", defaultValue: "Amp Integration"),
+                subtitle: ampModel.current
+                    ? String(localized: "settings.automation.amp.subtitleOn", defaultValue: "Sidebar shows Amp agent status and notifications.")
+                    : String(localized: "settings.automation.amp.subtitleOff", defaultValue: "Amp runs without cmux integration.")
+            ) {
+                Toggle("", isOn: Binding(get: { ampModel.current }, set: { ampModel.set($0) }))
+                    .labelsHidden()
+                    .controlSize(.small)
+                    .accessibilityIdentifier("SettingsAmpHooksToggle")
+            }
+            SettingsCardDivider()
+            SettingsCardNote(String(localized: "settings.automation.amp.note", defaultValue: "Hooks must be installed with `cmux hooks amp install`. They no-op outside cmux terminals. When disabled, the installed Amp plugin stays inactive without needing to be removed."))
         }
     }
 

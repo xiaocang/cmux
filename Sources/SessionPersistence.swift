@@ -14,7 +14,11 @@ enum SessionSnapshotSchema {
 
 enum SessionPersistencePolicy {
     static let sidebarMinimumWidthKey = "sidebarMinimumWidth"
-    static let defaultSidebarWidth: Double = 220
+    // Keep the default equal to the minimum so a fresh sidebar starts at the
+    // minimum width. The titlebar title tracks the sidebar's actual width only
+    // when it is wider than the minimum, so a default above the minimum would make
+    // the folder/title shift when toggling the sidebar at the default width.
+    static let defaultSidebarWidth: Double = 216
     static let defaultMinimumSidebarWidth: Double = 216
     static let minimumSidebarWidth: Double = 216
     static let sidebarMinimumWidthRange: ClosedRange<Double> = 120...260
@@ -1280,18 +1284,26 @@ nonisolated enum TerminalStartupReturnShellScript {
         #"fi"#,
     ]
 
-    static func commandThenReturnLines(command: String) -> [String] {
+    static func commandThenReturnLines(command: String, workingDirectory: String? = nil) -> [String] {
         let quotedCommand = TerminalStartupShellQuoting.singleQuoted(command)
-        return [
+        var lines = [
             shellLine,
             #"case "${_cmux_resume_shell:t}" in"#,
             #"  zsh|bash) "$_cmux_resume_shell" -lic \#(quotedCommand) ;;"#,
             #"  csh|tcsh) "$_cmux_resume_shell" -c \#(quotedCommand) ;;"#,
             #"  *) "$_cmux_resume_shell" -c \#(quotedCommand) ;;"#,
             #"esac"#,
-        ] + zshIntegrationReentryLines + [
-            #"exec -l "$_cmux_resume_shell""#
-        ]
+        ] + zshIntegrationReentryLines
+        // The resume command's `cd` runs inside the child shell above, so after the resumed agent
+        // exits the outer login shell would otherwise land in this script's launch cwd (the surface
+        // default), not the session's directory. Return the outer shell to the session's working
+        // directory so killing a resumed agent leaves you where the session lived.
+        if let workingDirectory, !workingDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let quotedDirectory = TerminalStartupShellQuoting.singleQuoted(workingDirectory)
+            lines.append(#"{ cd -- \#(quotedDirectory) 2>/dev/null || true; }"#)
+        }
+        lines.append(#"exec -l "$_cmux_resume_shell""#)
+        return lines
     }
 }
 
@@ -1322,7 +1334,10 @@ private enum SurfaceResumeBindingScriptStore {
                 "rm -f -- \"$0\" 2>/dev/null || true"
             ]
             if returnToLoginShell {
-                lines.append(contentsOf: TerminalStartupReturnShellScript.commandThenReturnLines(command: inlineInput))
+                lines.append(contentsOf: TerminalStartupReturnShellScript.commandThenReturnLines(
+                    command: inlineInput,
+                    workingDirectory: binding.cwd
+                ))
             } else {
                 lines.append(inlineInput)
             }
@@ -1503,6 +1518,15 @@ struct SessionBrowserPanelSnapshot: Codable, Sendable {
     var omnibarVisible: Bool? = nil
     var backHistoryURLStrings: [String]?
     var forwardHistoryURLStrings: [String]?
+    /// True when the surface is a transparent internal cmux UI (e.g. the diff
+    /// viewer). Restored so the surface comes back transparent, not opaque.
+    var transparentBackground: Bool? = nil
+    /// Diff viewer token + request path, when this browser surface hosts a diff
+    /// viewer. Restored by re-registering the token with the app-owned
+    /// `CmuxDiffViewerURLSchemeHandler` and navigating via the custom scheme,
+    /// independent of the (possibly-dead) local HTTP server.
+    var diffViewerToken: String? = nil
+    var diffViewerRequestPath: String? = nil
 
     init(
         urlString: String?,
@@ -1513,7 +1537,10 @@ struct SessionBrowserPanelSnapshot: Codable, Sendable {
         isMuted: Bool = false,
         omnibarVisible: Bool? = nil,
         backHistoryURLStrings: [String]?,
-        forwardHistoryURLStrings: [String]?
+        forwardHistoryURLStrings: [String]?,
+        transparentBackground: Bool? = nil,
+        diffViewerToken: String? = nil,
+        diffViewerRequestPath: String? = nil
     ) {
         self.urlString = urlString
         self.profileID = profileID
@@ -1524,6 +1551,9 @@ struct SessionBrowserPanelSnapshot: Codable, Sendable {
         self.omnibarVisible = omnibarVisible
         self.backHistoryURLStrings = backHistoryURLStrings
         self.forwardHistoryURLStrings = forwardHistoryURLStrings
+        self.transparentBackground = transparentBackground
+        self.diffViewerToken = diffViewerToken
+        self.diffViewerRequestPath = diffViewerRequestPath
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -1536,6 +1566,9 @@ struct SessionBrowserPanelSnapshot: Codable, Sendable {
         case omnibarVisible
         case backHistoryURLStrings
         case forwardHistoryURLStrings
+        case transparentBackground
+        case diffViewerToken
+        case diffViewerRequestPath
     }
 
     init(from decoder: Decoder) throws {
@@ -1549,6 +1582,9 @@ struct SessionBrowserPanelSnapshot: Codable, Sendable {
         omnibarVisible = try container.decodeIfPresent(Bool.self, forKey: .omnibarVisible)
         backHistoryURLStrings = try container.decodeIfPresent([String].self, forKey: .backHistoryURLStrings)
         forwardHistoryURLStrings = try container.decodeIfPresent([String].self, forKey: .forwardHistoryURLStrings)
+        transparentBackground = try container.decodeIfPresent(Bool.self, forKey: .transparentBackground)
+        diffViewerToken = try container.decodeIfPresent(String.self, forKey: .diffViewerToken)
+        diffViewerRequestPath = try container.decodeIfPresent(String.self, forKey: .diffViewerRequestPath)
     }
 }
 struct SessionMarkdownPanelSnapshot: Codable, Sendable {
@@ -1678,6 +1714,7 @@ struct SessionPanelSnapshot: Codable, Sendable {
     var markdown: SessionMarkdownPanelSnapshot?
     var filePreview: SessionFilePreviewPanelSnapshot?
     var rightSidebarTool: SessionRightSidebarToolPanelSnapshot?
+    var agentSession: SessionAgentSessionPanelSnapshot? = nil
     var project: SessionProjectPanelSnapshot?
 }
 
@@ -1832,13 +1869,29 @@ struct AppSessionSnapshot: Codable, Sendable {
 }
 
 enum SessionPersistenceStore {
+    enum SnapshotLoadOutcome {
+        case loaded(AppSessionSnapshot)
+        /// No snapshot file on disk: a genuinely clean state.
+        case missing
+        /// A snapshot file exists but cannot be restored (unreadable data,
+        /// decode failure, schema version drift, or an anomalous empty
+        /// window list; empty states remove the file instead of writing it).
+        case unusable
+    }
+
+    static func loadOutcome(fileURL: URL) -> SnapshotLoadOutcome {
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return .missing }
+        guard let data = try? Data(contentsOf: fileURL) else { return .unusable }
+        let decoder = JSONDecoder()
+        guard let snapshot = try? decoder.decode(AppSessionSnapshot.self, from: data) else { return .unusable }
+        guard snapshot.version == SessionSnapshotSchema.currentVersion else { return .unusable }
+        guard !snapshot.windows.isEmpty else { return .unusable }
+        return .loaded(snapshot)
+    }
+
     static func load(fileURL: URL? = nil) -> AppSessionSnapshot? {
         guard let fileURL = fileURL ?? defaultSnapshotFileURL() else { return nil }
-        guard let data = try? Data(contentsOf: fileURL) else { return nil }
-        let decoder = JSONDecoder()
-        guard let snapshot = try? decoder.decode(AppSessionSnapshot.self, from: data) else { return nil }
-        guard snapshot.version == SessionSnapshotSchema.currentVersion else { return nil }
-        guard !snapshot.windows.isEmpty else { return nil }
+        guard case .loaded(let snapshot) = loadOutcome(fileURL: fileURL) else { return nil }
         return snapshot
     }
 
@@ -1884,13 +1937,57 @@ enum SessionPersistenceStore {
         return load(fileURL: fileURL)
     }
 
-    static func syncManualRestoreSnapshotCache() {
-        guard let fileURL = manualRestoreSnapshotFileURL() else { return }
-        guard let snapshot = load() else {
-            removeSnapshot(fileURL: fileURL)
-            return
+    static func syncManualRestoreSnapshotCache(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        appSupportDirectory: URL? = nil
+    ) {
+        guard let backupURL = manualRestoreSnapshotFileURL(
+            bundleIdentifier: bundleIdentifier,
+            appSupportDirectory: appSupportDirectory
+        ) else { return }
+        guard let primaryURL = defaultSnapshotFileURL(
+            bundleIdentifier: bundleIdentifier,
+            appSupportDirectory: appSupportDirectory
+        ) else { return }
+        switch loadOutcome(fileURL: primaryURL) {
+        case .loaded(let snapshot):
+            _ = save(snapshot, fileURL: backupURL)
+        case .missing:
+            removeSnapshot(fileURL: backupURL)
+        case .unusable:
+            // The primary snapshot exists but cannot be restored. Keep the
+            // backup: it is the only remaining recovery path for the user's
+            // sessions (startup fallback and `cmux restore-session`).
+            break
         }
-        _ = save(snapshot, fileURL: fileURL)
+    }
+
+    static func loadStartupSnapshot(
+        bundleIdentifier: String? = Bundle.main.bundleIdentifier,
+        appSupportDirectory: URL? = nil
+    ) -> AppSessionSnapshot? {
+        guard let primaryURL = defaultSnapshotFileURL(
+            bundleIdentifier: bundleIdentifier,
+            appSupportDirectory: appSupportDirectory
+        ) else { return nil }
+        switch loadOutcome(fileURL: primaryURL) {
+        case .loaded(let snapshot):
+            return snapshot
+        case .missing:
+            return nil
+        case .unusable:
+            let backup = loadReopenSessionSnapshot(
+                bundleIdentifier: bundleIdentifier,
+                appSupportDirectory: appSupportDirectory
+            )
+#if DEBUG
+            cmuxDebugLog(
+                "session.restore.primaryUnusable path=\(primaryURL.path) " +
+                    "backupRecovered=\(backup != nil ? 1 : 0)"
+            )
+#endif
+            return backup
+        }
     }
 
     static func defaultSnapshotFileURL(
@@ -1965,7 +2062,14 @@ enum SessionScrollbackReplayStore {
     private static func normalizedScrollback(_ scrollback: String?) -> String? {
         guard let scrollback else { return nil }
         guard scrollback.contains(where: { !$0.isWhitespace }) else { return nil }
-        guard let truncated = SessionPersistencePolicy.truncatedScrollback(scrollback) else { return nil }
+        // Restored history must not reconfigure the live terminal's colors: the
+        // active theme owns the default foreground/background (and palette), so
+        // default-colored cells track it. The captured scrollback bakes the
+        // capture-time theme via terminal-color OSC sequences (e.g. OSC 10/11),
+        // which would otherwise survive a theme change as white-on-white output
+        // (issue #5165). Strip them before replay.
+        let themePortable = strippingTerminalColorOSCSequences(scrollback)
+        guard let truncated = SessionPersistencePolicy.truncatedScrollback(themePortable) else { return nil }
         return ansiSafeReplayText(truncated)
     }
 
@@ -1980,6 +2084,97 @@ enum SessionScrollbackReplayStore {
             output += ansiReset
         }
         return output
+    }
+
+    /// Removes terminal-color OSC sequences (palette entries and the dynamic
+    /// foreground/background/cursor/highlight colors plus their resets) from
+    /// captured scrollback so the restored history does not reconfigure the live
+    /// terminal's colors.
+    ///
+    /// Ghostty's `write_screen_file:copy,vt` export bakes the capture-time theme
+    /// by prepending `OSC 10` / `OSC 11` (and resolving palette entries). Replaying
+    /// those into a freshly launched terminal would override the active theme's
+    /// default colors, so restored default-colored cells would keep the old theme
+    /// (white-on-white after a theme change — issue #5165). Explicit per-cell SGR
+    /// colors and every non-color escape sequence (titles, hyperlinks, prompt
+    /// marks, …) are preserved verbatim.
+    private static func strippingTerminalColorOSCSequences(_ text: String) -> String {
+        let escByte: UInt8 = 0x1B
+        let oscIntroducer: UInt8 = 0x5D // ]
+        let bel: UInt8 = 0x07
+        let backslash: UInt8 = 0x5C
+        let zero: UInt8 = 0x30
+        let nine: UInt8 = 0x39
+
+        let bytes = Array(text.utf8)
+        guard bytes.contains(escByte) else { return text }
+
+        var output = [UInt8]()
+        output.reserveCapacity(bytes.count)
+        let count = bytes.count
+        var index = 0
+        while index < count {
+            let byte = bytes[index]
+            guard byte == escByte,
+                  index + 1 < count,
+                  bytes[index + 1] == oscIntroducer else {
+                output.append(byte)
+                index += 1
+                continue
+            }
+
+            // Parse the OSC numeric command (Ps) following `ESC ]`.
+            var cursor = index + 2
+            var code = 0
+            var sawDigit = false
+            while cursor < count, bytes[cursor] >= zero, bytes[cursor] <= nine {
+                code = (code * 10) + Int(bytes[cursor] - zero)
+                sawDigit = true
+                cursor += 1
+                if code > 100_000 { break } // overflow guard for malformed input
+            }
+
+            guard sawDigit, isTerminalColorOSCCode(code) else {
+                // Not a terminal-color OSC; emit `ESC` and resume scanning so the
+                // rest of the preserved sequence is copied verbatim.
+                output.append(byte)
+                index += 1
+                continue
+            }
+
+            // Consume through the OSC terminator (BEL or `ESC \` / ST). A truncated
+            // (unterminated) color OSC at the end of the buffer is dropped as well.
+            var end = cursor
+            var terminated = false
+            while end < count {
+                if bytes[end] == bel {
+                    end += 1
+                    terminated = true
+                    break
+                }
+                if bytes[end] == escByte, end + 1 < count, bytes[end + 1] == backslash {
+                    end += 2
+                    terminated = true
+                    break
+                }
+                end += 1
+            }
+            index = terminated ? end : count
+        }
+
+        return String(decoding: output, as: UTF8.self)
+    }
+
+    /// Returns `true` for OSC command numbers that configure terminal colors
+    /// (palette entries and the dynamic foreground/background/cursor/highlight
+    /// colors plus their resets), which restored scrollback must not carry.
+    private static func isTerminalColorOSCCode(_ code: Int) -> Bool {
+        switch code {
+        case 4, 5, 104, 105: return true // palette / special color set + reset
+        case 10...19: return true        // dynamic colors (fg, bg, cursor, …)
+        case 110...119: return true      // dynamic color resets
+        default: return false
+        }
     }
 
     private static func writeReplayFile(contents: String, tempDirectory: URL) -> URL? {

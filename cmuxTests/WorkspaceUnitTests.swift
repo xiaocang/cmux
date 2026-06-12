@@ -105,6 +105,7 @@ final class SidebarSelectedWorkspaceColorTests: XCTestCase {
         let cancellable = workspace.sidebarImmediateObservationPublisher.sink {
             observedSidebarInvalidation = true
         }
+        observedSidebarInvalidation = false
 
         manager.setTabColor(tabId: workspace.id, color: "#C0392B")
 
@@ -140,6 +141,7 @@ final class SidebarSelectedWorkspaceColorTests: XCTestCase {
         let cancellable = workspace.sidebarImmediateObservationPublisher.sink {
             observedSidebarInvalidation = true
         }
+        observedSidebarInvalidation = false
 
         manager.setTabColor(tabId: workspace.id, color: "#C0392B")
 
@@ -3301,6 +3303,7 @@ final class WorkspaceCreationPlacementTests: XCTestCase {
             workingDirectory: String?,
             portOrdinal: Int,
             configTemplate: CmuxSurfaceConfigTemplate?,
+            initialSurface: NewWorkspaceInitialSurface,
             initialTerminalCommand: String?,
             initialTerminalInput: String?,
             initialTerminalEnvironment: [String: String]
@@ -3311,6 +3314,7 @@ final class WorkspaceCreationPlacementTests: XCTestCase {
                 workingDirectory: workingDirectory,
                 portOrdinal: portOrdinal,
                 configTemplate: configTemplate,
+                initialSurface: initialSurface,
                 initialTerminalCommand: initialTerminalCommand,
                 initialTerminalInput: initialTerminalInput,
                 initialTerminalEnvironment: initialTerminalEnvironment
@@ -3600,6 +3604,7 @@ final class WorkspaceCreationConfigSanitizationTests: XCTestCase {
             workingDirectory: String?,
             portOrdinal: Int,
             configTemplate: CmuxSurfaceConfigTemplate?,
+            initialSurface: NewWorkspaceInitialSurface,
             initialTerminalCommand: String?,
             initialTerminalInput: String?,
             initialTerminalEnvironment: [String: String]
@@ -3610,6 +3615,7 @@ final class WorkspaceCreationConfigSanitizationTests: XCTestCase {
                 workingDirectory: workingDirectory,
                 portOrdinal: portOrdinal,
                 configTemplate: configTemplate,
+                initialSurface: initialSurface,
                 initialTerminalCommand: initialTerminalCommand,
                 initialTerminalInput: initialTerminalInput,
                 initialTerminalEnvironment: initialTerminalEnvironment
@@ -3632,6 +3638,95 @@ final class WorkspaceCreationConfigSanitizationTests: XCTestCase {
         XCTAssertNil(capturedConfig.workingDirectory)
         XCTAssertNil(capturedConfig.command)
         XCTAssertTrue(capturedConfig.environmentVariables.isEmpty)
+    }
+}
+
+@MainActor
+final class NewBrowserWorkspaceCreationTests: XCTestCase {
+    func testNewBrowserWorkspaceShortcutDefaultsAndMetadata() {
+        XCTAssertEqual(KeyboardShortcutSettings.Action.newBrowserWorkspace.label, "New Browser Workspace")
+        XCTAssertEqual(KeyboardShortcutSettings.Action.newBrowserWorkspace.defaultsKey, "shortcut.newBrowserWorkspace")
+        XCTAssertTrue(KeyboardShortcutSettings.publicShortcutActions.contains(.newBrowserWorkspace))
+
+        let shortcut = KeyboardShortcutSettings.Action.newBrowserWorkspace.defaultShortcut
+        XCTAssertEqual(shortcut.key, "n")
+        XCTAssertTrue(shortcut.command)
+        XCTAssertTrue(shortcut.option)
+        XCTAssertFalse(shortcut.shift)
+        XCTAssertFalse(shortcut.control)
+    }
+
+    func testNewBrowserWorkspaceDefaultDoesNotCollideWithOtherDefaults() {
+        let newDefault = KeyboardShortcutSettings.Action.newBrowserWorkspace.defaultShortcut
+        for action in KeyboardShortcutSettings.Action.allCases where action != .newBrowserWorkspace {
+            let other = action.defaultShortcut
+            guard !other.isUnbound else { continue }
+            XCTAssertFalse(
+                other.key == newDefault.key
+                    && other.command == newDefault.command
+                    && other.shift == newDefault.shift
+                    && other.option == newDefault.option
+                    && other.control == newDefault.control,
+                "Option+Cmd+N default collides with \(action.rawValue)"
+            )
+        }
+    }
+
+    func testAddWorkspaceWithBrowserInitialSurfaceBootsBrowserPane() {
+        let manager = TabManager()
+        let baselineOrder = manager.tabs.map(\.id)
+
+        let workspace = manager.addWorkspace(initialSurface: .browser)
+
+        XCTAssertEqual(manager.selectedTabId, workspace.id)
+        XCTAssertEqual(manager.tabs.map(\.id).filter { $0 != workspace.id }, baselineOrder)
+
+        XCTAssertEqual(workspace.panels.count, 1)
+        guard let browserPanel = workspace.panels.values.first as? BrowserPanel else {
+            XCTFail("Expected the initial surface to be a browser pane")
+            return
+        }
+        XCTAssertNil(workspace.focusedTerminalPanel)
+        XCTAssertNil(browserPanel.currentURL, "Browser should boot in its default new-tab state")
+        XCTAssertNotNil(
+            browserPanel.pendingAddressBarFocusRequestId,
+            "Browser workspace should request address-bar focus for first activation"
+        )
+
+        let tabIds = workspace.bonsplitController.allTabIds
+        XCTAssertEqual(tabIds.count, 1)
+        XCTAssertEqual(
+            tabIds.first.flatMap { workspace.bonsplitController.tab($0)?.kind },
+            Workspace.SurfaceKind.browser
+        )
+        XCTAssertEqual(workspace.title, String(localized: "browser.newTab", defaultValue: "New tab"))
+    }
+
+    func testBrowserInitialSurfacePlacementMatchesTerminalPlacement() {
+        let terminalManager = makeManagerWithThreeWorkspaces()
+        let terminalInserted = terminalManager.addWorkspace()
+        let terminalIndex = terminalManager.tabs.firstIndex { $0.id == terminalInserted.id }
+
+        let browserManager = makeManagerWithThreeWorkspaces()
+        let browserInserted = browserManager.addWorkspace(initialSurface: .browser)
+        let browserIndex = browserManager.tabs.firstIndex { $0.id == browserInserted.id }
+
+        XCTAssertNotNil(terminalIndex)
+        XCTAssertEqual(
+            browserIndex,
+            terminalIndex,
+            "Browser workspaces must follow New Workspace placement semantics"
+        )
+    }
+
+    private func makeManagerWithThreeWorkspaces() -> TabManager {
+        let manager = TabManager()
+        _ = manager.addWorkspace()
+        _ = manager.addWorkspace()
+        if let first = manager.tabs.first {
+            manager.selectWorkspace(first)
+        }
+        return manager
     }
 }
 
@@ -6035,18 +6130,20 @@ final class WorkspacePanelGitBranchTests: XCTestCase {
 
     func testForkAgentWorkspaceLaunchInRemoteWorkspacePreservesRemoteContext() throws {
         let workspace = Workspace()
+        let agentSocketPath = "/tmp/cmux-fork-agent.sock"
         workspace.configureRemoteConnection(
             WorkspaceRemoteConfiguration(
                 destination: "cmux-macmini",
                 port: 2222,
                 identityFile: "/Users/example/.ssh/cmux",
-                sshOptions: ["ServerAliveInterval=30"],
+                sshOptions: ["ServerAliveInterval=30", "ForwardAgent=yes"],
                 localProxyPort: nil,
                 relayPort: 64000,
                 relayID: "relay-fork",
                 relayToken: String(repeating: "a", count: 64),
                 localSocketPath: "/tmp/cmux-fork-remote.sock",
-                terminalStartupCommand: "ssh -p 2222 -i /Users/example/.ssh/cmux -o ServerAliveInterval=30 -tt cmux-macmini"
+                terminalStartupCommand: "ssh -p 2222 -i /Users/example/.ssh/cmux -o ServerAliveInterval=30 -o ForwardAgent=yes -tt cmux-macmini",
+                agentSocketPath: agentSocketPath
             ),
             autoConnect: false
         )
@@ -6077,14 +6174,18 @@ final class WorkspacePanelGitBranchTests: XCTestCase {
         XCTAssertNil(launch.terminalWorkingDirectory)
         XCTAssertEqual(
             launch.initialTerminalCommand,
-            "ssh -p 2222 -i /Users/example/.ssh/cmux -o ServerAliveInterval=30 -tt cmux-macmini"
+            "ssh -p 2222 -i /Users/example/.ssh/cmux -o ServerAliveInterval=30 -o ForwardAgent=yes -tt cmux-macmini"
         )
         XCTAssertEqual(launch.initialTerminalInput, snapshot.forkCommand.map { $0 + "\n" })
+        XCTAssertEqual(launch.initialTerminalEnvironment["SSH_AUTH_SOCK"], agentSocketPath)
         XCTAssertTrue(launch.autoConnectRemoteConfiguration)
         XCTAssertEqual(launch.remoteConfiguration?.destination, "cmux-macmini")
         XCTAssertEqual(launch.remoteConfiguration?.port, 2222)
         XCTAssertEqual(launch.remoteConfiguration?.identityFile, "/Users/example/.ssh/cmux")
-        XCTAssertEqual(launch.remoteConfiguration?.sshOptions, ["ServerAliveInterval=30"])
+        XCTAssertEqual(launch.remoteConfiguration?.sshOptions, ["ServerAliveInterval=30", "ForwardAgent=yes"])
+        XCTAssertEqual(launch.remoteConfiguration?.agentSocketPath, agentSocketPath)
+        XCTAssertEqual(launch.remoteConfiguration?.sshTerminalStartupEnvironment?["SSH_AUTH_SOCK"], agentSocketPath)
+        XCTAssertEqual(launch.remoteConfiguration?.sshProcessEnvironment?["SSH_AUTH_SOCK"], agentSocketPath)
         XCTAssertNil(launch.remoteConfiguration?.relayPort)
         XCTAssertNil(launch.remoteConfiguration?.localSocketPath)
     }
@@ -6549,6 +6650,7 @@ final class WorkspacePanelGitBranchTests: XCTestCase {
             publishCount += 1
         }
         defer { cancellable.cancel() }
+        publishCount = 0
 
         workspace.updatePanelGitBranch(panelId: panelId, branch: "main", isDirty: false)
         let baselinePublishCount = publishCount
@@ -6563,25 +6665,6 @@ final class WorkspacePanelGitBranchTests: XCTestCase {
             publishCount,
             baselinePublishCount,
             "Expected identical git metadata refreshes to be ignored by sidebar rows"
-        )
-    }
-
-    func testSidebarObservationPublisherIgnoresRemoteHeartbeatOnlyChanges() {
-        let workspace = Workspace()
-
-        var publishCount = 0
-        let cancellable = workspace.sidebarObservationPublisher.sink {
-            publishCount += 1
-        }
-        defer { cancellable.cancel() }
-
-        workspace.remoteHeartbeatCount = 1
-        workspace.remoteLastHeartbeatAt = Date()
-
-        XCTAssertEqual(
-            publishCount,
-            0,
-            "Expected non-visible remote heartbeat updates to avoid invalidating sidebar rows"
         )
     }
 

@@ -4,10 +4,18 @@ import Bonsplit
 import CMUXPluginAPI
 import Combine
 import CMUXExtensionClient
-import CmuxExtensionKit
+import CmuxSidebarInterpreterClient
+@_spi(CmuxHostTransport) import CmuxExtensionKit
+import CmuxSidebarProviderKit
+import CmuxExtensionSidebarExamples
 import Darwin
 import CmuxSettings
 import CmuxSettingsUI
+import CmuxSidebarRemoteRender
+import CmuxSwiftRender
+import CmuxSwiftRenderUI
+import CmuxUpdater
+import CmuxUpdaterUI
 import ImageIO
 import Observation
 import SwiftUI
@@ -1539,11 +1547,18 @@ func titlebarShortcutHintShouldShow(
 }
 
 struct ContentView: View {
-    @ObservedObject var updateViewModel: UpdateViewModel
+    var updateViewModel: UpdateStateModel
     let windowId: UUID
     let pluginSystem: CMUXPluginAppProviding
     @EnvironmentObject var tabManager: TabManager
-    @EnvironmentObject var notificationStore: TerminalNotificationStore
+    // ContentView observes the coalesced unread projection, NOT the notification
+    // store. Reading `notificationStore` directly here would re-render the entire
+    // content view + sidebar on every notification publish (terminal/agent
+    // activity), which reconstructs every workspace row and starves the main
+    // thread (issue #2586 class; surfaced as scroll lag). `notificationStore`
+    // stays available as an unobserved singleton for actions and pass-down.
+    @EnvironmentObject var sidebarUnread: SidebarUnreadModel
+    var notificationStore: TerminalNotificationStore { .shared }
     @EnvironmentObject var sidebarState: SidebarState
     @EnvironmentObject var sidebarSelectionState: SidebarSelectionState
     @EnvironmentObject var cmuxConfigStore: CmuxConfigStore
@@ -1565,6 +1580,7 @@ struct ContentView: View {
     @State private var titlebarText: String = ""
     @State private var isFullScreen: Bool = false
     @State private var observedWindow: NSWindow?
+    @State private var sidebarRenderWorkerClient: RenderWorkerClient?
     @StateObject private var fullscreenControlsViewModel = TitlebarControlsViewModel()
     @StateObject private var fileExplorerStore = FileExplorerStore()
     @StateObject private var sessionIndexStore = SessionIndexStore()
@@ -1845,7 +1861,7 @@ struct ContentView: View {
         let contentView = window.contentView
 
         let unreadRects: [CGRect]
-        let isWorkspaceManuallyUnread = notificationStore.hasManualUnread(forTabId: workspace.id)
+        let isWorkspaceManuallyUnread = sidebarUnread.hasManualUnread(forWorkspaceId: workspace.id)
         let workspaceManualUnreadPanelId = workspace.representativePanelIdForWorkspaceManualUnread()
         if let layoutSnapshot, let contentView {
             unreadRects = layoutSnapshot.panes.compactMap { pane in
@@ -1857,8 +1873,8 @@ struct ContentView: View {
                 }
 
                 let shouldShowUnread = Workspace.shouldShowUnreadIndicator(
-                    hasUnreadNotification: notificationStore.hasVisibleNotificationIndicator(
-                        forTabId: workspace.id,
+                    hasUnreadNotification: sidebarUnread.hasVisibleNotificationIndicator(
+                        forWorkspaceId: workspace.id,
                         surfaceId: panelId
                     ),
                     hasPanelUnreadIndicator: workspace.manualUnreadPanelIds.contains(panelId) ||
@@ -1982,7 +1998,9 @@ struct ContentView: View {
         static let hasFocusedPanel = "panel.hasFocus"
         static let panelName = "panel.name"
         static let panelIsBrowser = "panel.isBrowser"
+        static let panelBrowserFocusModeActive = "panel.browserFocusModeActive"
         static let panelBrowserOmnibarVisible = "panel.browser.omnibarVisible"
+        static let panelIsMarkdown = "panel.isMarkdown"
         static let panelIsTerminal = "panel.isTerminal"
         static let panelHasPane = "panel.hasPane"
         static let panelHasForkableAgent = "panel.hasForkableAgent"
@@ -1994,6 +2012,8 @@ struct ContentView: View {
         static let cliInstalledInPATH = "cli.installedInPATH"
         static let defaultTerminalIsDefault = "defaultTerminal.isDefault"
         static let browserDisabled = "browser.disabled"
+        static let authSignedIn = "auth.signedIn"
+        static let authWorking = "auth.working"
         static func terminalOpenTargetAvailable(_ target: TerminalDirectoryOpenTarget) -> String {
             "terminal.openTarget.\(target.rawValue).available"
         }
@@ -2527,8 +2547,7 @@ struct ContentView: View {
             },
             observedWindow: observedWindow,
             selection: $sidebarSelectionState.selection,
-            selectedTabIds: $selectedTabIds,
-            lastSidebarSelectionIndex: $lastSidebarSelectionIndex
+            selectedTabIds: $selectedTabIds, lastSidebarSelectionIndex: $lastSidebarSelectionIndex, sidebarRenderWorkerClient: $sidebarRenderWorkerClient
         )
         .environmentObject(workspaceTabStore)
         .frame(width: sidebarWidth)
@@ -2590,6 +2609,29 @@ struct ContentView: View {
             return minimumSidebarTitleInset
         }
         return max(titlebarLeadingInset, visibleSidebarTitleInset)
+    }
+
+    /// Where the always-visible fullscreen titlebar controls (sidebar toggle,
+    /// history, new tab, notifications) are anchored inside the titlebar band.
+    struct FullscreenControlsPlacement: Equatable {
+        var leadingPadding: CGFloat
+        var topPadding: CGFloat
+    }
+
+    /// Resolves the placement for the fullscreen titlebar controls, or `nil` when
+    /// they should not be shown. The controls are mounted in a single overlay
+    /// anchor driven by this function so their on-screen position never depends on
+    /// sidebar visibility; toggling the sidebar must not shift the accessory bar.
+    nonisolated static func fullscreenControlsPlacement(
+        isFullScreen: Bool,
+        isSidebarVisible: Bool
+    ) -> FullscreenControlsPlacement? {
+        guard isFullScreen else { return nil }
+        // Placement is intentionally independent of sidebar visibility so toggling
+        // the sidebar in fullscreen never shifts the accessory bar. `topPadding`
+        // mirrors the title row's top inset (see `customTitlebar`) so the controls'
+        // center lines up with the folder icon / title.
+        return FullscreenControlsPlacement(leadingPadding: 10, topPadding: 2)
     }
 
     private func terminalContent(appearance: WindowAppearanceSnapshot) -> some View {
@@ -2657,9 +2699,9 @@ struct ContentView: View {
     }
 
     private func terminalContentWithRightSidebarPanel(appearance: WindowAppearanceSnapshot) -> some View {
-        // File explorer is always in the view tree. Visibility is controlled by
-        // frame width (0 when hidden), avoiding SwiftUI view insertion/removal
-        // and all associated transition animations.
+        // The right-sidebar shell remains in the view tree so its frame can
+        // animate without SwiftUI insertion/removal. Cold hidden launches defer
+        // heavy mode content until the sidebar has been shown at least once.
         return HStack(spacing: 0) {
             terminalContentWithSidebarDropOverlay(appearance: appearance)
             rightSidebarPanelWithBackdrop(appearance: appearance)
@@ -2849,6 +2891,14 @@ struct ContentView: View {
         .offset(y: -TitlebarControlsVisualMetrics.verticalLift)
     }
 
+    /// Intrinsic width of ``fullscreenControls`` for the current controls style.
+    /// Used to reserve space in the title row so the title flows to the right of
+    /// the controls, which are themselves mounted once in the band overlay.
+    private var fullscreenControlsWidth: CGFloat {
+        let style = TitlebarControlsStyle(rawValue: titlebarControlsStyleRawValue) ?? .classic
+        return TitlebarControlsLayoutMetrics.contentSize(config: style.config).width
+    }
+
     private var titlebarDebugChromeSnapshot: MinimalModeTitlebarDebugSnapshot {
         MinimalModeTitlebarDebugSnapshot(
             leftControlsLeadingInset: MinimalModeTitlebarDebugSettings.clamped(
@@ -2889,7 +2939,13 @@ struct ContentView: View {
 
             HStack(spacing: 8) {
                 if isFullScreen && !sidebarState.isVisible {
-                    fullscreenControls
+                    // Reserve the controls' width so the title flows to their right.
+                    // The visible controls are rendered once in the band overlay (see
+                    // `workspaceTitlebarBand`) so their position never depends on
+                    // sidebar visibility.
+                    Color.clear
+                        .frame(width: fullscreenControlsWidth, height: titlebarContentHeight)
+                        .allowsHitTesting(false)
                 }
 
                 // Draggable folder icon + focused command name
@@ -2950,11 +3006,22 @@ struct ContentView: View {
                     .animation(nil, value: rightSidebarWidth)
             }
             .overlay(alignment: .topLeading) {
-                if isFullScreen && sidebarState.isVisible {
+                if let placement = Self.fullscreenControlsPlacement(
+                    isFullScreen: isFullScreen,
+                    isSidebarVisible: sidebarState.isVisible
+                ) {
                     fullscreenControls
-                        .environment(\.colorScheme, appearance.sidebarContentColorScheme)
-                        .padding(.leading, 10)
-                        .padding(.top, 4)
+                        .environment(
+                            \.colorScheme,
+                            sidebarState.isVisible
+                                ? appearance.sidebarContentColorScheme
+                                : appearance.chromeColorScheme
+                        )
+                        // Same vertical frame as the title row (`customTitlebar`)
+                        // so the controls' center matches the folder icon / title.
+                        .frame(height: max(1, WindowChromeMetrics.appTitlebarHeight - 2), alignment: .center)
+                        .padding(.top, placement.topPadding)
+                        .padding(.leading, placement.leadingPadding)
                 }
             }
     }
@@ -3009,7 +3076,8 @@ struct ContentView: View {
             }
             return
         }
-        let title = tab.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let title = tabManager.resolvedWorkspaceDisplayTitle(for: tab)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         if titlebarText != title {
             titlebarText = title
         }
@@ -3086,6 +3154,23 @@ struct ContentView: View {
         }
 
         sidebarSelectionState.selection = .tabs
+        if workspace.isRemoteWorkspace {
+            Task { [weak workspace, fileExplorerStore] in
+                guard let workspace else { return }
+                do {
+                    let localURL = try await fileExplorerStore.materializeRemoteFileForPreview(path: filePath)
+                    _ = workspace.openFileSurfaces(
+                        inPane: paneId,
+                        filePaths: [localURL.path],
+                        focus: true,
+                        reuseExisting: true
+                    )
+                } catch {
+                    NSSound.beep()
+                }
+            }
+            return
+        }
         _ = workspace.openFileSurfaces(
             inPane: paneId,
             filePaths: [filePath],
@@ -3108,6 +3193,10 @@ struct ContentView: View {
 
         if tab.isRemoteWorkspace {
             sessionIndexStore.setCurrentDirectoryIfChanged(nil)
+            guard shouldSyncFileExplorerStore else {
+                fileExplorerStore.applyWorkspaceRoot(.none)
+                return
+            }
             guard let config = tab.remoteConfiguration, config.transport == .ssh else {
                 fileExplorerStore.applyWorkspaceRoot(.none)
                 return
@@ -3135,6 +3224,7 @@ struct ContentView: View {
                         sshOptions: config.sshOptions
                     ),
                     displayTarget: config.displayTarget,
+                    rootPath: tab.currentDirectory,
                     isAvailable: tab.remoteConnectionState == .connected,
                     unavailableDetail: unavailableDetail
                 )
@@ -3150,7 +3240,18 @@ struct ContentView: View {
         }
 
         sessionIndexStore.setCurrentDirectoryIfChanged(dir)
-        fileExplorerStore.applyWorkspaceRoot(.local(path: dir))
+        guard shouldSyncFileExplorerStore else {
+            fileExplorerStore.applyWorkspaceRoot(.none)
+            return
+        }
+        fileExplorerStore.applyWorkspaceRoot(.local(workspaceId: tab.id, path: dir))
+    }
+
+    private var shouldSyncFileExplorerStore: Bool {
+        FileExplorerRootSyncPolicy.shouldSyncFileExplorerStore(
+            isRightSidebarVisible: fileExplorerState.isVisible,
+            mode: fileExplorerState.mode
+        )
     }
 
     private var focusedDirectory: String? {
@@ -3410,6 +3511,14 @@ struct ContentView: View {
 
         view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: .ghosttyDidFocusTab)) { _ in
             sidebarSelectionState.selection = .tabs
+            scheduleTitlebarTextRefresh()
+        })
+
+        // A grouped anchor's title-bar name is derived from its group's name, so
+        // a group rename must refresh the cached titlebar text (#5404). Scope to
+        // this view's `tabManager` (the notification's `object`) so a rename in
+        // another window doesn't spuriously refresh this one.
+        view = AnyView(view.onReceive(NotificationCenter.default.publisher(for: .workspaceGroupNameDidChange, object: tabManager)) { _ in
             scheduleTitlebarTextRefresh()
         })
 
@@ -3824,11 +3933,16 @@ struct ContentView: View {
             if !isVisible {
                 _ = AppDelegate.shared?.restoreTerminalFocusAfterRightSidebarHidden(in: observedWindow)
             }
+            syncFileExplorerDirectory()
             if let observedWindow {
                 TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronize(for: observedWindow)
             } else {
                 TerminalWindowPortalRegistry.scheduleExternalGeometrySynchronizeForAllWindows()
             }
+        })
+
+        view = AnyView(view.onChange(of: fileExplorerState.mode) { _, _ in
+            syncFileExplorerDirectory()
         })
 
         view = AnyView(view.onChange(of: sidebarMatchTerminalBackground) { _ in
@@ -3921,7 +4035,7 @@ struct ContentView: View {
             removeNativeTitlebarBackdrop(in: window)
 #if DEBUG
             if ProcessInfo.processInfo.environment["CMUX_UI_TEST_MODE"] == "1" {
-                UpdateLogStore.shared.append("ui test window accessor: id=\(windowIdentifier) visible=\(window.isVisible)")
+                AppDelegate.shared?.updateLog.append("ui test window accessor: id=\(windowIdentifier) visible=\(window.isVisible)")
             }
 #endif
             let backdropResult = WindowBackdropController.apply(plan: backdropPlan, to: window)
@@ -6465,6 +6579,8 @@ struct ContentView: View {
             return String(localized: "commandPalette.kind.filePreview", defaultValue: "File Preview")
         case .rightSidebarTool:
             return String(localized: "commandPalette.kind.rightSidebarTool", defaultValue: "Tool")
+        case .agentSession:
+            return String(localized: "commandPalette.kind.agentSession", defaultValue: "Agent")
         case .project:
             return String(localized: "commandPalette.kind.project", defaultValue: "Project")
         case .extensionBrowser:
@@ -6484,6 +6600,8 @@ struct ContentView: View {
             return ["file", "preview", "text", "pdf", "image", "audio", "video"]
         case .rightSidebarTool:
             return ["tool", "files", "find", "vault", "sidebar"]
+        case .agentSession:
+            return ["agent", "codex", "claude", "opencode", "react", "solid"]
         case .project:
             return ["project", "xcode", "build", "settings", "schemes", "targets"]
         case .extensionBrowser:
@@ -6839,6 +6957,17 @@ struct ContentView: View {
             } else {
                 supportsFork = false
             }
+#if DEBUG
+            cmuxDebugLog(
+                "palette.forkProbe panel=\(panelId.uuidString.prefix(5)) " +
+                    "indexSnapshot=\(indexSnapshot != nil ? 1 : 0) " +
+                    "fallbackSnapshot=\(fallbackSnapshot != nil ? 1 : 0) " +
+                    "kind=\(snapshot?.kind.rawValue ?? "none") " +
+                    "session=\(snapshot.map { String($0.sessionId.prefix(8)) } ?? "none") " +
+                    "launcher=\(snapshot?.launchCommand?.launcher ?? "none") " +
+                    "supportsFork=\(supportsFork ? 1 : 0)"
+            )
+#endif
             guard !Task.isCancelled else { return }
 
             await MainActor.run {
@@ -7015,7 +7144,11 @@ struct ContentView: View {
         if let action = Self.commandPaletteShortcutAction(forCommandID: contribution.commandId) {
             let shortcut = KeyboardShortcutSettings.shortcut(for: action)
             guard !shortcut.isUnbound else { return nil }
-            guard action.shortcutContext.isAvailable(focusedBrowserPanel: context.bool(CommandPaletteContextKeys.panelIsBrowser), rightSidebarFocused: false) else {
+            guard action.shortcutContext.isAvailable(
+                focusedBrowserPanel: context.bool(CommandPaletteContextKeys.panelIsBrowser),
+                focusedMarkdownPanel: context.bool(CommandPaletteContextKeys.panelIsMarkdown),
+                rightSidebarFocused: false
+            ) else {
                 return nil
             }
             return shortcut.displayString
@@ -7048,6 +7181,12 @@ struct ContentView: View {
             return "⌘-"
         case "palette.browserZoomReset":
             return "⌘0"
+        case "palette.markdownZoomIn":
+            return "⌘="
+        case "palette.markdownZoomOut":
+            return "⌘-"
+        case "palette.markdownZoomReset":
+            return "⌘0"
         case "palette.terminalFind":
             return "⌘F"
         case "palette.terminalFindNext":
@@ -7072,6 +7211,13 @@ struct ContentView: View {
         snapshot.setBool(CommandPaletteContextKeys.workspaceMinimalModeEnabled, isMinimalMode)
         snapshot.setBool(CommandPaletteContextKeys.sidebarMatchTerminalBackground, sidebarMatchTerminalBackground)
         snapshot.setBool(CommandPaletteContextKeys.browserDisabled, BrowserAvailabilitySettings.isDisabled())
+        if let auth = AppDelegate.shared?.auth {
+            snapshot.setBool(CommandPaletteContextKeys.authSignedIn, auth.coordinator.isAuthenticated)
+            snapshot.setBool(
+                CommandPaletteContextKeys.authWorking,
+                auth.coordinator.isLoading || auth.coordinator.isRestoringSession || auth.browserSignIn.isSigningIn
+            )
+        }
 
         if let workspace = tabManager.selectedWorkspace {
             let pinTarget = WorkspaceActionDispatcher.Target.single(workspace.id)
@@ -7098,11 +7244,11 @@ struct ContentView: View {
             )
             snapshot.setBool(
                 CommandPaletteContextKeys.workspaceCanMarkRead,
-                notificationStore.canMarkWorkspaceRead(forTabIds: [workspace.id])
+                sidebarUnread.canMarkWorkspaceRead(forWorkspaceIds: [workspace.id])
             )
             snapshot.setBool(
                 CommandPaletteContextKeys.workspaceCanMarkUnread,
-                notificationStore.canMarkWorkspaceUnread(forTabIds: [workspace.id])
+                sidebarUnread.canMarkWorkspaceUnread(forWorkspaceIds: [workspace.id])
             )
         }
 
@@ -7114,6 +7260,15 @@ struct ContentView: View {
             snapshot.setBool(CommandPaletteContextKeys.hasFocusedPanel, true)
             snapshot.setString(CommandPaletteContextKeys.panelName, panelDisplayName(workspace: workspace, panelId: panelId, fallback: panelContext.panel.displayTitle))
             snapshot.setBool(CommandPaletteContextKeys.panelIsBrowser, panelContext.panel.panelType == .browser)
+            if let browserPanel = panelContext.panel as? BrowserPanel {
+                snapshot.setBool(CommandPaletteContextKeys.panelBrowserFocusModeActive, browserPanel.isBrowserFocusModeActive)
+            }
+            // Markdown zoom only affects the rendered preview, so don't surface
+            // the zoom commands when the panel is in raw text-edit mode.
+            snapshot.setBool(
+                CommandPaletteContextKeys.panelIsMarkdown,
+                (panelContext.panel as? MarkdownPanel)?.displayMode == .preview
+            )
             snapshot.setBool(
                 CommandPaletteContextKeys.panelBrowserOmnibarVisible,
                 (panelContext.panel as? BrowserPanel)?.isOmnibarVisible ?? true
@@ -7137,7 +7292,7 @@ struct ContentView: View {
             snapshot.setBool(CommandPaletteContextKeys.panelCanMoveToNewWorkspace, workspace.panels.count > 1)
             let hasUnread = workspace.manualUnreadPanelIds.contains(panelId) ||
                 workspace.restoredUnreadPanelIds.contains(panelId) ||
-                notificationStore.hasUnreadNotification(forTabId: workspace.id, surfaceId: panelId)
+                sidebarUnread.hasUnreadNotification(forWorkspaceId: workspace.id, surfaceId: panelId)
             snapshot.setBool(CommandPaletteContextKeys.panelHasUnread, hasUnread)
 
             if panelIsTerminal {
@@ -7157,6 +7312,17 @@ struct ContentView: View {
 
         return snapshot
     }
+
+    /// Search keywords for the "Mobile Connect" command palette entry.
+    ///
+    /// Kept as a single source of truth so the contribution and its behavioral
+    /// test agree on what queries (e.g. `ios`, `ipados`) must surface the
+    /// command. These are platform/technical terms that read the same across
+    /// locales, so they are not localized.
+    static let commandPaletteMobileConnectKeywords: [String] = [
+        "mobile", "connect", "pair", "pairing", "device",
+        "ios", "ipados", "iphone", "ipad", "phone", "tablet", "qr",
+    ]
 
     private func commandPaletteCommandContributions(
         pluginCommands: [CMUXCommandContribution]
@@ -7183,6 +7349,11 @@ struct ContentView: View {
         func terminalPanelSubtitle(_ context: CommandPaletteContextSnapshot) -> String {
             let name = context.string(CommandPaletteContextKeys.panelName) ?? String(localized: "commandPalette.subtitle.tabFallback", defaultValue: "Tab")
             return String(localized: "commandPalette.subtitle.terminalWithName", defaultValue: "Terminal • \(name)")
+        }
+
+        func markdownPanelSubtitle(_ context: CommandPaletteContextSnapshot) -> String {
+            let name = context.string(CommandPaletteContextKeys.panelName) ?? String(localized: "commandPalette.subtitle.tabFallback", defaultValue: "Tab")
+            return String(localized: "commandPalette.subtitle.markdownWithName", defaultValue: "Markdown • \(name)")
         }
 
         func workspaceColorCommandTitle(_ paletteName: String) -> String {
@@ -7221,6 +7392,15 @@ struct ContentView: View {
                 title: constant(String(localized: "command.newWorkspace.title", defaultValue: "New Workspace")),
                 subtitle: constant(String(localized: "command.newWorkspace.subtitle", defaultValue: "Workspace")),
                 keywords: ["create", "new", "workspace"]
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.newBrowserWorkspace",
+                title: constant(String(localized: "command.newBrowserWorkspace.title", defaultValue: "New Browser Workspace")),
+                subtitle: constant(String(localized: "command.newBrowserWorkspace.subtitle", defaultValue: "Workspace")),
+                keywords: ["create", "new", "browser", "workspace", "web"],
+                when: { !$0.bool(CommandPaletteContextKeys.browserDisabled) }
             )
         )
         contributions.append(
@@ -7361,22 +7541,20 @@ struct ContentView: View {
                 keywords: ["sprite", "assistant", "sort", "workspace", "priority"]
             )
         )
-        // "Sidebar: <provider>" switch commands only make sense when there
-        // is more than one provider, which is the experimental Extensions
-        // feature. Omit them entirely while it is disabled.
-        if CmuxExtensionSidebarSelection.isEnabled {
-            for descriptor in CmuxExtensionSidebarSelection.descriptors {
-                let title = CmuxExtensionSidebarSelection.localizedTitle(for: descriptor)
-                let titleFormat = String(localized: "command.switchExtensionSidebar.title", defaultValue: "Sidebar: %@")
-                contributions.append(
-                    CommandPaletteCommandContribution(
-                        commandId: commandPaletteExtensionSidebarCommandID(descriptor.id),
-                        title: constant(String.localizedStringWithFormat(titleFormat, title)),
-                        subtitle: constant(String(localized: "command.switchExtensionSidebar.subtitle", defaultValue: "Choose Sidebar")),
-                        keywords: ["sidebar", "switch", "extension", title.lowercased()]
-                    )
+        // "Sidebar: <provider>" switch commands for each available view. The
+        // built-in views are always offered; `descriptors` adds the hosted
+        // extension sidebar only while the experimental Extensions beta is on.
+        for descriptor in CmuxExtensionSidebarSelection.descriptors {
+            let title = CmuxExtensionSidebarSelection.localizedTitle(for: descriptor)
+            let titleFormat = String(localized: "command.switchExtensionSidebar.title", defaultValue: "Sidebar: %@")
+            contributions.append(
+                CommandPaletteCommandContribution(
+                    commandId: commandPaletteExtensionSidebarCommandID(descriptor.id),
+                    title: constant(String.localizedStringWithFormat(titleFormat, title)),
+                    subtitle: constant(String(localized: "command.switchExtensionSidebar.subtitle", defaultValue: "Choose Sidebar")),
+                    keywords: ["sidebar", "switch", "extension", title.lowercased()]
                 )
-            }
+            )
         }
         contributions.append(contentsOf: Self.commandPaletteRightSidebarModeCommandContributions())
         contributions.append(contentsOf: Self.commandPaletteRightSidebarToolPaneCommandContributions())
@@ -7482,6 +7660,15 @@ struct ContentView: View {
                 keywords: ["open", "ghostty", "settings", "config", "configuration", "file", "textedit", "terminal"]
             )
         )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.mobileConnect",
+                title: constant(String(localized: "command.mobileConnect.title", defaultValue: "Connect iPhone/iPad")),
+                subtitle: constant(String(localized: "command.mobileConnect.subtitle", defaultValue: "Mobile")),
+                keywords: Self.commandPaletteMobileConnectKeywords
+            )
+        )
+        contributions.append(contentsOf: Self.commandPaletteAuthCommandContributions())
         contributions.append(
             CommandPaletteCommandContribution(
                 commandId: "palette.makeDefaultTerminal",
@@ -7935,6 +8122,19 @@ struct ContentView: View {
         )
         contributions.append(
             CommandPaletteCommandContribution(
+                commandId: "palette.browserFocusMode",
+                title: { context in
+                    context.bool(CommandPaletteContextKeys.panelBrowserFocusModeActive)
+                        ? String(localized: "command.browserFocusMode.exit.title", defaultValue: "Exit Browser Focus Mode")
+                        : String(localized: "command.browserFocusMode.enter.title", defaultValue: "Enter Browser Focus Mode")
+                },
+                subtitle: browserPanelSubtitle,
+                keywords: ["browser", "focus", "mode", "keyboard", "shortcuts", "webview"],
+                when: { $0.bool(CommandPaletteContextKeys.panelIsBrowser) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
                 commandId: "palette.browserToggleOmnibar",
                 title: { context in
                     if context.bool(CommandPaletteContextKeys.panelBrowserOmnibarVisible) {
@@ -7999,6 +8199,33 @@ struct ContentView: View {
                 subtitle: browserPanelSubtitle,
                 keywords: ["browser", "zoom", "reset", "actual size"],
                 when: { $0.bool(CommandPaletteContextKeys.panelIsBrowser) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.markdownZoomIn",
+                title: constant(String(localized: "command.markdownZoomIn.title", defaultValue: "Zoom In")),
+                subtitle: markdownPanelSubtitle,
+                keywords: ["markdown", "zoom", "in", "font", "size", "bigger", "larger"],
+                when: { $0.bool(CommandPaletteContextKeys.panelIsMarkdown) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.markdownZoomOut",
+                title: constant(String(localized: "command.markdownZoomOut.title", defaultValue: "Zoom Out")),
+                subtitle: markdownPanelSubtitle,
+                keywords: ["markdown", "zoom", "out", "font", "size", "smaller"],
+                when: { $0.bool(CommandPaletteContextKeys.panelIsMarkdown) }
+            )
+        )
+        contributions.append(
+            CommandPaletteCommandContribution(
+                commandId: "palette.markdownZoomReset",
+                title: constant(String(localized: "command.markdownZoomReset.title", defaultValue: "Actual Size")),
+                subtitle: markdownPanelSubtitle,
+                keywords: ["markdown", "zoom", "reset", "actual size", "font", "default"],
+                when: { $0.bool(CommandPaletteContextKeys.panelIsMarkdown) }
             )
         )
         contributions.append(
@@ -8527,6 +8754,16 @@ struct ContentView: View {
                 debugSource: "palette.newWorkspace"
             )
         }
+        registry.register(commandId: "palette.newBrowserWorkspace") {
+            // Let command-palette dismissal complete first so omnibar focus
+            // is not blocked by the palette visibility guard.
+            DispatchQueue.main.async {
+                _ = AppDelegate.shared?.performNewBrowserWorkspaceAction(
+                    tabManager: tabManager,
+                    debugSource: "palette.newBrowserWorkspace"
+                )
+            }
+        }
         registry.register(commandId: "palette.openFolder") {
             // Defer so the command palette dismisses before the modal sheet appears.
             DispatchQueue.main.async {
@@ -8615,7 +8852,11 @@ struct ContentView: View {
                 SortAssistantCoordinator.shared.openEntry()
             }
         }
-        for descriptor in CmuxExtensionSidebarSelection.descriptors {
+        // Register a handler for every possible view (including the hosted
+        // extension sidebar) regardless of the beta flag, so a contribution that
+        // was visible when the flag was on still resolves after a runtime flip.
+        // Visibility is gated by `descriptors`; the handler set is the superset.
+        for descriptor in CmuxExtensionSidebarSelection.allDescriptors {
             registry.register(commandId: commandPaletteExtensionSidebarCommandID(descriptor.id)) {
                 CmuxExtensionSidebarSelection.setProviderId(descriptor.id)
             }
@@ -8681,6 +8922,13 @@ struct ContentView: View {
 #endif
             GhosttyApp.shared.openConfigurationInTextEdit()
         }
+        registry.register(commandId: "palette.mobileConnect") {
+#if DEBUG
+            cmuxDebugLog("palette.mobileConnect.invoke")
+#endif
+            MobilePairingWindowController.shared.show()
+        }
+        registerAuthCommandHandlers(&registry)
         registry.register(commandId: "palette.makeDefaultTerminal") {
             DefaultTerminalUserAction.setAsDefault(debugSource: "palette.makeDefaultTerminal")
         }
@@ -8858,7 +9106,7 @@ struct ContentView: View {
             }
             let hasUnread = panelContext.workspace.manualUnreadPanelIds.contains(panelContext.panelId) ||
                 panelContext.workspace.restoredUnreadPanelIds.contains(panelContext.panelId) ||
-                notificationStore.hasUnreadNotification(forTabId: panelContext.workspace.id, surfaceId: panelContext.panelId)
+                sidebarUnread.hasUnreadNotification(forWorkspaceId: panelContext.workspace.id, surfaceId: panelContext.panelId)
             if hasUnread {
                 panelContext.workspace.markPanelRead(panelContext.panelId)
             } else {
@@ -8879,7 +9127,7 @@ struct ContentView: View {
             }
         }
         registry.register(commandId: "palette.openDiffViewer") {
-            if !openDiffViewerFromCommandPalette() {
+            if AppDelegate.shared?.openDiffViewerForFocusedWorkspace(for: tabManager) != true {
                 NSSound.beep()
             }
         }
@@ -8900,6 +9148,11 @@ struct ContentView: View {
         }
         registry.register(commandId: "palette.browserFocusAddressBar") {
             if !focusFocusedBrowserAddressBar() {
+                NSSound.beep()
+            }
+        }
+        registry.register(commandId: "palette.browserFocusMode") {
+            if !tabManager.toggleBrowserFocusModeForFocusedBrowser(reason: "commandPalette") {
                 NSSound.beep()
             }
         }
@@ -8935,6 +9188,21 @@ struct ContentView: View {
         }
         registry.register(commandId: "palette.browserZoomReset") {
             if !tabManager.resetZoomFocusedBrowser() {
+                NSSound.beep()
+            }
+        }
+        registry.register(commandId: "palette.markdownZoomIn") {
+            if !tabManager.zoomInFocusedMarkdown() {
+                NSSound.beep()
+            }
+        }
+        registry.register(commandId: "palette.markdownZoomOut") {
+            if !tabManager.zoomOutFocusedMarkdown() {
+                NSSound.beep()
+            }
+        }
+        registry.register(commandId: "palette.markdownZoomReset") {
+            if !tabManager.resetZoomFocusedMarkdown() {
                 NSSound.beep()
             }
         }
@@ -9119,129 +9387,9 @@ struct ContentView: View {
         )
     }
 
-    @discardableResult
-    private func openDiffViewerFromCommandPalette() -> Bool {
-        guard let workspace = tabManager.selectedWorkspace,
-              let cliURL = Bundle.main.resourceURL?.appendingPathComponent("bin/cmux"),
-              FileManager.default.isExecutableFile(atPath: cliURL.path) else {
-            return false
-        }
-
-        let preferredSocketPath = SocketControlSettings.socketPath()
-        let activeSocketPath = TerminalController.shared.activeSocketPath(preferredPath: preferredSocketPath)
-        return CommandPaletteDiffViewerLauncher.shared.start(
-            cliURL: cliURL,
-            socketPath: activeSocketPath,
-            cwd: configuredActionBaseCwd(),
-            workspaceId: workspace.id,
-            surfaceId: workspace.focusedPanelId
-        )
-    }
-
-    @MainActor
-    private final class CommandPaletteDiffViewerLauncher {
-        static let shared = CommandPaletteDiffViewerLauncher()
-
-        private var processes: [Int32: Process] = [:]
-
-        private init() {}
-
-        @discardableResult
-        func start(
-            cliURL: URL,
-            socketPath: String,
-            cwd: String,
-            workspaceId: UUID,
-            surfaceId: UUID?
-        ) -> Bool {
-            let process = Process()
-            process.executableURL = cliURL
-            var arguments = [
-                "--socket", socketPath,
-                "diff",
-                "--unstaged",
-                "--cwd", cwd,
-                "--workspace", workspaceId.uuidString,
-                "--focus", "true",
-            ]
-            if let surfaceId {
-                arguments.append(contentsOf: ["--surface", surfaceId.uuidString])
-            }
-            process.arguments = arguments
-            process.currentDirectoryURL = URL(fileURLWithPath: cwd, isDirectory: true)
-            var environment = ProcessInfo.processInfo.environment
-            environment["CMUX_SOCKET_PATH"] = socketPath
-            environment["CMUX_BUNDLED_CLI_PATH"] = cliURL.path
-            environment["CMUX_WORKSPACE_ID"] = workspaceId.uuidString
-            if let surfaceId {
-                environment["CMUX_SURFACE_ID"] = surfaceId.uuidString
-            }
-            environment.removeValue(forKey: "CMUX_SOCKET")
-            process.environment = environment
-            process.standardInput = FileHandle.nullDevice
-
-            let stdoutPipe = Pipe()
-            let stderrPipe = Pipe()
-            process.standardOutput = stdoutPipe
-            process.standardError = stderrPipe
-            let outputCollector = ProcessOutputCollector(stdout: stdoutPipe, stderr: stderrPipe)
-            outputCollector.start()
-            process.terminationHandler = { terminatedProcess in
-                let output = outputCollector.finish()
-                let processIdentifier = terminatedProcess.processIdentifier
-                let terminationStatus = terminatedProcess.terminationStatus
-                Task { @MainActor in
-                    Self.shared.processes.removeValue(forKey: processIdentifier)
-                    guard terminationStatus != 0 else { return }
-                    let detail = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let limitedDetail = detail.isEmpty
-                        ? "status=\(terminationStatus)"
-                        : String(detail.prefix(240))
-#if DEBUG
-                    cmuxDebugLog("commandPalette.openDiffViewer exited status=\(terminationStatus) detail=\(limitedDetail)")
-#endif
-                    NSSound.beep()
-                }
-            }
-
-            do {
-                try process.run()
-                let processIdentifier = process.processIdentifier
-                processes[processIdentifier] = process
-                if !process.isRunning {
-                    processes.removeValue(forKey: processIdentifier)
-                }
-#if DEBUG
-                cmuxDebugLog("commandPalette.openDiffViewer pid=\(process.processIdentifier) cwd=\(cwd)")
-#endif
-                return true
-            } catch {
-                outputCollector.cancel()
-#if DEBUG
-                cmuxDebugLog("commandPalette.openDiffViewer failed cwd=\(cwd) error=\(error.localizedDescription)")
-#endif
-                return false
-            }
-        }
-    }
-
     private func configuredActionBaseCwd() -> String {
-        guard let workspace = tabManager.selectedWorkspace else {
-            return FileManager.default.homeDirectoryForCurrentUser.path
-        }
-        let focusedPanelId = workspace.focusedPanelId
-        let candidates = [
-            focusedPanelId.flatMap { workspace.panelDirectories[$0] },
-            focusedPanelId.flatMap { workspace.terminalPanel(for: $0)?.requestedWorkingDirectory },
-            workspace.currentDirectory
-        ]
-        for candidate in candidates {
-            let trimmed = candidate?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            if !trimmed.isEmpty {
-                return trimmed
-            }
-        }
-        return FileManager.default.homeDirectoryForCurrentUser.path
+        tabManager.selectedWorkspace?.resolvedWorkingDirectory()
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
     }
 
     var focusedPanelContext: (workspace: Workspace, panelId: UUID, panel: any Panel)? {
@@ -9782,7 +9930,11 @@ struct ContentView: View {
              "palette.forkAgentConversationTop",
              "palette.forkAgentConversationBottom",
              "palette.forkAgentConversationNewTab",
-             "palette.forkAgentConversationNewWorkspace":
+             "palette.forkAgentConversationNewWorkspace",
+             // Entering browser focus mode focuses the web view synchronously;
+             // dismiss the palette first so its makeFirstResponder(nil) doesn't
+             // clear that focus and leave focus mode active without key routing.
+             "palette.browserFocusMode":
             return true
         default:
             return false
@@ -10541,7 +10693,7 @@ struct ContentView: View {
 
     private func focusFocusedBrowserAddressBar() -> Bool {
         guard let panel = tabManager.focusedBrowserPanel else { return false }
-        _ = panel.requestAddressBarFocus()
+        _ = panel.requestAddressBarFocus(selectionIntent: .selectAll)
         NotificationCenter.default.post(name: .browserFocusAddressBar, object: panel.id)
         return true
     }
@@ -10784,7 +10936,7 @@ private extension String {
 enum CmuxExtensionSidebarSelection {
     static let defaultsKey = "cmuxExtensionSidebar.providerId"
     static let selectedExtensionNameDefaultsKey = "cmuxExtensionSidebar.selectedExtensionName"
-    static let defaultProviderId = CmuxExtensionSidebarProviderDescriptor.defaultWorkspacesID
+    static let defaultProviderId = CmuxSidebarProviderDescriptor.defaultWorkspacesID
     static let hostedExtensionsProviderId = "cmux.sidebar.extensions"
 
     /// Synchronous read of the experimental Extensions flag for the on-demand
@@ -10802,23 +10954,106 @@ enum CmuxExtensionSidebarSelection {
         return Bool.decodeFromUserDefaults(UserDefaults.standard.object(forKey: key.userDefaultsKey)) ?? key.defaultValue
     }
 
-    static var providers: [any CmuxExtensionSidebarProvider] {
-        []
+    static var providers: [any CmuxSidebarProvider] {
+        SidebarExamples.providers
     }
 
-    static var descriptors: [CmuxExtensionSidebarProviderDescriptor] {
-        [.defaultWorkspaces, hostedExtensionsDescriptor] + providers.map { $0.descriptor }
+    // MARK: - Custom sidebars (beta)
+
+    /// Provider-id prefix for user/agent-authored custom sidebars. The
+    /// suffix after the prefix is the sidebar's file base name.
+    static let customSidebarProviderPrefix = "cmux.sidebar.custom."
+
+    /// Synchronous read of the experimental custom-sidebars flag, mirroring
+    /// ``isEnabled`` for the AppKit/static paths (the picker menu).
+    static var customSidebarsEnabled: Bool {
+        let key = SettingCatalog().betaFeatures.customSidebars
+        return Bool.decodeFromUserDefaults(UserDefaults.standard.object(forKey: key.userDefaultsKey)) ?? key.defaultValue
     }
 
-    static var hostedExtensionsDescriptor: CmuxExtensionSidebarProviderDescriptor {
+    /// Directory custom sidebars are authored into.
+    static var customSidebarsDirectory: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/cmux/sidebars", isDirectory: true)
+    }
+
+    /// One provider descriptor per `<name>.swift`/`<name>.json` file in the
+    /// sidebars directory (`.swift` preferred when both exist), titled by the
+    /// file's base name.
+    static var customSidebarDescriptors: [CmuxSidebarProviderDescriptor] {
+        guard let entries = try? FileManager.default.contentsOfDirectory(
+            at: customSidebarsDirectory,
+            includingPropertiesForKeys: nil
+        ) else { return [] }
+        var extensionByName: [String: String] = [:]
+        for url in entries {
+            let ext = url.pathExtension.lowercased()
+            guard ext == "swift" || ext == "json" else { continue }
+            let name = url.deletingPathExtension().lastPathComponent
+            if extensionByName[name] == "swift" { continue }
+            extensionByName[name] = ext
+        }
+        return extensionByName.keys.sorted().map { name in
+            CmuxSidebarProviderDescriptor(
+                id: customSidebarProviderPrefix + name,
+                title: CmuxSidebarProviderLocalizedText(key: "sidebar.provider.custom.\(name)", defaultValue: name),
+                subtitle: CmuxSidebarProviderLocalizedText(
+                    key: "sidebar.provider.custom.subtitle",
+                    defaultValue: String(localized: "sidebar.provider.custom.subtitle", defaultValue: "Custom sidebar")
+                ),
+                systemImageName: "wand.and.stars",
+                isHostProvided: false
+            )
+        }
+    }
+
+    /// Resolves a custom-sidebar provider id to its backing file URL
+    /// (`.swift` preferred), or `nil` if neither file exists.
+    static func customSidebarFileURL(forProviderId providerId: String) -> URL? {
+        guard providerId.hasPrefix(customSidebarProviderPrefix) else { return nil }
+        let name = String(providerId.dropFirst(customSidebarProviderPrefix.count))
+        let swiftURL = customSidebarsDirectory.appendingPathComponent("\(name).swift")
+        if FileManager.default.fileExists(atPath: swiftURL.path) { return swiftURL }
+        let jsonURL = customSidebarsDirectory.appendingPathComponent("\(name).json")
+        if FileManager.default.fileExists(atPath: jsonURL.path) { return jsonURL }
+        return nil
+    }
+
+    /// The always-available built-in views: the default workspaces sidebar plus
+    /// the bundled preset providers (Project Worktrees, Attention Queue, Dev
+    /// Servers, Last Prompt, Super Compact, Browser Stack). These ship
+    /// independently of the experimental Extensions feature, so they stay in
+    /// the switcher menu regardless of the beta flag.
+    static var builtInDescriptors: [CmuxSidebarProviderDescriptor] {
+        [.defaultWorkspaces] + providers.map { $0.descriptor }
+    }
+
+    /// Descriptors offered in the switcher menu and command palette. The hosted
+    /// extension entry belongs to the experimental Extensions feature, so it is
+    /// only offered while that beta is enabled; the built-in views are always
+    /// offered.
+    static var descriptors: [CmuxSidebarProviderDescriptor] {
+        var result = isEnabled ? builtInDescriptors + [hostedExtensionsDescriptor] : builtInDescriptors
+        if customSidebarsEnabled { result += customSidebarDescriptors }
+        return result
+    }
+
+    /// Every descriptor that can ever be selected, ignoring feature gates. Used
+    /// to register command-palette handlers so a runtime flag flip always has a
+    /// handler to invoke; what is *shown* uses ``descriptors``.
+    static var allDescriptors: [CmuxSidebarProviderDescriptor] {
+        builtInDescriptors + [hostedExtensionsDescriptor] + customSidebarDescriptors
+    }
+
+    static var hostedExtensionsDescriptor: CmuxSidebarProviderDescriptor {
         let selectedName = UserDefaults.standard.string(forKey: selectedExtensionNameDefaultsKey)?.nilIfEmpty
-        return CmuxExtensionSidebarProviderDescriptor(
+        return CmuxSidebarProviderDescriptor(
             id: hostedExtensionsProviderId,
-            title: CmuxExtensionLocalizedText(
+            title: CmuxSidebarProviderLocalizedText(
                 key: "sidebar.provider.extensions.title",
                 defaultValue: selectedName ?? String(localized: "sidebar.provider.extensions.title", defaultValue: "Extension Sidebar")
             ),
-            subtitle: CmuxExtensionLocalizedText(
+            subtitle: CmuxSidebarProviderLocalizedText(
                 key: "sidebar.provider.extensions.subtitle",
                 defaultValue: selectedName == nil
                     ? String(localized: "sidebar.provider.extensions.subtitle", defaultValue: "Custom sidebar")
@@ -10829,19 +11064,34 @@ enum CmuxExtensionSidebarSelection {
         )
     }
 
-    static func descriptor(for providerId: String) -> CmuxExtensionSidebarProviderDescriptor {
+    static func descriptor(for providerId: String) -> CmuxSidebarProviderDescriptor {
         descriptors.first { $0.id == providerId } ?? .defaultWorkspaces
     }
 
-    static func provider(for providerId: String) -> (any CmuxExtensionSidebarProvider)? {
+    static func provider(for providerId: String) -> (any CmuxSidebarProvider)? {
         providers.first { $0.descriptor.id == providerId }
     }
 
-    static func localizedTitle(for descriptor: CmuxExtensionSidebarProviderDescriptor) -> String {
+    /// Resolves the persisted provider selection to the provider that is
+    /// actually rendered. The hosted-extensions provider is part of the
+    /// experimental Extensions feature, so a persisted hosted selection falls
+    /// back to the default workspaces sidebar while the beta is disabled,
+    /// otherwise turning the feature off would strand the user on an empty
+    /// sidebar with no switcher entry to escape it. Built-in views are always
+    /// honored, so the switcher and its active-view checkmark keep working
+    /// regardless of the beta flag.
+    static func effectiveProviderId(_ persistedProviderId: String, extensionsEnabled: Bool) -> String {
+        if persistedProviderId == hostedExtensionsProviderId, !extensionsEnabled {
+            return defaultProviderId
+        }
+        return persistedProviderId
+    }
+
+    static func localizedTitle(for descriptor: CmuxSidebarProviderDescriptor) -> String {
         localizedText(descriptor.title)
     }
 
-    static func localizedText(_ text: CmuxExtensionLocalizedText) -> String {
+    static func localizedText(_ text: CmuxSidebarProviderLocalizedText) -> String {
         NSLocalizedString(
             text.key,
             tableName: "Localizable",
@@ -10857,14 +11107,14 @@ enum CmuxExtensionSidebarSelection {
 
     @MainActor
     static func showMenu(anchorView: NSView, event: NSEvent?) {
-        // The sidebar-toggle right-click menu only switches between sidebar
-        // providers, which exists solely for the experimental Extensions
-        // feature. While it is disabled there is nothing to choose, so the
-        // menu does not appear.
-        guard isEnabled else { return }
+        // The right-click menu switches between the always-available built-in
+        // views (and the hosted extension sidebar when the experimental
+        // Extensions beta is enabled, plus any beta custom sidebars), so it is
+        // shown regardless of the flag.
         let menu = NSMenu()
+        let persistedProviderId = UserDefaults.standard.string(forKey: defaultsKey) ?? defaultProviderId
         let selectedProviderId = descriptor(
-            for: UserDefaults.standard.string(forKey: defaultsKey) ?? defaultProviderId
+            for: effectiveProviderId(persistedProviderId, extensionsEnabled: isEnabled)
         ).id
         for descriptor in descriptors {
             let item = NSMenuItem(
@@ -11000,11 +11250,27 @@ final class SidebarDragState {
     /// release flows.
     var isSimulated: Bool = false
 
+    /// True only in the window that *originated* the current drag (set via
+    /// ``beginDragging(tabId:)``). A destination window that mirrors a foreign
+    /// drag id into ``draggedTabId`` for cross-window rendering does not own the
+    /// process-wide ``SidebarWorkspaceDragRegistry`` entry, so it must not clear
+    /// it when its own local drag state is reset.
+    private var originatedActiveDrag = false
+
+    /// Pin state of a foreign (cross-window) dragged workspace, resolved once
+    /// when the drag is mirrored into this window and reused for every hover
+    /// update. A workspace's pin state can't change mid-drag, so this avoids an
+    /// `AppDelegate.tabManagerFor(tabId:)` scan over every window on each
+    /// pointer-move. `nil` when no foreign drag is mirrored here.
+    var foreignDraggedIsPinned: Bool?
+
     init() {}
 
     func beginDragging(tabId: UUID) {
         draggedTabId = tabId
         clearDropIndicator()
+        originatedActiveDrag = true
+        SidebarWorkspaceDragRegistry.begin(workspaceId: tabId)
     }
 
     func setDropIndicator(_ indicator: SidebarDropIndicator?, usesTopLevelRows: Bool = false) {
@@ -11017,8 +11283,50 @@ final class SidebarDragState {
     }
 
     func clearDrag() {
+        if originatedActiveDrag, let draggedTabId {
+            SidebarWorkspaceDragRegistry.end(workspaceId: draggedTabId)
+        }
+        originatedActiveDrag = false
+        foreignDraggedIsPinned = nil
         draggedTabId = nil
         clearDropIndicator()
+    }
+}
+
+/// Process-wide identity of the workspace currently being dragged in any
+/// window's sidebar.
+///
+/// A sidebar drag is a single, process-global event: at most one workspace is
+/// being dragged at a time. The originating window records it here synchronously
+/// at drag start (``SidebarDragState/beginDragging(tabId:)``) and clears it when
+/// that drag ends. A *destination* window — which has no local
+/// ``SidebarDragState/draggedTabId`` because the drag began elsewhere — reads
+/// this to resolve the dragged workspace for a cross-window move.
+///
+/// This is deliberately not sourced from `NSPasteboard(name: .drag)`: SwiftUI's
+/// `.onDrag` registers the payload through an `NSItemProvider` whose data
+/// representation is delivered asynchronously, so a synchronous pasteboard read
+/// inside a `DropDelegate` can race and return `nil`. A plain in-process value,
+/// set synchronously on the main actor, has no such materialization race.
+@MainActor
+enum SidebarWorkspaceDragRegistry {
+    private static var activeWorkspaceId: UUID?
+
+    /// The workspace currently being sidebar-dragged anywhere in the process,
+    /// or `nil` when no sidebar drag is in flight.
+    static var currentWorkspaceId: UUID? { activeWorkspaceId }
+
+    /// Record the start of a sidebar drag. Called by the originating window.
+    static func begin(workspaceId: UUID) {
+        activeWorkspaceId = workspaceId
+    }
+
+    /// Clear the active drag, but only if `workspaceId` still matches the
+    /// in-flight drag, so a stale clear from a superseded drag is a no-op.
+    static func end(workspaceId: UUID) {
+        if activeWorkspaceId == workspaceId {
+            activeWorkspaceId = nil
+        }
     }
 }
 
@@ -11434,7 +11742,7 @@ private final class WorkspaceSidebarRowFrameReporterView: NSView {
 }
 
 struct VerticalTabsSidebar: View {
-    @ObservedObject var updateViewModel: UpdateViewModel
+    var updateViewModel: UpdateStateModel
     @ObservedObject var fileExplorerState: FileExplorerState
     let windowId: UUID
     let onSendFeedback: () -> Void
@@ -11445,11 +11753,17 @@ struct VerticalTabsSidebar: View {
     let onNewTab: () -> Void
     let observedWindow: NSWindow?
     @EnvironmentObject var tabManager: TabManager
-    @EnvironmentObject var notificationStore: TerminalNotificationStore
+    // Observe the coalesced unread projection instead of the notification store
+    // so notification churn (terminal/agent activity) no longer reconstructs
+    // every workspace row. The store stays available as an unobserved singleton
+    // for context-menu actions and pass-down. See SidebarUnreadModel / #2586.
+    @EnvironmentObject var sidebarUnread: SidebarUnreadModel
+    var notificationStore: TerminalNotificationStore { .shared }
     @EnvironmentObject var cmuxConfigStore: CmuxConfigStore
     @Binding var selection: SidebarSelection
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
+    @Binding var sidebarRenderWorkerClient: RenderWorkerClient?
     @State var modifierKeyMonitor = WindowScopedShortcutHintModifierMonitor(activation: .commandOnly)
     @StateObject var dragAutoScrollController = SidebarDragAutoScrollController()
     @StateObject private var dragFailsafeMonitor = SidebarDragFailsafeMonitor()
@@ -11466,13 +11780,17 @@ struct VerticalTabsSidebar: View {
     @State private var dropIndicator: SidebarDropIndicator?
     @State private var frozenTabItemPresentation: SidebarTabItemPresentationSnapshot?
     @State private var terminalScrollBarVisibilityGeneration: UInt64 = 0
+    // Bonsplit tab drags arrive through AppKit pasteboard callbacks, not
+    // `SidebarDragState`, so they need a separate transient collection flag.
+    @State private var isBonsplitWorkspaceDropTargetCollectionActive = false
+    @State private var bonsplitWorkspaceDropTargetBridge = SidebarBonsplitTabWorkspaceDropOverlay.TargetBridge()
     // Freezes `showsModifierShortcutHints` for the workspace whose context menu
     // is open. Set on the row's contextMenu.onAppear and cleared on
     // .onDisappear so modifier-key transitions don't flip the badges on the
     // row sitting behind the open menu. See `SidebarShortcutHintFreezePolicy`.
     @State private var frozenShortcutHintsTabId: UUID?
     @State private var frozenShortcutHintsValue: Bool = false
-    @State private var laidOutWorkspaceRowIds: Set<UUID> = []
+    @State private var workspaceRowsMeasurement: SidebarWorkspaceRowsMeasurement<UUID>?
     @State private var pendingSelectedWorkspaceScrollId: UUID?
     @AppStorage("workspaceTab.displayMode") private var workspaceTabDisplayMode = WorkspaceSidebarDisplayMode.native.rawValue
     @AppStorage(WorkspaceSummaryPrioritySettings.enabledKey)
@@ -11495,18 +11813,144 @@ struct VerticalTabsSidebar: View {
     @AppStorage(CmuxExtensionSidebarSelection.defaultsKey)
     private var selectedExtensionSidebarProviderId = CmuxExtensionSidebarSelection.defaultProviderId
     @LiveSetting(\.betaFeatures.extensions) private var extensionsExperimentalEnabled
+    @LiveSetting(\.betaFeatures.customSidebars) private var customSidebarsExperimentalEnabled
+    @LiveSetting(\.customSidebars.renderer) private var customSidebarRenderer
 
-    // The provider to actually render. When the experimental Extensions feature
-    // is disabled, fall back to the default workspaces sidebar regardless of the
-    // persisted selection: turning extensions off hides the provider switcher,
-    // so a hosted-extension selection would otherwise strand the user with no
-    // way back. Deriving the effective provider (rather than mutating the
-    // persisted selection via an observer) routes correctly on the first render
-    // pass and restores the user's choice if extensions are re-enabled.
+    // The provider to actually render. Built-in views are always honored; only
+    // the hosted-extension selection falls back to the default workspaces
+    // sidebar while the experimental Extensions feature is disabled, since
+    // turning extensions off hides that entry and would otherwise strand the
+    // user with no way back. Deriving the effective provider (rather than
+    // mutating the persisted selection via an observer) routes correctly on the
+    // first render pass and restores the user's choice if extensions are
+    // re-enabled. Reading `extensionsExperimentalEnabled` here keeps the view
+    // reactive to the flag toggling.
     private var effectiveExtensionSidebarProviderId: String {
-        extensionsExperimentalEnabled
-            ? selectedExtensionSidebarProviderId
-            : CmuxExtensionSidebarSelection.defaultProviderId
+        let selected = selectedExtensionSidebarProviderId
+        if selected.hasPrefix(CmuxExtensionSidebarSelection.customSidebarProviderPrefix) {
+            // Touch the @LiveSetting so toggling the flag in Settings still
+            // re-renders, but decide with the synchronous UserDefaults read:
+            // on a sidebar remount @LiveSetting's initial value lags one tick,
+            // which would otherwise flash the default sidebar for a frame
+            // before swapping to the custom one.
+            _ = customSidebarsExperimentalEnabled
+            return CmuxExtensionSidebarSelection.customSidebarsEnabled
+                ? selected
+                : CmuxExtensionSidebarSelection.defaultProviderId
+        }
+        return CmuxExtensionSidebarSelection.effectiveProviderId(
+            selectedExtensionSidebarProviderId,
+            extensionsEnabled: extensionsExperimentalEnabled
+        )
+    }
+
+    /// Live, read-only projection of workspace state handed to custom
+    /// sidebars so interpreted Swift can bind to it (e.g.
+    /// `ForEach(workspaces) { w in Text(w.title) }`) and re-render when it
+    /// changes. A value snapshot built fresh each render, never the store
+    /// itself, so it respects the sidebar snapshot-boundary rule.
+    private func customSidebarDataContext(now: Date) -> [String: SwiftValue] {
+        let selectedId = tabManager.selectedTabId
+        let workspaces: [SwiftValue] = tabManager.tabs.enumerated().map { index, workspace in
+            customSidebarWorkspaceValue(workspace, index: index, selectedId: selectedId)
+        }
+        let selectedWorkspace = tabManager.tabs.first { $0.id == selectedId }
+        let c = Calendar.current.dateComponents([.hour, .minute, .second, .weekday], from: now)
+        let hour = c.hour ?? 0, minute = c.minute ?? 0, second = c.second ?? 0
+        let clock: SwiftValue = .object([
+            "time": .string(String(format: "%02d:%02d:%02d", hour, minute, second)),
+            "hour": .int(hour),
+            "minute": .int(minute),
+            "second": .int(second),
+            "weekday": .int(c.weekday ?? 0),
+            "epoch": .int(Int(now.timeIntervalSince1970)),
+        ])
+        return [
+            "workspaces": .array(workspaces),
+            "workspaceCount": .int(tabManager.tabs.count),
+            "selectedTitle": .string(selectedWorkspace?.customTitle ?? selectedWorkspace?.title ?? ""),
+            "selectedId": .string(selectedId?.uuidString ?? ""),
+            "unreadTotal": .int(sidebarUnread.totalUnreadCount),
+            "clock": clock,
+        ]
+    }
+
+    /// Projects one workspace's live state into the interpreter value tree.
+    /// Optional fields are omitted when absent so interpreted `if let` / ternary
+    /// truthiness behaves; always-present fields default sensibly. Keep this in
+    /// sync with the data keys documented in `docs/custom-sidebars.md`.
+    private func customSidebarWorkspaceValue(_ workspace: Workspace, index: Int, selectedId: UUID?) -> SwiftValue {
+        let focusedPanelId = workspace.focusedPanelId
+        var fields: [String: SwiftValue] = [
+            "id": .string(workspace.id.uuidString),
+            "title": .string(workspace.customTitle ?? workspace.title),
+            "selected": .bool(workspace.id == selectedId),
+            "pinned": .bool(workspace.isPinned),
+            "index": .int(index),
+            "directory": .string(workspace.currentDirectory),
+            "ports": .array(workspace.listeningPorts.map { .int($0) }),
+            "portCount": .int(workspace.listeningPorts.count),
+            "unread": .int(sidebarUnread.unreadCount(forWorkspaceId: workspace.id)),
+            "tabs": .array(customSidebarSurfaceValues(workspace, focusedPanelId: focusedPanelId)),
+            "tabCount": .int(workspace.bonsplitController.allPaneIds.reduce(0) { $0 + workspace.bonsplitController.tabs(inPane: $1).count }),
+        ]
+        if let description = workspace.customDescription, !description.isEmpty { fields["description"] = .string(description) }
+        if let color = workspace.customColor, !color.isEmpty { fields["color"] = .string(color) }
+        if let git = workspace.sidebarGitBranchesInDisplayOrder().first {
+            fields["branch"] = .string(git.branch)
+            fields["dirty"] = .bool(git.isDirty)
+        }
+        let pullRequestValues = workspace.customSidebarPullRequestValues()
+        if let firstPullRequest = pullRequestValues.first {
+            fields["pr"] = firstPullRequest
+            fields["prs"] = .array(pullRequestValues)
+        }
+        if let progress = workspace.progress {
+            var progressFields: [String: SwiftValue] = ["value": .double(progress.value)]
+            if let label = progress.label { progressFields["label"] = .string(label) }
+            fields["progress"] = .object(progressFields)
+        }
+        if let message = workspace.latestConversationMessage, !message.isEmpty { fields["latestMessage"] = .string(message) }
+        if let prompt = workspace.latestSubmittedMessage, !prompt.isEmpty { fields["latestPrompt"] = .string(prompt) }
+        if let at = workspace.latestSubmittedAt { fields["latestAt"] = .int(Int(at.timeIntervalSince1970)) }
+        if let target = workspace.remoteDisplayTarget {
+            fields["remote"] = .object([
+                "target": .string(target),
+                "state": .string(workspace.remoteConnectionState.rawValue),
+                "connected": .bool(workspace.remoteConnectionState == .connected),
+            ])
+        }
+        return .object(fields)
+    }
+
+    /// Projects a workspace's surfaces (terminal/browser/etc. tabs) into the
+    /// interpreter value tree, enriched with per-surface directory, pin, git,
+    /// and ports where available.
+    private func customSidebarSurfaceValues(_ workspace: Workspace, focusedPanelId: UUID?) -> [SwiftValue] {
+        var tabs: [SwiftValue] = []
+        for paneId in workspace.bonsplitController.allPaneIds {
+            for tab in workspace.bonsplitController.tabs(inPane: paneId) {
+                guard let panelId = workspace.panelIdFromSurfaceId(tab.id) else { continue }
+                var surfaceFields: [String: SwiftValue] = [
+                    "id": .string(panelId.uuidString),
+                    "title": .string(tab.title),
+                    "focused": .bool(panelId == focusedPanelId),
+                    "pinned": .bool(workspace.pinnedPanelIds.contains(panelId)),
+                ]
+                if let directory = workspace.panelDirectories[panelId], !directory.isEmpty {
+                    surfaceFields["directory"] = .string(directory)
+                }
+                if let git = workspace.panelGitBranches[panelId] {
+                    surfaceFields["branch"] = .string(git.branch)
+                    surfaceFields["dirty"] = .bool(git.isDirty)
+                }
+                if let ports = workspace.surfaceListeningPorts[panelId], !ports.isEmpty {
+                    surfaceFields["ports"] = .array(ports.map { .int($0) })
+                }
+                tabs.append(.object(surfaceFields))
+            }
+        }
+        return tabs
     }
     @AppStorage("sidebarMatchTerminalBackground")
     private var sidebarMatchTerminalBackground = false
@@ -11529,7 +11973,18 @@ struct VerticalTabsSidebar: View {
     private var draggedTabIdBinding: Binding<UUID?> {
         Binding(
             get: { dragState.draggedTabId },
-            set: { dragState.draggedTabId = $0 }
+            // Route the clear through `clearDrag()` so a locally originated drag
+            // also ends its `SidebarWorkspaceDragRegistry` entry. The extension /
+            // browser-stack sidebar drop delegates end drags by writing `nil`
+            // through this binding; without this they'd leave the process-wide
+            // registry stale and a later cross-window drop could act on it.
+            set: { newValue in
+                if let newValue {
+                    dragState.draggedTabId = newValue
+                } else {
+                    dragState.clearDrag()
+                }
+            }
         )
     }
 
@@ -11560,10 +12015,11 @@ struct VerticalTabsSidebar: View {
     /// Constructs the drop delegate for the empty area in the parent scope,
     /// so the child view receives a closure-bundle-equivalent value rather
     /// than an `@Observable` store.
-    private func emptyAreaTabDropDelegate() -> SidebarTabDropDelegate {
+    private func emptyAreaTabDropDelegate(renderContext: WorkspaceListRenderContext) -> SidebarTabDropDelegate {
         SidebarTabDropDelegate(
             targetTabId: nil,
             tabManager: tabManager,
+            workspaceGroupIdByWorkspaceId: renderContext.workspaceGroupIdByWorkspaceId,
             dragState: dragState,
             selectedTabIds: $selectedTabIds,
             lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
@@ -11623,27 +12079,40 @@ struct VerticalTabsSidebar: View {
         return KeyboardShortcutSettings.shortcut(for: .selectWorkspaceByNumber)
     }
 
-    private func requestSelectedWorkspaceScroll(_ proxy: ScrollViewProxy, workspaceIds: [UUID]) {
+    private func requestSelectedWorkspaceScroll(
+        _ proxy: ScrollViewProxy,
+        renderContext: WorkspaceListRenderContext
+    ) {
         guard let selectedWorkspaceId = tabManager.selectedTabId,
-              workspaceIds.contains(selectedWorkspaceId) else {
+              renderContext.workspaceIds.contains(selectedWorkspaceId) else {
             pendingSelectedWorkspaceScrollId = nil
             return
         }
 
         pendingSelectedWorkspaceScrollId = selectedWorkspaceId
-        flushPendingSelectedWorkspaceScroll(proxy)
+        flushPendingSelectedWorkspaceScroll(proxy, renderContext: renderContext)
     }
 
     private func flushPendingSelectedWorkspaceScroll(
         _ proxy: ScrollViewProxy,
-        laidOutWorkspaceRowIds: Set<UUID>? = nil
+        renderContext: WorkspaceListRenderContext
     ) {
         guard let selectedWorkspaceId = pendingSelectedWorkspaceScrollId else { return }
-        let rowIds = laidOutWorkspaceRowIds ?? self.laidOutWorkspaceRowIds
-        guard rowIds.contains(selectedWorkspaceId) else { return }
 
-        // No anchor means SwiftUI scrolls the minimum needed to reveal the row.
-        proxy.scrollTo(selectedWorkspaceId)
+        // Scroll unconditionally: ScrollViewProxy resolves `.id(_:)` values in
+        // lazy containers without requiring the row to be realized, and an
+        // unknown id is a harmless no-op. The previous design gated this on a
+        // per-row "laid-out row ids" PreferenceKey whose sidebar-wide reduce
+        // fed `@State` writes from inside the layout/preference update cycle,
+        // the cmux-owned edge in the sidebar layout livelock
+        // (https://github.com/manaflow-ai/cmux/issues/2586). No anchor means
+        // SwiftUI scrolls the minimum needed to reveal the row.
+        let group = renderContext.workspaceById[selectedWorkspaceId]?.groupId
+            .flatMap { renderContext.workspaceGroupById[$0] }
+        proxy.scrollTo(SidebarSelectedWorkspaceScrollPolicy.scrollTargetWorkspaceId(
+            selectedWorkspaceId: selectedWorkspaceId,
+            group: group
+        ))
         pendingSelectedWorkspaceScrollId = nil
     }
 
@@ -11745,6 +12214,7 @@ struct VerticalTabsSidebar: View {
         let tabItemSettings: SidebarTabItemSettingsSnapshot
         let tabIndexById: [UUID: Int]
         let workspaceById: [UUID: Workspace]
+        let workspaceGroupIdByWorkspaceId: [UUID: UUID?]
         let selectedContextTargetIds: [UUID]
         let selectedRemoteContextMenuWorkspaceIds: [UUID]
         let allSelectedRemoteContextMenuTargetsConnecting: Bool
@@ -11755,6 +12225,8 @@ struct VerticalTabsSidebar: View {
         let workspaceGroups: [WorkspaceGroup]
         let workspaceGroupById: [UUID: WorkspaceGroup]
         let workspaceGroupMenuSnapshot: WorkspaceGroupMenuSnapshot
+        let workspaceRenderItems: [SidebarWorkspaceRenderItem]
+        let visibleWorkspaceRowIds: [UUID]
 
         var workspaceIds: [UUID] { tabIds }
     }
@@ -11770,6 +12242,7 @@ struct VerticalTabsSidebar: View {
             ($0.element.id, $0.offset)
         })
         let workspaceById = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0) })
+        let workspaceGroupIdByWorkspaceId = Dictionary(uniqueKeysWithValues: tabs.map { ($0.id, $0.groupId) })
         let orderedSelectedTabs = tabs.filter { selectedTabIds.contains($0.id) }
         let selectedContextTargetIds = orderedSelectedTabs.map(\.id)
         let selectedRemoteContextMenuTargets = orderedSelectedTabs.filter { $0.isRemoteWorkspace }
@@ -11797,6 +12270,11 @@ struct VerticalTabsSidebar: View {
         let workspaceGroupMenuSnapshot = WorkspaceGroupMenuSnapshot(
             items: workspaceGroups.map { WorkspaceGroupMenuSnapshot.Item(id: $0.id, name: $0.name) }
         )
+        let workspaceRenderItems = SidebarWorkspaceRenderItem.renderItems(
+            tabs: tabs,
+            groupsById: workspaceGroupById
+        )
+        let visibleWorkspaceRowIds = workspaceRenderItems.map(\.rowWorkspaceId)
         let draggedSidebarTabId = dragState.draggedTabId
         let sidebarReorderIds = draggedSidebarTabId.map {
             tabManager.sidebarReorderWorkspaceIds(
@@ -11814,6 +12292,7 @@ struct VerticalTabsSidebar: View {
             tabItemSettings: tabItemSettings,
             tabIndexById: tabIndexById,
             workspaceById: workspaceById,
+            workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId,
             selectedContextTargetIds: selectedContextTargetIds,
             selectedRemoteContextMenuWorkspaceIds: selectedRemoteContextMenuWorkspaceIds,
             allSelectedRemoteContextMenuTargetsConnecting: allSelectedRemoteContextMenuTargetsConnecting,
@@ -11823,7 +12302,9 @@ struct VerticalTabsSidebar: View {
             proactiveSuggestionBadgeById: proactiveSuggestionBadgeById,
             workspaceGroups: workspaceGroups,
             workspaceGroupById: workspaceGroupById,
-            workspaceGroupMenuSnapshot: workspaceGroupMenuSnapshot
+            workspaceGroupMenuSnapshot: workspaceGroupMenuSnapshot,
+            workspaceRenderItems: workspaceRenderItems,
+            visibleWorkspaceRowIds: visibleWorkspaceRowIds
         )
 
         ZStack(alignment: .bottomLeading) {
@@ -11843,7 +12324,7 @@ struct VerticalTabsSidebar: View {
                     .padding(.vertical, 4)
                 }
 
-            if CmuxExtensionSidebarSelection.descriptor(for: effectiveExtensionSidebarProviderId).id == CmuxExtensionSidebarProviderDescriptor.defaultWorkspacesID {
+            if CmuxExtensionSidebarSelection.descriptor(for: effectiveExtensionSidebarProviderId).id == CmuxSidebarProviderDescriptor.defaultWorkspacesID {
                 workspaceScrollArea(renderContext: renderContext)
             } else {
                 extensionSidebarScrollArea(renderContext: renderContext)
@@ -11869,6 +12350,7 @@ struct VerticalTabsSidebar: View {
             syncNotificationAutoReorderPolicy()
             modifierKeyMonitor.start()
             dragState.clearDrag()
+            isBonsplitWorkspaceDropTargetCollectionActive = false
             // Defensive reset: if a prior simulation died without running
             // its teardown (sidebar unmounted mid-loop, app crash, etc.) the
             // @State SidebarDragState could carry isSimulated=true into a
@@ -11889,6 +12371,7 @@ struct VerticalTabsSidebar: View {
             dragAutoScrollController.stop()
             dragFailsafeMonitor.stop()
             dragState.clearDrag()
+            isBonsplitWorkspaceDropTargetCollectionActive = false
             // Clear the simulator flag too so a re-mounted sidebar doesn't
             // inherit a stale bypass and skip the real-drag failsafe monitor.
             dragState.isSimulated = false
@@ -11963,18 +12446,36 @@ struct VerticalTabsSidebar: View {
     private func workspaceScrollArea(renderContext: WorkspaceListRenderContext) -> some View {
         let scrollInsets = SidebarWorkspaceScrollInsets.workspaceList
         return GeometryReader { geometryProxy in
+            let contentMinHeight = SidebarWorkspaceScrollLayout.contentMinHeight(
+                viewportHeight: geometryProxy.size.height,
+                insets: scrollInsets
+            )
+            let measuredWorkspaceRowsHeight = workspaceRowsMeasurement?.rowsHeight(
+                for: renderContext.visibleWorkspaceRowIds
+            )
+            // The empty drop/tap area below the last row is sized to the
+            // remaining viewport so the scroll content fills (but never
+            // exceeds) the visible height when the rows fit. Sizing it to a
+            // finite remainder — instead of the old `maxHeight: .infinity` —
+            // is what keeps the document view from always overflowing, so the
+            // overlay scroller stays hidden when there is nothing to scroll
+            // (https://github.com/manaflow-ai/cmux/issues/3241).
+            let emptyAreaHeight = SidebarWorkspaceScrollLayout.emptyAreaHeight(
+                contentMinHeight: contentMinHeight,
+                rowsHeight: measuredWorkspaceRowsHeight
+            )
+
             ScrollViewReader { scrollProxy in
-                ScrollView {
+                ScrollView(.vertical) {
                     workspaceScrollContent(
                         renderContext: renderContext,
-                        minHeight: SidebarWorkspaceScrollLayout.contentMinHeight(
-                            viewportHeight: geometryProxy.size.height,
-                            insets: scrollInsets
-                        )
+                        minHeight: contentMinHeight,
+                        emptyAreaHeight: emptyAreaHeight
                     )
                 }
                 .background(
                     SidebarScrollViewResolver { scrollView in
+                        configureSidebarScrollView(scrollView)
                         dragAutoScrollController.attach(scrollView: scrollView)
                         workspaceSidebarLayoutMetricsStore.attachScrollView(scrollView)
                     }
@@ -12009,6 +12510,7 @@ struct VerticalTabsSidebar: View {
                             .onDrop(of: SidebarTabDragPayload.dropContentTypes, delegate: SidebarTabDropDelegate(
                                 targetTabId: firstWorkspaceId,
                                 tabManager: tabManager,
+                                workspaceGroupIdByWorkspaceId: renderContext.workspaceGroupIdByWorkspaceId,
                                 dragState: dragState,
                                 selectedTabIds: $selectedTabIds,
                                 lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
@@ -12053,20 +12555,26 @@ struct VerticalTabsSidebar: View {
                 .background(Color.clear)
                 .modifier(ClearScrollBackground())
                 .onAppear {
-                    requestSelectedWorkspaceScroll(scrollProxy, workspaceIds: renderContext.workspaceIds)
+                    requestSelectedWorkspaceScroll(scrollProxy, renderContext: renderContext)
                 }
                 .onChange(of: tabManager.selectedTabId) { _, _ in
-                    requestSelectedWorkspaceScroll(scrollProxy, workspaceIds: renderContext.workspaceIds)
+                    requestSelectedWorkspaceScroll(scrollProxy, renderContext: renderContext)
                 }
                 .onChange(of: renderContext.workspaceIds) { oldWorkspaceIds, newWorkspaceIds in
                     guard shouldRequestSelectedWorkspaceScrollAfterWorkspaceIdsChange(
                         from: oldWorkspaceIds,
                         to: newWorkspaceIds
                     ) else {
-                        flushPendingSelectedWorkspaceScroll(scrollProxy)
+                        flushPendingSelectedWorkspaceScroll(scrollProxy, renderContext: renderContext)
                         return
                     }
-                    requestSelectedWorkspaceScroll(scrollProxy, workspaceIds: newWorkspaceIds)
+                    requestSelectedWorkspaceScroll(scrollProxy, renderContext: renderContext)
+                }
+                .onChange(of: renderContext.visibleWorkspaceRowIds) { _, _ in
+                    // Drop the stale rows-height measurement so the empty-area
+                    // sizing recomputes for the new row set. The measurement is
+                    // also keyed by workspace ids, so this is belt-and-suspenders.
+                    workspaceRowsMeasurement = nil
                 }
                 .onReceive(NotificationCenter.default.publisher(for: .workspaceOrderDidChange)) { notification in
                     requestSelectedWorkspaceScrollAfterWorkspaceOrderChange(notification)
@@ -12116,12 +12624,33 @@ struct VerticalTabsSidebar: View {
                         lastSidebarSelectionIndex = index
                     }
                 }
-                .onPreferenceChange(SidebarWorkspaceRowIdsPreferenceKey.self) { rowIds in
-                    laidOutWorkspaceRowIds = rowIds
-                    flushPendingSelectedWorkspaceScroll(scrollProxy, laidOutWorkspaceRowIds: rowIds)
+                .onPreferenceChange(SidebarWorkspaceRowsHeightPreferenceKey.self) { measurement in
+                    guard let measurement else {
+                        workspaceRowsMeasurement = nil
+                        return
+                    }
+                    let nextMeasurement = SidebarWorkspaceRowsMeasurement(
+                        workspaceIds: measurement.workspaceIds,
+                        rowsHeight: max(0, measurement.rowsHeight)
+                    )
+                    if let workspaceRowsMeasurement,
+                       workspaceRowsMeasurement.isEquivalent(to: nextMeasurement) {
+                        return
+                    }
+                    workspaceRowsMeasurement = nextMeasurement
                 }
             }
         }
+    }
+
+    // Applies one stable overlay/autohide scroller config and never toggles it.
+    // Toggling `hasVerticalScroller`/style from SwiftUI re-renders (constant
+    // while agents update rows) re-flashes the overlay knob so it never reaches
+    // its idle fade; a stable config lets AppKit own appear/scroll/fade and the
+    // finite empty-area height keeps it hidden when content fits (#3241).
+    private func configureSidebarScrollView(_ scrollView: NSScrollView?) {
+        guard let scrollView else { return }
+        SidebarScrollViewConfigurator.apply(to: scrollView)
     }
 
     @ViewBuilder
@@ -12132,7 +12661,7 @@ struct VerticalTabsSidebar: View {
                 snapshotUpdateToken: extensionSidebarUpdateToken,
                 actionHandler: { handleCMUXSidebarExtensionAction($0) },
                 onUseDefaultSidebar: {
-                    CmuxExtensionSidebarSelection.setProviderId(CmuxExtensionSidebarProviderDescriptor.defaultWorkspacesID)
+                    CmuxExtensionSidebarSelection.setProviderId(CmuxSidebarProviderDescriptor.defaultWorkspacesID)
                 }
             )
             .onReceive(
@@ -12158,6 +12687,39 @@ struct VerticalTabsSidebar: View {
                     bottomHeight: sidebarBottomScrimHeight
                 )
             )
+        } else if effectiveExtensionSidebarProviderId.hasPrefix(CmuxExtensionSidebarSelection.customSidebarProviderPrefix),
+                  let customSidebarURL = CmuxExtensionSidebarSelection.customSidebarFileURL(forProviderId: effectiveExtensionSidebarProviderId) {
+            // Periodic tick so the custom sidebar re-renders live (clock,
+            // countdowns, and refreshed workspace/data context), mirroring the
+            // default sidebar's TimelineView. No banned timers involved.
+            // The surface mounts the in-process renderer by default (native
+            // hover/focus/keyboard, same-frame resize); the
+            // `customSidebars.renderer` setting switches it to the
+            // out-of-process worker for untrusted sources (no file-derived
+            // view code runs in the host). The @LiveSetting's initial value
+            // lags one store round-trip on remount, so a non-default choice
+            // can mount the other renderer for one tick before flipping;
+            // harmless (the host shuts the short-lived client down on
+            // unmount).
+            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                CustomSidebarSurface(
+                    fileURL: customSidebarURL,
+                    dataContext: customSidebarDataContext(now: timeline.date),
+                    dispatch: makeCmuxSidebarActionDispatch(),
+                    contentInsets: CustomSidebarContentInsets(
+                        top: SidebarWorkspaceScrollInsets.workspaceList.top,
+                        bottom: SidebarWorkspaceScrollInsets.workspaceList.bottom
+                    ),
+                    rendersInProcess: customSidebarRenderer == .inProcess,
+                    client: $sidebarRenderWorkerClient
+                )
+            }
+            .mask(
+                SidebarWorkspaceScrollEdgeFadeMask(
+                    topHeight: sidebarTopScrimHeight,
+                    bottomHeight: sidebarBottomScrimHeight
+                )
+            )
         } else {
             TimelineView(.periodic(from: .now, by: 30)) { timeline in
                 let model = extensionSidebarRenderModel(renderContext: renderContext, now: timeline.date)
@@ -12168,7 +12730,7 @@ struct VerticalTabsSidebar: View {
 
     private func extensionSidebarTimelineContent(
         renderContext: WorkspaceListRenderContext,
-        model: CmuxExtensionSidebarRenderModel,
+        model: CmuxSidebarProviderRenderModel,
         now: Date
     ) -> some View {
         GeometryReader { geometryProxy in
@@ -12196,7 +12758,7 @@ struct VerticalTabsSidebar: View {
                             lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
                             dragAutoScrollController: dragAutoScrollController,
                             topDropIndicatorVisible: emptyAreaTopDropIndicatorVisible(),
-                            tabDropDelegate: emptyAreaTabDropDelegate(),
+                            tabDropDelegate: emptyAreaTabDropDelegate(renderContext: renderContext),
                             bonsplitDropIndicator: dropIndicatorBinding
                         )
                         .frame(maxWidth: .infinity, minHeight: 48)
@@ -12215,6 +12777,7 @@ struct VerticalTabsSidebar: View {
             }
             .background(
                 SidebarScrollViewResolver { scrollView in
+                    configureSidebarScrollView(scrollView)
                     dragAutoScrollController.attach(scrollView: scrollView)
                 }
                 .frame(width: 0, height: 0)
@@ -12286,6 +12849,12 @@ struct VerticalTabsSidebar: View {
                 ) { _ in
                 refreshExtensionSidebarSnapshot()
             }
+            .onReceive(
+                NotificationCenter.default.publisher(for: BrowserStackSidebar.stateDidLoadNotification)
+                    .receive(on: RunLoop.main)
+            ) { _ in
+                refreshExtensionSidebarSnapshot()
+            }
         }
     }
 
@@ -12316,25 +12885,25 @@ struct VerticalTabsSidebar: View {
     private func extensionSidebarRenderModel(
         renderContext: WorkspaceListRenderContext,
         now: Date
-    ) -> CmuxExtensionSidebarRenderModel {
+    ) -> CmuxSidebarProviderRenderModel {
         let _ = extensionSidebarUpdateToken
         let snapshot = extensionSidebarSnapshot(renderContext: renderContext)
         return extensionSidebarRenderModel(snapshot: snapshot, now: now)
     }
 
     private func extensionSidebarRenderModel(
-        snapshot: CmuxExtensionSidebarSnapshot,
+        snapshot: CmuxSidebarProviderSnapshot,
         now: Date
-    ) -> CmuxExtensionSidebarRenderModel {
+    ) -> CmuxSidebarProviderRenderModel {
         let descriptor = CmuxExtensionSidebarSelection.descriptor(for: effectiveExtensionSidebarProviderId)
         if let provider = CmuxExtensionSidebarSelection.provider(for: descriptor.id) {
-            let context = CmuxExtensionSidebarRenderContext(now: now)
-            if let contextualProvider = provider as? any CmuxExtensionSidebarContextualProvider {
+            let context = CmuxSidebarProviderRenderContext(now: now)
+            if let contextualProvider = provider as? any CmuxContextualSidebarProvider {
                 return contextualProvider.render(snapshot: snapshot, context: context)
             }
             return provider.render(snapshot: snapshot)
         }
-        return CmuxExtensionSidebarRenderModel(
+        return CmuxSidebarProviderRenderModel(
             providerId: descriptor.id,
             snapshotSequence: snapshot.sequence,
             sections: []
@@ -12343,22 +12912,22 @@ struct VerticalTabsSidebar: View {
 
     private func extensionSidebarSnapshot(
         renderContext: WorkspaceListRenderContext
-    ) -> CmuxExtensionSidebarSnapshot {
+    ) -> CmuxSidebarProviderSnapshot {
         extensionSidebarSnapshot(workspaces: renderContext.tabs)
     }
 
-    private func extensionSidebarSnapshotForCurrentTabs() -> CmuxExtensionSidebarSnapshot {
+    private func extensionSidebarSnapshotForCurrentTabs() -> CmuxSidebarProviderSnapshot {
         extensionSidebarSnapshot(workspaces: tabManager.tabs)
     }
 
-    private func cmuxSidebarSnapshotForCurrentTabs() -> CMUXSidebarSnapshot {
+    private func cmuxSidebarSnapshotForCurrentTabs() -> CmuxSidebarSnapshot {
         let snapshot = extensionSidebarSnapshotForCurrentTabs()
-        return CMUXSidebarSnapshot(
+        return CmuxSidebarSnapshot(
             sequence: snapshot.sequence,
             windowID: snapshot.windowId,
             selectedWorkspaceID: snapshot.selectedWorkspaceId,
             workspaces: snapshot.workspaces.map { workspace in
-                CMUXSidebarWorkspace(
+                CmuxSidebarWorkspace(
                     id: workspace.id,
                     title: workspace.title,
                     detail: workspace.customDescription,
@@ -12376,11 +12945,11 @@ struct VerticalTabsSidebar: View {
 	        )
 	    }
 
-    private func cmuxSidebarSurfaces(for workspace: CmuxExtensionWorkspaceSnapshot) -> [CMUXSidebarSurface] {
+    private func cmuxSidebarSurfaces(for workspace: CmuxSidebarProviderWorkspace) -> [CmuxSidebarSurface] {
         guard let liveWorkspace = tabManager.tabs.first(where: { $0.id == workspace.id }) else { return [] }
         return liveWorkspace.sidebarOrderedPanelIds().compactMap { panelId in
             guard let panel = liveWorkspace.panels[panelId] else { return nil }
-            return CMUXSidebarSurface(
+            return CmuxSidebarSurface(
                 id: panelId,
                 title: liveWorkspace.panelTitle(panelId: panelId) ?? panel.displayTitle,
                 kind: cmuxSidebarSurfaceKind(for: panel.panelType),
@@ -12392,7 +12961,7 @@ struct VerticalTabsSidebar: View {
         }
     }
 
-    private func cmuxSidebarSurfaceKind(for panelType: PanelType) -> CMUXSidebarSurfaceKind {
+    private func cmuxSidebarSurfaceKind(for panelType: PanelType) -> CmuxSidebarSurfaceKind {
         switch panelType {
         case .terminal:
             return .terminal
@@ -12404,6 +12973,8 @@ struct VerticalTabsSidebar: View {
             return .filePreview
         case .rightSidebarTool:
             return .rightSidebarTool
+        case .agentSession:
+            return .agentSession
         case .project:
             return .project
         case .extensionBrowser:
@@ -12412,8 +12983,8 @@ struct VerticalTabsSidebar: View {
     }
 
     private func handleCMUXSidebarExtensionAction(
-        _ action: CMUXSidebarAction
-    ) -> CMUXExtensionActionResult {
+        _ action: CmuxSidebarAction
+    ) -> CmuxSidebarActionResult {
         switch action {
         case .createWorkspace(let title, let workingDirectory, let select):
             let workspace = tabManager.addWorkspace(
@@ -12422,11 +12993,11 @@ struct VerticalTabsSidebar: View {
                 inheritWorkingDirectory: workingDirectory == nil,
                 select: select
             )
-            return CMUXExtensionActionResult(accepted: true, message: workspace.id.uuidString)
+            return CmuxSidebarActionResult(accepted: true, message: workspace.id.uuidString)
 
         case .selectWorkspace(let workspaceId):
             guard let workspace = tabManager.tabs.first(where: { $0.id == workspaceId }) else {
-                return CMUXExtensionActionResult(
+                return CmuxSidebarActionResult(
                     accepted: false,
                     message: String(localized: "sidebar.extensions.action.workspaceNotFound", defaultValue: "Workspace not found")
                 )
@@ -12436,7 +13007,7 @@ struct VerticalTabsSidebar: View {
 
         case .closeWorkspace(let workspaceId):
             guard tabManager.closeWorkspaceWithConfirmation(tabId: workspaceId) else {
-                return CMUXExtensionActionResult(
+                return CmuxSidebarActionResult(
                     accepted: false,
                     message: String(localized: "sidebar.extensions.action.closeRejected", defaultValue: "Workspace could not be closed")
                 )
@@ -12459,7 +13030,7 @@ struct VerticalTabsSidebar: View {
                 tabManager.selectWorkspace(workspace)
             }
             let panel = workspace.newTerminalSurfaceInFocusedPane(focus: true, initialInput: nil)
-            return panel.map { CMUXExtensionActionResult(accepted: true, message: $0.id.uuidString) }
+            return panel.map { CmuxSidebarActionResult(accepted: true, message: $0.id.uuidString) }
                 ?? .rejected(String(localized: "sidebar.extensions.action.surfaceCreateRejected", defaultValue: "Surface could not be created"))
 
         case .createBrowserSurface(let workspaceId, let urlString):
@@ -12474,7 +13045,7 @@ struct VerticalTabsSidebar: View {
                 tabManager.selectWorkspace(workspace)
             }
             let panelId = tabManager.createBrowserSplit(direction: .right, url: validatedURL.url)
-            return panelId.map { CMUXExtensionActionResult(accepted: true, message: $0.uuidString) }
+            return panelId.map { CmuxSidebarActionResult(accepted: true, message: $0.uuidString) }
                 ?? .rejected(String(localized: "sidebar.extensions.action.surfaceCreateRejected", defaultValue: "Surface could not be created"))
 
         case .selectSurface(let workspaceId, let surfaceId):
@@ -12509,7 +13080,7 @@ struct VerticalTabsSidebar: View {
                   let panelId = tabManager.createSplit(tabId: workspaceId, surfaceId: surfaceId, direction: splitDirection) else {
                 return .rejected(String(localized: "sidebar.extensions.action.surfaceCreateRejected", defaultValue: "Surface could not be created"))
             }
-            return CMUXExtensionActionResult(accepted: true, message: panelId.uuidString)
+            return CmuxSidebarActionResult(accepted: true, message: panelId.uuidString)
 
         case .splitBrowser(let workspaceId, let surfaceId, let direction, let urlString):
             let validatedURL = cmuxSidebarExtensionOptionalHTTPURL(from: urlString)
@@ -12524,7 +13095,7 @@ struct VerticalTabsSidebar: View {
             tabManager.selectWorkspace(tab)
             tab.focusPanel(surfaceId)
             let panelId = tabManager.createBrowserSplit(direction: splitDirection, url: validatedURL.url)
-            return panelId.map { CMUXExtensionActionResult(accepted: true, message: $0.uuidString) }
+            return panelId.map { CmuxSidebarActionResult(accepted: true, message: $0.uuidString) }
                 ?? .rejected(String(localized: "sidebar.extensions.action.surfaceCreateRejected", defaultValue: "Surface could not be created"))
 
         case .toggleSurfaceZoom(let workspaceId, let surfaceId):
@@ -12536,7 +13107,7 @@ struct VerticalTabsSidebar: View {
         case .openURL(let urlString):
             guard let url = cmuxSidebarExtensionRequiredHTTPURL(from: urlString),
                   NSWorkspace.shared.open(url) else {
-                return CMUXExtensionActionResult(
+                return CmuxSidebarActionResult(
                     accepted: false,
                     message: String(localized: "sidebar.extensions.action.urlRejected", defaultValue: "URL could not be opened")
                 )
@@ -12566,7 +13137,7 @@ struct VerticalTabsSidebar: View {
         return url
     }
 
-    private func splitDirection(from direction: CMUXSplitDirection) -> SplitDirection? {
+    private func splitDirection(from direction: CmuxSidebarSplitDirection) -> SplitDirection? {
         switch direction {
         case .left:
             return .left
@@ -12579,8 +13150,8 @@ struct VerticalTabsSidebar: View {
         }
     }
 
-    private func extensionSidebarSnapshot(workspaces: [Workspace]) -> CmuxExtensionSidebarSnapshot {
-        CmuxExtensionSidebarSnapshot(
+    private func extensionSidebarSnapshot(workspaces: [Workspace]) -> CmuxSidebarProviderSnapshot {
+        CmuxSidebarProviderSnapshot(
             sequence: UInt64(max(0, CmuxEventBus.shared.latestSequence)),
             selectedWorkspaceId: tabManager.selectedTabId,
             workspaces: workspaces.map(extensionWorkspaceSnapshot(for:)),
@@ -12588,30 +13159,27 @@ struct VerticalTabsSidebar: View {
         )
     }
 
-    private func extensionWorkspaceSnapshot(for workspace: Workspace) -> CmuxExtensionWorkspaceSnapshot {
+    private func extensionWorkspaceSnapshot(for workspace: Workspace) -> CmuxSidebarProviderWorkspace {
         let rootPath = extensionSidebarRootPath(for: workspace)
-        return CmuxExtensionWorkspaceSnapshot(
+        return CmuxSidebarProviderWorkspace(
             id: workspace.id,
             title: workspace.title,
             customDescription: workspace.customDescription,
             isPinned: workspace.isPinned,
             rootPath: rootPath,
             projectRootPath: workspace.extensionSidebarProjectRootPath,
-            branchSummary: workspace.gitBranch?.branch,
+            branchSummary: workspace.sidebarGitBranchesInDisplayOrder().first?.branch,
             remoteDisplayTarget: workspace.remoteDisplayTarget,
             remoteConnectionState: workspace.remoteConnectionState.rawValue,
-            unreadCount: notificationStore.unreadCount(forTabId: workspace.id),
-            latestNotificationText: notificationStore.latestNotification(forTabId: workspace.id).flatMap {
-                let text = $0.body.isEmpty ? $0.title : $0.body
-                return text.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-            },
+            unreadCount: sidebarUnread.unreadCount(forWorkspaceId: workspace.id),
+            latestNotificationText: sidebarUnread.latestNotificationText(forWorkspaceId: workspace.id),
             latestSubmittedMessage: workspace.latestSubmittedMessage,
             latestSubmittedAt: workspace.latestSubmittedAt,
             listeningPorts: workspace.listeningPorts,
             pullRequestURLs: workspace.sidebarPullRequestsInDisplayOrder().map { $0.url.absoluteString },
             panelDirectories: workspace.sidebarDirectoriesInDisplayOrder(),
             gitBranches: workspace.sidebarGitBranchesInDisplayOrder().map {
-                CmuxExtensionGitBranchSnapshot(branch: $0.branch, isDirty: $0.isDirty)
+                CmuxSidebarProviderGitBranch(branch: $0.branch, isDirty: $0.isDirty)
             }
         )
     }
@@ -12621,7 +13189,7 @@ struct VerticalTabsSidebar: View {
     }
 
     private func extensionBrowserStackSidebar(
-        model: CmuxExtensionSidebarRenderModel,
+        model: CmuxSidebarProviderRenderModel,
         now: Date
     ) -> some View {
         let rows = model.sections.flatMap(\.rows)
@@ -12707,7 +13275,7 @@ struct VerticalTabsSidebar: View {
     }
 
     private func extensionBrowserStackGroup(
-        section: CmuxExtensionSidebarRenderSection,
+        section: CmuxSidebarProviderSection,
         now: Date,
         dropRows: [ExtensionSidebarBrowserStackDropRow]
     ) -> some View {
@@ -12754,7 +13322,7 @@ struct VerticalTabsSidebar: View {
     }
 
     private func extensionBrowserStackTile(
-        row: CmuxExtensionSidebarRenderRow,
+        row: CmuxSidebarProviderRow,
         isSelected: Bool,
         dropRows: [ExtensionSidebarBrowserStackDropRow]
     ) -> some View {
@@ -12824,7 +13392,7 @@ struct VerticalTabsSidebar: View {
     }
 
     private func extensionBrowserStackRow(
-        row: CmuxExtensionSidebarRenderRow,
+        row: CmuxSidebarProviderRow,
         now: Date,
         compact: Bool = false,
         isSelected: Bool,
@@ -12903,7 +13471,7 @@ struct VerticalTabsSidebar: View {
 
     @ViewBuilder
     private func extensionBrowserStackDropIndicator(
-        row: CmuxExtensionSidebarRenderRow,
+        row: CmuxSidebarProviderRow,
         edge: SidebarDropEdge
     ) -> some View {
         if dragState.dropIndicator == SidebarDropIndicator(tabId: row.workspaceId, edge: edge) {
@@ -12915,7 +13483,7 @@ struct VerticalTabsSidebar: View {
     }
 
     @ViewBuilder
-    private func extensionBrowserStackReorderMenu(row: CmuxExtensionSidebarRenderRow) -> some View {
+    private func extensionBrowserStackReorderMenu(row: CmuxSidebarProviderRow) -> some View {
         Button(String(localized: "contextMenu.moveUp", defaultValue: "Move Up")) {
             moveExtensionBrowserStackWorkspace(row.workspaceId, by: -1)
         }
@@ -12946,9 +13514,9 @@ struct VerticalTabsSidebar: View {
         }
     }
 
-    private func handleExtensionSidebarMutation(_ mutation: CmuxExtensionSidebarMutation) -> Bool {
+    private func handleExtensionSidebarMutation(_ mutation: CmuxSidebarProviderMutation) -> Bool {
         let descriptor = CmuxExtensionSidebarSelection.descriptor(for: effectiveExtensionSidebarProviderId)
-        guard let provider = CmuxExtensionSidebarSelection.provider(for: descriptor.id) as? any CmuxExtensionSidebarMutableProvider else {
+        guard let provider = CmuxExtensionSidebarSelection.provider(for: descriptor.id) as? any CmuxMutableSidebarProvider else {
             return false
         }
         do {
@@ -12966,7 +13534,7 @@ struct VerticalTabsSidebar: View {
     }
 
     private func extensionBrowserStackDropRows(
-        for model: CmuxExtensionSidebarRenderModel
+        for model: CmuxSidebarProviderRenderModel
     ) -> [ExtensionSidebarBrowserStackDropRow] {
         model.sections.flatMap { section in
             section.rows.map { row in
@@ -12982,7 +13550,7 @@ struct VerticalTabsSidebar: View {
         workspaceId: UUID,
         insertionPosition: Int,
         orderedRows: [ExtensionSidebarBrowserStackDropRow]
-    ) -> CmuxExtensionSidebarWorkspaceMove? {
+    ) -> CmuxSidebarProviderWorkspaceMove? {
         ExtensionSidebarBrowserStackDropPlanner.move(
             draggedWorkspaceId: workspaceId,
             insertionPosition: insertionPosition,
@@ -12991,9 +13559,9 @@ struct VerticalTabsSidebar: View {
     }
 
     private func extensionSidebarWorkspaceSnapshotsById(
-        for rows: [CmuxExtensionSidebarRenderRow]
-    ) -> [UUID: CmuxExtensionWorkspaceSnapshot] {
-        var snapshotsById: [UUID: CmuxExtensionWorkspaceSnapshot] = [:]
+        for rows: [CmuxSidebarProviderRow]
+    ) -> [UUID: CmuxSidebarProviderWorkspace] {
+        var snapshotsById: [UUID: CmuxSidebarProviderWorkspace] = [:]
         for row in rows where snapshotsById[row.workspaceId] == nil {
             snapshotsById[row.workspaceId] = extensionWorkspaceSnapshot(for: row.workspaceId)
         }
@@ -13001,7 +13569,7 @@ struct VerticalTabsSidebar: View {
     }
 
     private func extensionBrowserStackIcon(
-        _ icon: CmuxExtensionSidebarRenderIcon?,
+        _ icon: CmuxSidebarProviderIcon?,
         size: CGFloat
     ) -> some View {
         let shape = icon?.shape ?? .circle
@@ -13026,7 +13594,7 @@ struct VerticalTabsSidebar: View {
         .frame(width: size, height: size)
     }
 
-    private func extensionSidebarRenderedText(_ text: CmuxExtensionSidebarRenderText?, now: Date) -> String? {
+    private func extensionSidebarRenderedText(_ text: CmuxSidebarProviderText?, now: Date) -> String? {
         guard let text else { return nil }
         switch text {
         case .plain(let value):
@@ -13053,7 +13621,7 @@ struct VerticalTabsSidebar: View {
 
     @ViewBuilder
     private func extensionSidebarSection(
-        _ section: CmuxExtensionSidebarRenderSection,
+        _ section: CmuxSidebarProviderSection,
         providerId: String,
         now: Date
     ) -> some View {
@@ -13129,11 +13697,11 @@ struct VerticalTabsSidebar: View {
         }
     }
 
-    private func extensionWorkspaceSnapshot(for workspaceId: UUID) -> CmuxExtensionWorkspaceSnapshot? {
+    private func extensionWorkspaceSnapshot(for workspaceId: UUID) -> CmuxSidebarProviderWorkspace? {
         tabManager.tabs.first { $0.id == workspaceId }.map(extensionWorkspaceSnapshot(for:))
     }
 
-    private func extensionSidebarTreeSectionTitle(_ section: CmuxExtensionWorkspaceTreeSection) -> String {
+    private func extensionSidebarTreeSectionTitle(_ section: CmuxSidebarProviderTreeSection) -> String {
         if let titleText = section.titleText {
             return CmuxExtensionSidebarSelection.localizedText(titleText)
         }
@@ -13148,7 +13716,7 @@ struct VerticalTabsSidebar: View {
         tabManager.selectWorkspace(workspace)
     }
 
-    private func createExtensionWorktreeWorkspace(for section: CmuxExtensionWorkspaceTreeSection) {
+    private func createExtensionWorktreeWorkspace(for section: CmuxSidebarProviderTreeSection) {
         guard let projectRootPath = section.projectRootPath,
               !extensionSidebarWorktreeCreationInFlightSectionIds.contains(section.id) else {
             return
@@ -13180,7 +13748,8 @@ struct VerticalTabsSidebar: View {
 
     private func workspaceScrollContent(
         renderContext: WorkspaceListRenderContext,
-        minHeight: CGFloat
+        minHeight: CGFloat,
+        emptyAreaHeight: CGFloat
     ) -> some View {
         VStack(spacing: 0) {
             WorkspaceSidebarModeHeader(
@@ -13201,98 +13770,166 @@ struct VerticalTabsSidebar: View {
                 lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
                 dragAutoScrollController: dragAutoScrollController,
                 topDropIndicatorVisible: emptyAreaTopDropIndicatorVisible(),
-                tabDropDelegate: emptyAreaTabDropDelegate(),
-                bonsplitDropIndicator: dropIndicatorBinding
+                tabDropDelegate: emptyAreaTabDropDelegate(renderContext: renderContext),
+                bonsplitDropIndicator: dropIndicatorBinding,
+                expandsVertically: false,
+                minimumHeight: emptyAreaHeight
             )
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minHeight: minHeight, alignment: .top)
     }
 
+    @ViewBuilder
     private func workspaceRows(renderContext: WorkspaceListRenderContext) -> some View {
-        let renderItems = SidebarWorkspaceRenderItem.renderItems(
-            tabs: renderContext.tabs,
-            groupsById: renderContext.workspaceGroupById
+        let renderItems = renderContext.workspaceRenderItems
+        let shouldCollectWorkspaceDropTargets = SidebarDropPlanner.shouldCollectWorkspaceDropTargets(
+            draggedTabId: dragState.draggedTabId,
+            isBonsplitWorkspaceDropActive: isBonsplitWorkspaceDropTargetCollectionActive
         )
         // LazyVStack is safe here because `dragState` is @Observable:
         // drag mutations at 60fps invalidate only the rows/overlays that
         // read them, never this sidebar body. See SidebarDragState and
         // https://github.com/manaflow-ai/cmux/issues/2586.
-        return LazyVStack(spacing: tabRowSpacing) {
+        let rows = LazyVStack(spacing: tabRowSpacing) {
             ForEach(renderItems, id: \.id) { item in
                 switch item {
                 case .groupHeader(let group, let memberWorkspaceIds):
                     sidebarWorkspaceGroupHeader(
                         group: group,
                         memberWorkspaceIds: memberWorkspaceIds,
-                        renderContext: renderContext
+                        renderContext: renderContext,
+                        shouldCollectWorkspaceDropTargets: shouldCollectWorkspaceDropTargets
                     )
                 case .workspace(let tab):
-                    workspaceRow(tab, renderContext: renderContext)
+                    workspaceRow(
+                        tab,
+                        renderContext: renderContext,
+                        shouldCollectWorkspaceDropTargets: shouldCollectWorkspaceDropTargets
+                    )
                 }
             }
         }
         .padding(.vertical, SidebarWorkspaceListMetrics.rowVerticalPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .overlayPreferenceValue(SidebarWorkspaceRowFramePreferenceKey.self) { anchors in
-            GeometryReader { proxy in
-                SidebarBonsplitTabWorkspaceDropOverlay(
-                    currentSelectedTabId: {
-                        tabManager.selectedTabId
-                    },
-                    sidebarIndexForTabId: { workspaceId in
-                        tabManager.tabs.firstIndex { $0.id == workspaceId }
-                    },
-                    moveToExistingWorkspace: { workspaceId, transfer in
-                        guard let app = AppDelegate.shared else {
-                            return false
-                        }
-                        if let source = app.locateBonsplitSurface(tabId: transfer.tab.id),
-                           source.workspaceId == workspaceId {
-                            return true
-                        }
-                        return app.moveBonsplitTab(
-                            tabId: transfer.tab.id,
-                            toWorkspace: workspaceId,
-                            focus: true,
-                            focusWindow: true
+        let measuredRows = rows
+            .background {
+                GeometryReader { proxy in
+                    Color.clear.preference(
+                        key: SidebarWorkspaceRowsHeightPreferenceKey.self,
+                        value: SidebarWorkspaceRowsMeasurement(
+                            workspaceIds: renderContext.visibleWorkspaceRowIds,
+                            rowsHeight: proxy.size.height
                         )
-                    },
-                    moveToNewWorkspace: { insertionIndex, transfer in
-                        guard let app = AppDelegate.shared,
-                              let result = app.moveBonsplitTabToNewWorkspace(
-                                tabId: transfer.tab.id,
-                                destinationManager: tabManager,
-                                focus: true,
-                                focusWindow: true,
-                                insertionIndexOverride: insertionIndex
-                              ) else {
-                            return nil
-                        }
-                        return result.destinationWorkspaceId
-                    },
-                    selectedTabIds: $selectedTabIds,
-                    lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
-                    dropIndicator: dropIndicatorBinding,
-                    updateAutoscroll: {
-                        dragAutoScrollController.updateFromDragLocation()
-                    },
-                    targets: renderContext.tabs.compactMap { tab in
-                        guard let anchor = anchors[tab.id] else { return nil }
-                        return SidebarDropPlanner.WorkspaceDropTarget(
-                            workspaceId: tab.id,
-                            isPinned: tab.isPinned,
-                            frame: proxy[anchor]
-                        )
-                    }
-                )
+                    )
+                }
             }
+
+        // Gate ONLY the per-row frame-anchor *reader* (the virtualization-defeating
+        // work) behind the drag-active check, and keep the Bonsplit drop-capture
+        // overlay mounted *outside* that conditional. Returning the overlay from both
+        // branches of an `if`/`else` gives it distinct SwiftUI identity, so flipping the
+        // gate mid-drag (draggingEntered -> shouldCollect=true) tore down and recreated
+        // the drop NSView, orphaning the in-flight drag. Applying it at the stable outer
+        // level keeps the NSView identity-stable across gate flips. (#5325 review)
+        rowsWithGatedDropTargetReader(
+            rows: measuredRows,
+            renderContext: renderContext,
+            shouldCollect: shouldCollectWorkspaceDropTargets
+        )
+        .overlay {
+            bonsplitWorkspaceDropOverlay()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
+    /// Conditionally installs the row-frame `overlayPreferenceValue` reader (the part
+    /// that defeats `LazyVStack` virtualization) only while a drag is collecting drop
+    /// targets. Kept separate from the always-mounted drop-capture overlay so the gate
+    /// flip never changes the drop NSView's identity. (#5325 review)
+    @ViewBuilder
+    private func rowsWithGatedDropTargetReader<Rows: View>(
+        rows: Rows,
+        renderContext: WorkspaceListRenderContext,
+        shouldCollect: Bool
+    ) -> some View {
+        if shouldCollect {
+            rows
+                .overlayPreferenceValue(SidebarWorkspaceRowFramePreferenceKey.self) { anchors in
+                    GeometryReader { proxy in
+                        SidebarBonsplitTabWorkspaceDropOverlay.TargetWriter(
+                            targetBridge: bonsplitWorkspaceDropTargetBridge,
+                            targets: renderContext.tabs.compactMap { tab in
+                                guard let anchor = anchors[tab.id] else { return nil }
+                                return SidebarDropPlanner.WorkspaceDropTarget(
+                                    workspaceId: tab.id,
+                                    isPinned: tab.isPinned,
+                                    frame: proxy[anchor]
+                                )
+                            }
+                        )
+                    }
+                }
+        } else {
+            rows
+        }
+    }
+
+    private func bonsplitWorkspaceDropOverlay() -> some View {
+        SidebarBonsplitTabWorkspaceDropOverlay(
+            currentSelectedTabId: {
+                tabManager.selectedTabId
+            },
+            sidebarIndexForTabId: { workspaceId in
+                tabManager.tabs.firstIndex { $0.id == workspaceId }
+            },
+            moveToExistingWorkspace: { workspaceId, transfer in
+                guard let app = AppDelegate.shared else {
+                    return false
+                }
+                if let source = app.locateBonsplitSurface(tabId: transfer.tab.id),
+                   source.workspaceId == workspaceId {
+                    return true
+                }
+                return app.moveBonsplitTab(
+                    tabId: transfer.tab.id,
+                    toWorkspace: workspaceId,
+                    focus: true,
+                    focusWindow: true
+                )
+            },
+            moveToNewWorkspace: { insertionIndex, transfer in
+                guard let app = AppDelegate.shared,
+                      let result = app.moveBonsplitTabToNewWorkspace(
+                        tabId: transfer.tab.id,
+                        destinationManager: tabManager,
+                        focus: true,
+                        focusWindow: true,
+                        insertionIndexOverride: insertionIndex
+                      ) else {
+                    return nil
+                }
+                return result.destinationWorkspaceId
+            },
+            selectedTabIds: $selectedTabIds,
+            lastSidebarSelectionIndex: $lastSidebarSelectionIndex,
+            dropIndicator: dropIndicatorBinding,
+            updateAutoscroll: {
+                dragAutoScrollController.updateFromDragLocation()
+            },
+            setWorkspaceDropTargetCollectionActive: { isActive in
+                guard isBonsplitWorkspaceDropTargetCollectionActive != isActive else { return }
+                isBonsplitWorkspaceDropTargetCollectionActive = isActive
+            },
+            isWorkspaceDropTargetCollectionActive: isBonsplitWorkspaceDropTargetCollectionActive,
+            targetBridge: bonsplitWorkspaceDropTargetBridge
+        )
+    }
+
+    @ViewBuilder
     private func workspaceRow(
         _ tab: Workspace,
-        renderContext: WorkspaceListRenderContext
+        renderContext: WorkspaceListRenderContext,
+        shouldCollectWorkspaceDropTargets: Bool
     ) -> some View {
         let index = renderContext.tabIndexById[tab.id] ?? 0
         let usesSelectedContextMenuTargets = selectedTabIds.contains(tab.id)
@@ -13319,17 +13956,11 @@ struct VerticalTabsSidebar: View {
             in: tabManager,
             target: contextMenuPinTarget
         )
-        let liveUnreadCount = notificationStore.unreadCount(forTabId: tab.id)
+        let liveUnreadCount = sidebarUnread.unreadCount(forWorkspaceId: tab.id)
         let liveHasUnreadMonitorNotification = notificationStore.hasUnreadMonitorNotification(forTabId: tab.id)
-        let liveLatestNotificationText: String? = {
-            guard showsSidebarNotificationMessage,
-                  let notification = notificationStore.latestNotification(forTabId: tab.id) else {
-                return nil
-            }
-            let text = notification.body.isEmpty ? notification.title : notification.body
-            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            return trimmed.isEmpty ? nil : trimmed
-        }()
+        let liveLatestNotificationText: String? = showsSidebarNotificationMessage
+            ? sidebarUnread.latestNotificationText(forWorkspaceId: tab.id)
+            : nil
         let liveShowsModifierShortcutHints = modifierKeyMonitor.isModifierPressed
         let livePresentation = SidebarTabItemPresentationSnapshot(
             tabId: tab.id,
@@ -13389,6 +14020,7 @@ struct VerticalTabsSidebar: View {
             SidebarTabDropDelegate(
                 targetTabId: tabId,
                 tabManager: tabManager,
+                workspaceGroupIdByWorkspaceId: renderContext.workspaceGroupIdByWorkspaceId,
                 dragState: dragState,
                 selectedTabIds: selectedTabIds,
                 lastSidebarSelectionIndex: lastSidebarSelectionIndex,
@@ -13397,7 +14029,7 @@ struct VerticalTabsSidebar: View {
             )
         }
 
-        return TabItemView(
+        let row = TabItemView(
             tabManager: tabManager,
             notificationStore: notificationStore,
             tab: tab,
@@ -13454,11 +14086,10 @@ struct VerticalTabsSidebar: View {
         .equatable()
         .id(tab.id)
         .accessibilityIdentifier("sidebarWorkspace.\(tab.id.uuidString)")
-        .preference(key: SidebarWorkspaceRowIdsPreferenceKey.self, value: Set([tab.id]))
-        .anchorPreference(key: SidebarWorkspaceRowFramePreferenceKey.self, value: .bounds) { anchor in
-            [tab.id: anchor]
-        }
-        .padding(.leading, tab.groupId != nil ? SidebarWorkspaceGroupingMetrics.memberIndent : 0)
+
+        row
+            .sidebarWorkspaceFrameAnchor(id: tab.id, isEnabled: shouldCollectWorkspaceDropTargets)
+            .padding(.leading, tab.groupId != nil ? SidebarWorkspaceGroupingMetrics.memberIndent : 0)
     }
 
     private static func summaryScoreBadgeByWorkspaceId(
@@ -13507,11 +14138,25 @@ struct VerticalTabsSidebar: View {
     }
 }
 
-struct SidebarWorkspaceRowIdsPreferenceKey: PreferenceKey {
-    static let defaultValue: Set<UUID> = []
+struct SidebarWorkspaceFrameAnchorModifier: ViewModifier {
+    let id: UUID
+    let isEnabled: Bool
 
-    static func reduce(value: inout Set<UUID>, nextValue: () -> Set<UUID>) {
-        value.formUnion(nextValue())
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content.anchorPreference(key: SidebarWorkspaceRowFramePreferenceKey.self, value: .bounds) { anchor in
+                [id: anchor]
+            }
+        } else {
+            content
+        }
+    }
+}
+
+extension View {
+    func sidebarWorkspaceFrameAnchor(id: UUID, isEnabled: Bool) -> some View {
+        modifier(SidebarWorkspaceFrameAnchorModifier(id: id, isEnabled: isEnabled))
     }
 }
 
@@ -14445,7 +15090,7 @@ final class WindowScopedShortcutHintModifierMonitor {
 }
 
 private struct SidebarFooter: View {
-    @ObservedObject var updateViewModel: UpdateViewModel
+    var updateViewModel: UpdateStateModel
     @ObservedObject var fileExplorerState: FileExplorerState
     let onSendFeedback: () -> Void
 
@@ -14462,7 +15107,7 @@ private struct SidebarFooter: View {
 }
 
 private struct SidebarFooterButtons: View {
-    @ObservedObject var updateViewModel: UpdateViewModel
+    var updateViewModel: UpdateStateModel
     @ObservedObject var fileExplorerState: FileExplorerState
     let onSendFeedback: () -> Void
     @State private var extensionBrowserAnchorView: NSView?
@@ -14493,7 +15138,9 @@ private struct SidebarFooterButtons: View {
                 .accessibilityIdentifier("SidebarExtensionMenuButton")
                 .background(TitlebarControlAnchorView { extensionBrowserAnchorView = $0 })
             }
-            UpdatePill(model: updateViewModel)
+            if let updateActionsHost = AppDelegate.shared {
+                UpdatePill(model: updateViewModel, accent: cmuxAccentColor(), actions: updateActionsHost)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -15273,9 +15920,18 @@ private struct SidebarHelpMenuButton: View {
             isPopoverPresented.toggle()
         } label: {
             Image(systemName: "questionmark.circle")
+                .resizable()
+                .scaledToFit()
+                .fontWeight(.medium)
                 .symbolRenderingMode(.monochrome)
-                .font(.system(size: iconSize, weight: .medium))
                 .foregroundStyle(Color(nsColor: .secondaryLabelColor))
+                // Drive the symbol's raster size from an explicit frame rather
+                // than font metrics. During the window's pre-visible layout pass
+                // the font metrics aren't resolved yet, so a `.font`-sized symbol
+                // rasterizes at 0×0 — which macOS 26+ rejects with an uncaught
+                // `NSInvalidArgumentException` (targetSizeInPoints.width/height>0),
+                // crashing on launch. A fixed frame keeps the raster size positive.
+                .frame(width: iconSize, height: iconSize, alignment: .center)
                 .frame(width: buttonSize, height: buttonSize, alignment: .center)
         }
         .buttonStyle(SidebarFooterIconButtonStyle())
@@ -18435,7 +19091,7 @@ private enum SummaryPriorityWorkspaceCategory {
 
 #if DEBUG
 private struct SidebarDevFooter: View {
-    @ObservedObject var updateViewModel: UpdateViewModel
+    var updateViewModel: UpdateStateModel
     @ObservedObject var fileExplorerState: FileExplorerState
     let onSendFeedback: () -> Void
     @AppStorage(DevBuildBannerDebugSettings.sidebarBannerVisibleKey)
@@ -18472,27 +19128,6 @@ private struct SidebarScrollViewResolver: NSViewRepresentable {
     }
 }
 
-private final class SidebarScrollViewResolverView: NSView {
-    var onResolve: ((NSScrollView?) -> Void)?
-
-    override func viewDidMoveToSuperview() {
-        super.viewDidMoveToSuperview()
-        resolveScrollView()
-    }
-
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        resolveScrollView()
-    }
-
-    func resolveScrollView() {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            onResolve?(self.enclosingScrollView)
-        }
-    }
-}
-
 private struct SidebarEmptyArea: View {
     @EnvironmentObject var tabManager: TabManager
     let rowSpacing: CGFloat
@@ -18505,11 +19140,11 @@ private struct SidebarEmptyArea: View {
     let topDropIndicatorVisible: Bool
     let tabDropDelegate: SidebarTabDropDelegate
     let bonsplitDropIndicator: Binding<SidebarDropIndicator?>
+    var expandsVertically = true
+    var minimumHeight: CGFloat? = nil
 
     var body: some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        hitTarget
             .onTapGesture(count: 2) {
                 tabManager.addWorkspace(placementOverride: .end)
                 if let selectedId = tabManager.selectedTabId {
@@ -18538,6 +19173,19 @@ private struct SidebarEmptyArea: View {
                 }
             }
     }
+
+    @ViewBuilder
+    private var hitTarget: some View {
+        if expandsVertically {
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .contentShape(Rectangle())
+        } else {
+            Color.clear
+                .frame(maxWidth: .infinity, minHeight: minimumHeight ?? 0)
+                .contentShape(Rectangle())
+        }
+    }
 }
 
 private struct ExtensionSidebarBrowserStackEmptyArea: View {
@@ -18547,7 +19195,7 @@ private struct ExtensionSidebarBrowserStackEmptyArea: View {
     @Binding var draggedTabId: UUID?
     @Binding var dropIndicator: SidebarDropIndicator?
     let onNewTab: () -> Void
-    let onMove: (CmuxExtensionSidebarWorkspaceMove) -> Bool
+    let onMove: (CmuxSidebarProviderWorkspaceMove) -> Bool
 
     var body: some View {
         Color.clear
@@ -18685,6 +19333,7 @@ struct SidebarWorkspaceSnapshotBuilder {
         let remoteWorkspaceSidebarText: String?
         let remoteConnectionStatusText: String
         let remoteStateHelpText: String
+        let showsRemoteReconnectAffordance: Bool
         let copyableSidebarSSHError: String?
         let latestConversationMessage: String?
         let metadataEntries: [SidebarStatusEntry]
@@ -19017,7 +19666,12 @@ struct TabItemView: View, Equatable {
     }
 
     private var remoteWorkspaceSidebarText: String? {
-        guard tab.hasActiveRemoteTerminalSessions else { return nil }
+        // Keep the SSH row visible while auto-reconnect is suspended even if
+        // every remote terminal session already died — it hosts the manual
+        // Reconnect affordance.
+        guard tab.hasActiveRemoteTerminalSessions || tab.remoteConnectionState == .suspended else {
+            return nil
+        }
         let trimmedTarget = tab.remoteDisplayTarget?.trimmingCharacters(in: .whitespacesAndNewlines)
         if let trimmedTarget, !trimmedTarget.isEmpty {
             return trimmedTarget
@@ -19045,7 +19699,8 @@ struct TabItemView: View, Equatable {
             defaultValue: "remote host"
         )
         let trimmedDetail = tab.remoteConnectionDetail?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if tab.remoteConnectionState == .error, let trimmedDetail, !trimmedDetail.isEmpty {
+        if tab.remoteConnectionState == .error || tab.remoteConnectionState == .suspended,
+           let trimmedDetail, !trimmedDetail.isEmpty {
             let entry = SidebarRemoteErrorCopyEntry(
                 workspaceTitle: tab.title,
                 target: fallbackTarget,
@@ -19078,6 +19733,8 @@ struct TabItemView: View, Equatable {
             return String(localized: "remote.status.error", defaultValue: "Error")
         case .disconnected:
             return String(localized: "remote.status.disconnected", defaultValue: "Disconnected")
+        case .suspended:
+            return String(localized: "remote.status.suspended", defaultValue: "Unreachable")
         }
     }
 
@@ -19110,6 +19767,29 @@ struct TabItemView: View, Equatable {
                         .font(.system(size: scaledFontSize(9), weight: .medium))
                         .foregroundColor(activeSecondaryColor(0.58))
                         .lineLimit(1)
+
+                    if workspaceSnapshot.showsRemoteReconnectAffordance {
+                        Button {
+                            tab.reconnectRemoteConnection()
+                        } label: {
+                            Label(
+                                String(localized: "sidebar.remote.reconnect.button", defaultValue: "Reconnect"),
+                                systemImage: "arrow.clockwise"
+                            )
+                            .labelStyle(.titleAndIcon)
+                            .font(.system(size: scaledFontSize(9), weight: .semibold))
+                        }
+                        .buttonStyle(.borderless)
+                        .foregroundColor(activeSecondaryColor(0.9))
+                        .safeHelp(String(
+                            format: String(
+                                localized: "sidebar.remote.reconnect.help",
+                                defaultValue: "Reconnect to %@"
+                            ),
+                            locale: .current,
+                            remoteWorkspaceSidebarText
+                        ))
+                    }
                 }
             }
             .padding(.top, latestNotificationText == nil ? 1 : 2)
@@ -20199,23 +20879,32 @@ struct TabItemView: View, Equatable {
     }
 
     private func updateSelection() {
-        #if DEBUG
-        let mods = NSEvent.modifierFlags
-        var modStr = ""
-        if mods.contains(.command) { modStr += "cmd " }
-        if mods.contains(.shift) { modStr += "shift " }
-        if mods.contains(.option) { modStr += "opt " }
-        if mods.contains(.control) { modStr += "ctrl " }
-        cmuxDebugLog("sidebar.select workspace=\(tab.id.uuidString.prefix(5)) modifiers=\(modStr.isEmpty ? "none" : modStr.trimmingCharacters(in: .whitespaces))")
-        #endif
         let modifiers = NSEvent.modifierFlags
         let isCommand = modifiers.contains(.command)
         let isShift = modifiers.contains(.shift)
         let wasSelected = tabManager.selectedTabId == tab.id
+        #if DEBUG
+        var modStr = ""
+        if modifiers.contains(.command) { modStr += "cmd " }
+        if modifiers.contains(.shift) { modStr += "shift " }
+        if modifiers.contains(.option) { modStr += "opt " }
+        if modifiers.contains(.control) { modStr += "ctrl " }
+        cmuxDebugLog("sidebar.select workspace=\(tab.id.uuidString.prefix(5)) modifiers=\(modStr.isEmpty ? "none" : modStr.trimmingCharacters(in: .whitespaces))")
+        #endif
 
-        if isShift, let lastIndex = lastSidebarSelectionIndex {
-            let lower = min(lastIndex, index)
-            let upper = max(lastIndex, index)
+        let workspaceIds = tabManager.tabs.map(\.id)
+        let shiftAnchorIndex = isShift
+            ? SidebarWorkspaceSelectionSyncPolicy.shiftClickAnchorIndex(
+                existingAnchorIndex: lastSidebarSelectionIndex,
+                selectedWorkspaceIds: selectedTabIds,
+                focusedWorkspaceId: tabManager.selectedTabId,
+                liveWorkspaceIds: workspaceIds
+            )
+            : nil
+
+        if isShift, let anchorIndex = shiftAnchorIndex {
+            let lower = min(anchorIndex, index)
+            let upper = max(anchorIndex, index)
             // Filter out workspaces hidden inside collapsed groups so a
             // Shift-click range never silently includes rows the user
             // can't see (e.g. clicking a collapsed group's anchor and
@@ -20252,7 +20941,11 @@ struct TabItemView: View, Equatable {
             selectedTabIds = [tab.id]
         }
 
-        lastSidebarSelectionIndex = index
+        lastSidebarSelectionIndex = SidebarWorkspaceSelectionSyncPolicy.anchorIndexAfterWorkspaceClick(
+            isShiftClick: isShift,
+            resolvedShiftAnchorIndex: shiftAnchorIndex,
+            clickedIndex: index
+        )
         tabManager.selectTab(tab)
         if wasSelected, !isCommand, !isShift {
             tabManager.dismissNotificationOnDirectInteraction(
@@ -20382,6 +21075,15 @@ struct TabItemView: View, Equatable {
                 locale: .current,
                 target
             )
+        case .suspended:
+            return String(
+                format: String(
+                    localized: "sidebar.remote.help.suspended",
+                    defaultValue: "SSH host %@ is unreachable. Automatic reconnect is paused — use Reconnect to retry."
+                ),
+                locale: .current,
+                target
+            )
         }
     }
 
@@ -20460,6 +21162,7 @@ struct TabItemView: View, Equatable {
             remoteWorkspaceSidebarText: remoteWorkspaceSidebarText,
             remoteConnectionStatusText: remoteConnectionStatusText,
             remoteStateHelpText: remoteStateHelpText,
+            showsRemoteReconnectAffordance: tab.remoteConnectionState == .suspended,
             copyableSidebarSSHError: copyableSidebarSSHError,
             latestConversationMessage: tab.latestConversationMessage,
             metadataEntries: metadataEntries,
@@ -21762,42 +22465,226 @@ enum SidebarWorkspaceSelectionSyncPolicy {
         }
         return liveWorkspaceIds.firstIndex { selectedWorkspaceIds.contains($0) }
     }
+
+    static func anchorWorkspaceId(
+        existingAnchorIndex: Int?,
+        liveWorkspaceIds: [UUID]
+    ) -> UUID? {
+        guard let existingAnchorIndex,
+              liveWorkspaceIds.indices.contains(existingAnchorIndex) else {
+            return nil
+        }
+        return liveWorkspaceIds[existingAnchorIndex]
+    }
+
+    static func shiftClickAnchorIndex(
+        existingAnchorIndex: Int?,
+        selectedWorkspaceIds: Set<UUID>,
+        focusedWorkspaceId: UUID?,
+        liveWorkspaceIds: [UUID]
+    ) -> Int? {
+        if let existingAnchorIndex,
+           liveWorkspaceIds.indices.contains(existingAnchorIndex) {
+            return existingAnchorIndex
+        }
+        if selectedWorkspaceIds.count == 1,
+           let selectedWorkspaceId = selectedWorkspaceIds.first,
+           let selectedIndex = liveWorkspaceIds.firstIndex(of: selectedWorkspaceId) {
+            return selectedIndex
+        }
+        if let focusedWorkspaceId {
+            return liveWorkspaceIds.firstIndex(of: focusedWorkspaceId)
+        }
+        return nil
+    }
+
+    static func anchorIndexAfterWorkspaceClick(
+        isShiftClick: Bool,
+        resolvedShiftAnchorIndex: Int?,
+        clickedIndex: Int
+    ) -> Int {
+        isShiftClick ? (resolvedShiftAnchorIndex ?? clickedIndex) : clickedIndex
+    }
+
+    static func anchorIndexAfterWorkspaceReorder(
+        preferredAnchorWorkspaceId: UUID?,
+        selectedWorkspaceIds: Set<UUID>,
+        focusedWorkspaceId: UUID?,
+        liveWorkspaceIds: [UUID]
+    ) -> Int? {
+        if let preferredAnchorWorkspaceId,
+           selectedWorkspaceIds.contains(preferredAnchorWorkspaceId),
+           let anchorIndex = liveWorkspaceIds.firstIndex(of: preferredAnchorWorkspaceId) {
+            return anchorIndex
+        }
+        return anchorIndex(
+            preferredWorkspaceId: focusedWorkspaceId,
+            selectedWorkspaceIds: selectedWorkspaceIds,
+            liveWorkspaceIds: liveWorkspaceIds
+        )
+    }
 }
 
 @MainActor
 struct SidebarTabDropDelegate: DropDelegate {
     let targetTabId: UUID?
     let tabManager: TabManager
+    let workspaceGroupIdByWorkspaceId: [UUID: UUID?]
     let dragState: SidebarDragState
     @Binding var selectedTabIds: Set<UUID>
     @Binding var lastSidebarSelectionIndex: Int?
     let targetRowHeight: CGFloat?
     let dragAutoScrollController: SidebarDragAutoScrollController
 
+    /// The identity of the workspace being dragged, resolved from this window's
+    /// `SidebarDragState` first and falling back to the process-wide
+    /// ``SidebarWorkspaceDragRegistry`` for a drag that originated in another
+    /// window. This single resolver is the one source of truth the drop path
+    /// keys on, so an intra-window reorder and a cross-window move share the same
+    /// code instead of forking into parallel drop delegates.
+    private var effectiveDraggedTabId: UUID? {
+        dragState.draggedTabId ?? SidebarWorkspaceDragRegistry.currentWorkspaceId
+    }
+
+    /// Whether `draggedTabId` belongs to a *different* window than this drop
+    /// target — i.e. dropping here moves the workspace into this window rather
+    /// than reordering within it.
+    private func isCrossWindowDrag(_ draggedTabId: UUID) -> Bool {
+        !tabManager.tabs.contains { $0.id == draggedTabId }
+    }
+
+    /// Whether the foreign dragged workspace is a group *anchor* in its source
+    /// window. A group-header drag carries the anchor id, and moving only the
+    /// anchor across windows would dissolve the group and strand its members,
+    /// so cross-window drops of a group header are disallowed — the group stays
+    /// intact and members can still be dragged out individually. (Migrating a
+    /// whole group across windows is out of scope for this feature.)
+    private func isCrossWindowGroupAnchorDrag(_ draggedTabId: UUID) -> Bool {
+        guard isCrossWindowDrag(draggedTabId),
+              let sourceManager = AppDelegate.shared?.tabManagerFor(tabId: draggedTabId) else {
+            return false
+        }
+        return sourceManager.workspaceGroups.contains { $0.anchorWorkspaceId == draggedTabId }
+    }
+
+    /// The destination's top-level sidebar ids (each group is represented by its
+    /// anchor; members are folded into the run). A workspace moved in from
+    /// another window arrives ungrouped and `attachWorkspace` normalizes it to a
+    /// top-level boundary, so the planner and indicator reason in this space —
+    /// not raw `tabs` — to match where the workspace actually lands.
+    private func crossWindowTopLevelTabIds() -> [UUID] {
+        tabManager.sidebarReorderWorkspaceIds(
+            forDraggedWorkspaceId: nil,
+            targetWorkspaceId: nil,
+            usesTopLevelRows: true
+        )
+    }
+
+    private func crossWindowTopLevelPinnedTabIds() -> Set<UUID> {
+        tabManager.sidebarReorderPinnedWorkspaceIds(
+            forDraggedWorkspaceId: nil,
+            targetWorkspaceId: nil,
+            usesTopLevelRows: true
+        )
+    }
+
+    /// Map the hovered destination row to its top-level representative: a group
+    /// member resolves to its group's anchor, since an incoming ungrouped
+    /// workspace lands at the group boundary, never inside the run.
+    private func crossWindowTopLevelTarget() -> UUID? {
+        guard let targetTabId else { return nil }
+        if let groupId = tabManager.tabs.first(where: { $0.id == targetTabId })?.groupId,
+           let anchorId = tabManager.workspaceGroups.first(where: { $0.id == groupId })?.anchorWorkspaceId {
+            return anchorId
+        }
+        return targetTabId
+    }
+
+    /// Translate a top-level insertion slot into a raw `tabs` index so the
+    /// attach lands the workspace just before that top-level item's run (or at
+    /// the end); `attachWorkspace` then normalizes the group runs around it.
+    private func crossWindowRawInsertIndex(forTopLevelSlot slot: Int, topLevelIds: [UUID]) -> Int {
+        guard slot < topLevelIds.count else { return tabManager.tabs.count }
+        let topLevelId = topLevelIds[slot]
+        return tabManager.tabs.firstIndex { $0.id == topLevelId } ?? tabManager.tabs.count
+    }
+
+    /// Mirror a foreign drag's identity into this window's `SidebarDragState`
+    /// so the existing drop-indicator, frame-anchor, and failsafe machinery —
+    /// all gated on `draggedTabId != nil` — activate unchanged. The id matches
+    /// no local row, so no row dims, and the failsafe monitor clears it on
+    /// mouse-up (and `performDrop` clears it on a successful drop).
+    private func activateForeignDragIfNeeded() {
+        guard dragState.draggedTabId == nil,
+              let foreignId = SidebarWorkspaceDragRegistry.currentWorkspaceId,
+              isCrossWindowDrag(foreignId),
+              !isCrossWindowGroupAnchorDrag(foreignId) else { return }
+        // Resolve the foreign workspace's pin state once; it can't change while
+        // the drag is in flight, so later hover updates reuse it.
+        dragState.foreignDraggedIsPinned = AppDelegate.shared?
+            .tabManagerFor(tabId: foreignId)?
+            .tabs.first { $0.id == foreignId }?.isPinned ?? false
+        dragState.draggedTabId = foreignId
+    }
+
     func validateDrop(info: DropInfo) -> Bool {
         let hasType = info.hasItemsConforming(to: [SidebarTabDragPayload.typeIdentifier])
-        let draggedTabId = dragState.draggedTabId
-        let hasDrag = draggedTabId != nil
-        let targetIsInReorderScope = draggedTabId.map { draggedTabId in
+        guard hasType, let draggedTabId = effectiveDraggedTabId else {
+            #if DEBUG
+            cmuxDebugLog(
+                "sidebar.validateDrop target=\(targetTabId?.uuidString.prefix(5) ?? "end") " +
+                "hasType=\(hasType) hasDrag=false"
+            )
+            #endif
+            return false
+        }
+        if isCrossWindowDrag(draggedTabId) {
+            // A group header drag carries its anchor id; moving only the anchor
+            // would dissolve the source group, so reject cross-window header
+            // drops (the group stays intact in its window).
+            if isCrossWindowGroupAnchorDrag(draggedTabId) {
+                #if DEBUG
+                cmuxDebugLog("sidebar.validateDrop crossWindow=true rejected=groupAnchor")
+                #endif
+                return false
+            }
+            // Foreign workspace: any row (or the end strip) in this window is a
+            // valid drop target — the workspace will be moved into this window.
+            #if DEBUG
+            cmuxDebugLog(
+                "sidebar.validateDrop target=\(targetTabId?.uuidString.prefix(5) ?? "end") " +
+                "hasType=true crossWindow=true"
+            )
+            #endif
+            return true
+        }
+        let targetIsInReorderScope: Bool = {
             guard let targetTabId else { return true }
+            let usesTopLevelRows = tabManager.sidebarReorderUsesTopLevelRows(
+                forDraggedWorkspaceId: draggedTabId,
+                targetWorkspaceId: targetTabId,
+                workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId
+            )
             return tabManager.sidebarReorderWorkspaceIds(
                 forDraggedWorkspaceId: draggedTabId,
-                targetWorkspaceId: targetTabId
+                targetWorkspaceId: targetTabId,
+                usesTopLevelRows: usesTopLevelRows
             ).contains(targetTabId)
-        } ?? false
+        }()
         #if DEBUG
         cmuxDebugLog(
             "sidebar.validateDrop target=\(targetTabId?.uuidString.prefix(5) ?? "end") " +
-            "hasType=\(hasType) hasDrag=\(hasDrag) inScope=\(targetIsInReorderScope)"
+            "hasType=\(hasType) hasDrag=true inScope=\(targetIsInReorderScope)"
         )
         #endif
-        return hasType && hasDrag && targetIsInReorderScope
+        return targetIsInReorderScope
     }
 
     func dropEntered(info: DropInfo) {
         #if DEBUG
         cmuxDebugLog("sidebar.dropEntered target=\(targetTabId?.uuidString.prefix(5) ?? "end")")
         #endif
+        activateForeignDragIfNeeded()
         dragAutoScrollController.updateFromDragLocation()
         updateDropIndicator(for: info)
     }
@@ -21812,6 +22699,7 @@ struct SidebarTabDropDelegate: DropDelegate {
     }
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
+        activateForeignDragIfNeeded()
         dragAutoScrollController.updateFromDragLocation()
         updateDropIndicator(for: info)
 #if DEBUG
@@ -21831,23 +22719,34 @@ struct SidebarTabDropDelegate: DropDelegate {
         #if DEBUG
         cmuxDebugLog("sidebar.drop target=\(targetTabId?.uuidString.prefix(5) ?? "end")")
         #endif
-        guard let draggedTabId = dragState.draggedTabId else {
+        guard let draggedTabId = effectiveDraggedTabId else {
 #if DEBUG
             cmuxDebugLog("sidebar.drop.abort reason=missingDraggedTab")
 #endif
             return false
         }
+        if isCrossWindowDrag(draggedTabId) {
+            return performCrossWindowDrop(draggedTabId: draggedTabId)
+        }
         let usesTopLevelRows = tabManager.sidebarReorderUsesTopLevelRows(
             forDraggedWorkspaceId: draggedTabId,
-            targetWorkspaceId: targetTabId
+            targetWorkspaceId: targetTabId,
+            workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId
         )
         let reorderTabIds = tabManager.sidebarReorderWorkspaceIds(
             forDraggedWorkspaceId: draggedTabId,
-            targetWorkspaceId: targetTabId
+            targetWorkspaceId: targetTabId,
+            usesTopLevelRows: usesTopLevelRows
         )
         let pinnedTabIds = tabManager.sidebarReorderPinnedWorkspaceIds(
             forDraggedWorkspaceId: draggedTabId,
-            targetWorkspaceId: targetTabId
+            targetWorkspaceId: targetTabId,
+            usesTopLevelRows: usesTopLevelRows
+        )
+        let legalInsertionRange = tabManager.sidebarReorderLegalInsertionRange(
+            forDraggedWorkspaceId: draggedTabId,
+            targetWorkspaceId: targetTabId,
+            usesTopLevelRows: usesTopLevelRows
         )
         guard let fromIndex = reorderTabIds.firstIndex(of: draggedTabId) else {
 #if DEBUG
@@ -21860,7 +22759,8 @@ struct SidebarTabDropDelegate: DropDelegate {
             targetTabId: targetTabId,
             indicator: dragState.dropIndicator,
             tabIds: reorderTabIds,
-            pinnedTabIds: pinnedTabIds
+            pinnedTabIds: pinnedTabIds,
+            legalInsertionRange: legalInsertionRange
         ) else {
 #if DEBUG
             cmuxDebugLog(
@@ -21875,7 +22775,6 @@ struct SidebarTabDropDelegate: DropDelegate {
 #if DEBUG
             cmuxDebugLog("sidebar.drop.noop from=\(fromIndex) to=\(targetIndex)")
 #endif
-            syncSidebarSelection()
             return true
         }
 
@@ -21883,20 +22782,123 @@ struct SidebarTabDropDelegate: DropDelegate {
         cmuxDebugLog("sidebar.drop.commit tab=\(draggedTabId.uuidString.prefix(5)) from=\(fromIndex) to=\(targetIndex)")
 #endif
         let selectionBeforeReorder = selectedTabIds
+        let anchorWorkspaceIdBeforeReorder = SidebarWorkspaceSelectionSyncPolicy.anchorWorkspaceId(
+            existingAnchorIndex: lastSidebarSelectionIndex,
+            liveWorkspaceIds: tabManager.tabs.map(\.id)
+        )
         let didReorder = tabManager.reorderSidebarWorkspace(
             tabId: draggedTabId,
             toIndex: targetIndex,
             isDragOperation: true,
             usesTopLevelRows: usesTopLevelRows
         )
-        syncSidebarSelection(preserving: selectionBeforeReorder)
+        syncSidebarSelection(
+            preserving: selectionBeforeReorder,
+            preferredAnchorWorkspaceId: anchorWorkspaceIdBeforeReorder
+        )
         return didReorder
     }
 
+    /// Move a workspace dragged in from another window into this window at the
+    /// indicated drop position. Mirrors the existing "Move Workspace to Window"
+    /// action but honors the drop index and multi-selection.
+    private func performCrossWindowDrop(draggedTabId: UUID) -> Bool {
+        guard let app = AppDelegate.shared,
+              let destinationWindowId = app.windowId(for: tabManager),
+              let sourceManager = app.tabManagerFor(tabId: draggedTabId),
+              // A group header drag carries its anchor; moving only the anchor
+              // would dissolve the group, so cross-window header drops are
+              // disallowed (also gated in validateDrop).
+              !sourceManager.workspaceGroups.contains(where: { $0.anchorWorkspaceId == draggedTabId }) else {
+#if DEBUG
+            cmuxDebugLog("sidebar.drop.crossWindow.abort reason=unresolvedRouteOrGroupAnchor tab=\(draggedTabId.uuidString.prefix(5))")
+#endif
+            return false
+        }
+
+        // Move the source window's whole multi-selection when the dragged
+        // workspace is part of it; otherwise just the dragged workspace. Group
+        // anchors in the selection are excluded for the same reason as above.
+        let sourceSelection = sourceManager.sidebarSelectedWorkspaceIds
+        let candidateIds: [UUID]
+        if sourceSelection.contains(draggedTabId), sourceSelection.count > 1 {
+            candidateIds = sourceManager.tabs.filter { sourceSelection.contains($0.id) }.map(\.id)
+        } else {
+            candidateIds = [draggedTabId]
+        }
+        let sourceAnchorIds = Set(sourceManager.workspaceGroups.map(\.anchorWorkspaceId))
+        let movingIds = candidateIds.filter { !sourceAnchorIds.contains($0) }
+        guard !movingIds.isEmpty else { return false }
+
+#if DEBUG
+        cmuxDebugLog(
+            "sidebar.drop.crossWindow.commit count=\(movingIds.count) " +
+            "to=\(destinationWindowId.uuidString.prefix(5))"
+        )
+#endif
+        // A cross-window selection can span pinned and unpinned workspaces, and
+        // `attachWorkspace` normalizes each insert into the leading-pinned /
+        // unpinned region individually. Plan one base slot *per pin tier* (so a
+        // mixed selection doesn't scatter), then insert that tier's workspaces
+        // at base + running-offset so they stay a contiguous block in source
+        // order — recomputing the slot per workspace against the same indicator
+        // would re-anchor to the hovered row and reverse the batch. Pin state
+        // can't change mid-drag, so snapshot it once. A skipped move simply
+        // doesn't advance the offset (no index gap, no stale selection).
+        let pinStateById: [UUID: Bool] = Dictionary(
+            uniqueKeysWithValues: movingIds.map { id in
+                (id, sourceManager.tabs.first { $0.id == id }?.isPinned ?? false)
+            }
+        )
+        var movedIds: [UUID] = []
+        for isPinnedTier in [false, true] {
+            let tierIds = movingIds.filter { (pinStateById[$0] ?? false) == isPinnedTier }
+            guard !tierIds.isEmpty else { continue }
+            // Recompute against the live destination so the tier base reflects
+            // workspaces inserted by the previous tier.
+            let topLevelIds = crossWindowTopLevelTabIds()
+            let slot = SidebarDropPlanner.crossWindowInsertion(
+                targetTabId: crossWindowTopLevelTarget(),
+                draggedIsPinned: isPinnedTier,
+                indicator: dragState.dropIndicator,
+                tabIds: topLevelIds,
+                pinnedTabIds: crossWindowTopLevelPinnedTabIds()
+            ).insertionIndex
+            let base = crossWindowRawInsertIndex(forTopLevelSlot: slot, topLevelIds: topLevelIds)
+            var tierOffset = 0
+            for workspaceId in tierIds {
+                if app.moveWorkspaceToWindow(
+                    workspaceId: workspaceId,
+                    windowId: destinationWindowId,
+                    atIndex: base + tierOffset,
+                    focus: false
+                ) {
+                    movedIds.append(workspaceId)
+                    tierOffset += 1
+                }
+            }
+        }
+
+        guard !movedIds.isEmpty else { return false }
+        // Focus the workspace the user actually grabbed when it moved, else the
+        // last successful move. It now lives in this window, so this resolves to
+        // the same-manager focus path (no second move).
+        let focusId = movedIds.contains(draggedTabId) ? draggedTabId : (movedIds.last ?? draggedTabId)
+        _ = app.moveWorkspaceToWindow(workspaceId: focusId, windowId: destinationWindowId, focus: true)
+        selectedTabIds = Set(movedIds)
+        syncSidebarSelection()
+        return true
+    }
+
     private func updateDropIndicator(for info: DropInfo) {
+        if let draggedTabId = effectiveDraggedTabId, isCrossWindowDrag(draggedTabId) {
+            updateCrossWindowDropIndicator(for: info)
+            return
+        }
         let usesTopLevelRows = tabManager.sidebarReorderUsesTopLevelRows(
             forDraggedWorkspaceId: dragState.draggedTabId,
-            targetWorkspaceId: targetTabId
+            targetWorkspaceId: targetTabId,
+            workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId
         )
         let tabIds = tabManager.sidebarReorderWorkspaceIds(
             forDraggedWorkspaceId: dragState.draggedTabId,
@@ -21908,17 +22910,49 @@ struct SidebarTabDropDelegate: DropDelegate {
             targetWorkspaceId: targetTabId,
             usesTopLevelRows: usesTopLevelRows
         )
+        let legalInsertionRange = tabManager.sidebarReorderLegalInsertionRange(
+            forDraggedWorkspaceId: dragState.draggedTabId,
+            targetWorkspaceId: targetTabId,
+            usesTopLevelRows: usesTopLevelRows
+        )
         let nextIndicator = SidebarDropPlanner.indicator(
             draggedTabId: dragState.draggedTabId,
             targetTabId: targetTabId,
             tabIds: tabIds,
             pinnedTabIds: pinnedTabIds,
+            legalInsertionRange: legalInsertionRange,
             pointerY: targetTabId == nil ? nil : info.location.y,
             targetHeight: targetRowHeight
         )
         let nextUsesTopLevelRows = nextIndicator != nil && usesTopLevelRows
         guard dragState.dropIndicator != nextIndicator ||
                 dragState.dropIndicatorUsesTopLevelRows != nextUsesTopLevelRows else {
+            return
+        }
+        dragState.setDropIndicator(nextIndicator, usesTopLevelRows: usesTopLevelRows)
+    }
+
+    /// Drop indicator for a foreign workspace hovering this window. The dragged
+    /// workspace is not in this window's list, so the reorder planner (which
+    /// removes a source index) does not apply — use the cross-window planner.
+    private func updateCrossWindowDropIndicator(for info: DropInfo) {
+        // Reuse the pin state stashed when the foreign drag was mirrored in,
+        // avoiding a per-pointer-move cross-window lookup.
+        let draggedIsPinned = dragState.foreignDraggedIsPinned ?? false
+        // Plan in top-level space so the indicator lands on the same group/pin
+        // boundary `attachWorkspace` will normalize the dropped workspace to.
+        let nextIndicator = SidebarDropPlanner.crossWindowInsertion(
+            targetTabId: crossWindowTopLevelTarget(),
+            draggedIsPinned: draggedIsPinned,
+            indicator: nil,
+            tabIds: crossWindowTopLevelTabIds(),
+            pinnedTabIds: crossWindowTopLevelPinnedTabIds(),
+            pointerY: targetTabId == nil ? nil : info.location.y,
+            targetHeight: targetRowHeight
+        ).indicator
+        let usesTopLevelRows = !tabManager.workspaceGroups.isEmpty
+        guard dragState.dropIndicator != nextIndicator ||
+                dragState.dropIndicatorUsesTopLevelRows != usesTopLevelRows else {
             return
         }
         dragState.setDropIndicator(nextIndicator, usesTopLevelRows: usesTopLevelRows)
@@ -21933,7 +22967,10 @@ struct SidebarTabDropDelegate: DropDelegate {
         }
     }
 
-    private func syncSidebarSelection(preserving previousSelectionIds: Set<UUID>) {
+    private func syncSidebarSelection(
+        preserving previousSelectionIds: Set<UUID>,
+        preferredAnchorWorkspaceId: UUID?
+    ) {
         let liveWorkspaceIds = tabManager.tabs.map(\.id)
         let nextSelectionIds = SidebarWorkspaceSelectionSyncPolicy.reconciledSelection(
             previousSelectionIds: previousSelectionIds,
@@ -21941,9 +22978,10 @@ struct SidebarTabDropDelegate: DropDelegate {
             fallbackSelectedWorkspaceId: tabManager.selectedTabId
         )
         selectedTabIds = nextSelectionIds
-        lastSidebarSelectionIndex = SidebarWorkspaceSelectionSyncPolicy.anchorIndex(
-            preferredWorkspaceId: tabManager.selectedTabId,
+        lastSidebarSelectionIndex = SidebarWorkspaceSelectionSyncPolicy.anchorIndexAfterWorkspaceReorder(
+            preferredAnchorWorkspaceId: preferredAnchorWorkspaceId,
             selectedWorkspaceIds: nextSelectionIds,
+            focusedWorkspaceId: tabManager.selectedTabId,
             liveWorkspaceIds: liveWorkspaceIds
         )
     }
@@ -21966,7 +23004,7 @@ enum ExtensionSidebarBrowserStackDropPlanner {
         insertionPosition: Int,
         orderedRows: [ExtensionSidebarBrowserStackDropRow],
         preferredTargetSectionId: String? = nil
-    ) -> CmuxExtensionSidebarWorkspaceMove? {
+    ) -> CmuxSidebarProviderWorkspaceMove? {
         guard let sourceIndex = orderedRows.firstIndex(where: { $0.workspaceId == draggedWorkspaceId }) else {
             return nil
         }
@@ -21995,7 +23033,7 @@ enum ExtensionSidebarBrowserStackDropPlanner {
             targetIndex = 0
         }
 
-        return CmuxExtensionSidebarWorkspaceMove(
+        return CmuxSidebarProviderWorkspaceMove(
             workspaceId: draggedWorkspaceId,
             sourceSectionId: sourceRow.sectionId,
             targetSectionId: targetSectionId,
@@ -22062,7 +23100,7 @@ private struct ExtensionSidebarBrowserStackDropDelegate: DropDelegate {
     let targetRowHeight: CGFloat?
     let dragAutoScrollController: SidebarDragAutoScrollController
     @Binding var dropIndicator: SidebarDropIndicator?
-    let onMove: (CmuxExtensionSidebarWorkspaceMove) -> Bool
+    let onMove: (CmuxSidebarProviderWorkspaceMove) -> Bool
 
     func validateDrop(info: DropInfo) -> Bool {
         info.hasItemsConforming(to: [SidebarTabDragPayload.typeIdentifier])
@@ -22158,7 +23196,7 @@ private struct ExtensionSidebarBrowserStackDropDelegate: DropDelegate {
         draggedWorkspaceId: UUID,
         insertionPosition: Int,
         indicator: SidebarDropIndicator?
-    ) -> CmuxExtensionSidebarWorkspaceMove? {
+    ) -> CmuxSidebarProviderWorkspaceMove? {
         ExtensionSidebarBrowserStackDropPlanner.move(
             draggedWorkspaceId: draggedWorkspaceId,
             insertionPosition: insertionPosition,
@@ -22181,7 +23219,7 @@ private struct ExtensionSidebarBrowserStackEndDropDelegate: DropDelegate {
     @Binding var draggedTabId: UUID?
     let dragAutoScrollController: SidebarDragAutoScrollController
     @Binding var dropIndicator: SidebarDropIndicator?
-    let onMove: (CmuxExtensionSidebarWorkspaceMove) -> Bool
+    let onMove: (CmuxSidebarProviderWorkspaceMove) -> Bool
 
     func validateDrop(info: DropInfo) -> Bool {
         info.hasItemsConforming(to: [SidebarTabDragPayload.typeIdentifier])

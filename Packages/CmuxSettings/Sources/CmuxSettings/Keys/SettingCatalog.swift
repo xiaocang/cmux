@@ -31,7 +31,15 @@ public struct SettingCatalog: SettingCatalogSection {
     public let automation = AutomationCatalogSection()
     public let digest = DigestCatalogSection()
     public let browser = BrowserCatalogSection()
+    /// Settings for the built-in markdown viewer (the `markdown.*` keys).
+    public let markdown = MarkdownCatalogSection()
+    /// Settings for the built-in plain-text file editor (the `fileEditor.*` keys).
+    public let fileEditor = FileEditorCatalogSection()
+    /// Settings for Mobile pairing and sync.
+    public let mobile = MobileCatalogSection()
     public let betaFeatures = BetaFeaturesCatalogSection()
+    /// Settings for custom (user/agent-authored) sidebars (the `customSidebars.*` keys).
+    public let customSidebars = CustomSidebarsCatalogSection()
     public let shortcuts = KeyboardShortcutsCatalogSection()
     public let integrations = IntegrationsCatalogSection()
     public let account = AccountCatalogSection()

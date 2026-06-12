@@ -6,7 +6,8 @@ extension VerticalTabsSidebar {
     func sidebarWorkspaceGroupHeader(
         group: WorkspaceGroup,
         memberWorkspaceIds: [UUID],
-        renderContext: WorkspaceListRenderContext
+        renderContext: WorkspaceListRenderContext,
+        shouldCollectWorkspaceDropTargets: Bool
     ) -> some View {
         let settings = renderContext.tabItemSettings
         let isAnchorActive = tabManager.selectedTabId == group.anchorWorkspaceId
@@ -50,12 +51,14 @@ extension VerticalTabsSidebar {
         let tabDropDelegateFactory: (CGFloat) -> SidebarWorkspaceGroupHeaderDropDelegate = { [
             groupId = group.id,
             anchorId = group.anchorWorkspaceId,
+            workspaceGroupIdByWorkspaceId = renderContext.workspaceGroupIdByWorkspaceId,
             selectedTabIds = $selectedTabIds,
             lastSidebarSelectionIndex = $lastSidebarSelectionIndex
         ] rowHeight in
             let reorderDelegate = SidebarTabDropDelegate(
                 targetTabId: anchorId,
                 tabManager: tabManager,
+                workspaceGroupIdByWorkspaceId: workspaceGroupIdByWorkspaceId,
                 dragState: dragState,
                 selectedTabIds: selectedTabIds,
                 lastSidebarSelectionIndex: lastSidebarSelectionIndex,
@@ -73,7 +76,7 @@ extension VerticalTabsSidebar {
             )
         }
 
-        SidebarWorkspaceGroupHeaderView(
+        let header = SidebarWorkspaceGroupHeaderView(
             groupId: group.id,
             anchorWorkspaceId: group.anchorWorkspaceId,
             name: group.name,
@@ -89,6 +92,7 @@ extension VerticalTabsSidebar {
             showsShortcutHint: showsHintForAnchor,
             shortcutHintXOffset: settings.sidebarShortcutHintXOffset,
             shortcutHintYOffset: settings.sidebarShortcutHintYOffset,
+            fontScale: settings.sidebarFontScale,
             cwdContextMenuItems: cwdContextMenuItems,
             newWorkspacePlacement: newWorkspacePlacement,
             rowSpacing: tabRowSpacing,
@@ -154,9 +158,11 @@ extension VerticalTabsSidebar {
         .equatable()
         .id(group.anchorWorkspaceId)
         .accessibilityIdentifier("sidebarWorkspaceGroup.\(group.id.uuidString)")
-        .preference(key: SidebarWorkspaceRowIdsPreferenceKey.self, value: Set([group.anchorWorkspaceId]))
-        .anchorPreference(key: SidebarWorkspaceRowFramePreferenceKey.self, value: .bounds) { [anchorId = group.anchorWorkspaceId] anchor in
-            [anchorId: anchor]
-        }
+
+        header
+            .sidebarWorkspaceFrameAnchor(
+                id: group.anchorWorkspaceId,
+                isEnabled: shouldCollectWorkspaceDropTargets
+            )
     }
 }

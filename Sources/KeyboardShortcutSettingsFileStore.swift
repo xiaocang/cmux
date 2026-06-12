@@ -1,4 +1,6 @@
 import Combine
+import CmuxFileWatch
+import CmuxSettings
 import CmuxSocketControl
 import Foundation
 import os
@@ -62,12 +64,13 @@ final class CmuxSettingsFileStore {
     private let appearanceEnvironment: AppearanceSettings.LiveApplyEnvironment
     private let stateLock = NSLock()
 
-    private var primaryWatcher: ShortcutSettingsFileWatcher?
-    private var fallbackWatchers: [ShortcutSettingsFileWatcher] = []
+    private var watchers: [FileWatcher] = []
+    private var watchTasks: [Task<Void, Never>] = []
     private var defaultsCancellable: AnyCancellable?
     private var socketPasswordObserver: NSObjectProtocol?
 
     private var shortcutsByAction: [KeyboardShortcutSettings.Action: StoredShortcut] = [:]
+    private var whenClausesByAction: [KeyboardShortcutSettings.Action: ShortcutWhenClause] = [:]
     private var activeManagedUserDefaults: [String: ManagedSettingsValue] = [:]
     private var importedManagedDefaults: [String: ManagedSettingsValue] = [:]
     private var activeLegacyDerivedManagedUserDefaultKeys: Set<String> = []
@@ -105,15 +108,13 @@ final class CmuxSettingsFileStore {
         )
         guard startWatching else { return }
 
-        primaryWatcher = ShortcutSettingsFileWatcher(path: primaryPath, fileManager: fileManager) { [weak self] in
-            DispatchQueue.main.async {
-                self?.reload()
-            }
-        }
-        fallbackWatchers = fallbackPaths.map { fallbackPath in
-            ShortcutSettingsFileWatcher(path: fallbackPath, fileManager: fileManager) { [weak self] in
-                DispatchQueue.main.async {
-                    self?.reload()
+        watchers = ([primaryPath] + fallbackPaths).map { FileWatcher(path: $0) }
+        watchTasks = watchers.map { watcher in
+            let events = watcher.events
+            return Task { @MainActor [weak self] in
+                for await _ in events {
+                    guard let self else { break }
+                    self.reload()
                 }
             }
         }
@@ -125,8 +126,9 @@ final class CmuxSettingsFileStore {
     }
 
     deinit {
-        primaryWatcher?.stop()
-        fallbackWatchers.forEach { $0.stop() }
+        watchTasks.forEach { $0.cancel() }
+        // Dropping the watchers runs each deinit, cancelling its DispatchSources.
+        watchers.removeAll()
         defaultsCancellable?.cancel()
         if let socketPasswordObserver {
             notificationCenter.removeObserver(socketPasswordObserver)
@@ -151,6 +153,7 @@ final class CmuxSettingsFileStore {
         let previousState = synchronized {
             (
                 shortcuts: shortcutsByAction,
+                whenClauses: whenClausesByAction,
                 importedManagedDefaults: importedManagedDefaults,
                 sourcePath: activeSourcePath
             )
@@ -168,6 +171,7 @@ final class CmuxSettingsFileStore {
         )
         synchronized {
             shortcutsByAction = resolved.shortcuts
+            whenClausesByAction = resolved.whenClauses
             activeManagedUserDefaults = resolved.managedUserDefaults
             importedManagedDefaults = resolved.managedUserDefaults
             activeLegacyDerivedManagedUserDefaultKeys = resolved.legacyDerivedManagedUserDefaultKeys
@@ -176,13 +180,22 @@ final class CmuxSettingsFileStore {
         }
         saveImportedManagedDefaults(resolved.managedUserDefaults)
 
-        if previousState.shortcuts != resolved.shortcuts || previousState.sourcePath != resolved.path {
+        if previousState.shortcuts != resolved.shortcuts
+            || previousState.whenClauses != resolved.whenClauses
+            || previousState.sourcePath != resolved.path {
             KeyboardShortcutSettings.notifySettingsFileDidChange(center: notificationCenter)
         }
     }
 
     func override(for action: KeyboardShortcutSettings.Action) -> StoredShortcut? {
         synchronized { shortcutsByAction[action] }
+    }
+
+    /// The `when`-clause override for an action parsed from `shortcuts.when` in
+    /// cmux.json, or `nil` when the action has no configured override (so the
+    /// caller falls back to the action's built-in ``shortcutContext``).
+    func whenClause(for action: KeyboardShortcutSettings.Action) -> ShortcutWhenClause? {
+        synchronized { whenClausesByAction[action] }
     }
 
     func isManagedByFile(_ action: KeyboardShortcutSettings.Action) -> Bool {
@@ -245,6 +258,7 @@ final class CmuxSettingsFileStore {
                 ResolvedSettingsSnapshot(
                     path: activeSourcePath,
                     shortcuts: shortcutsByAction,
+                    whenClauses: whenClausesByAction,
                     managedUserDefaults: activeManagedUserDefaults,
                     legacyDerivedManagedUserDefaultKeys: activeLegacyDerivedManagedUserDefaultKeys,
                     managedCustomSettings: activeManagedCustomSettings
@@ -368,6 +382,12 @@ final class CmuxSettingsFileStore {
         }
         if let browserSection = root["browser"] as? [String: Any] {
             parseBrowserSection(browserSection, sourcePath: sourcePath, snapshot: &snapshot)
+        }
+        if let markdownSection = root["markdown"] as? [String: Any] {
+            parseMarkdownSection(markdownSection, sourcePath: sourcePath, snapshot: &snapshot)
+        }
+        if let fileEditorSection = root["fileEditor"] as? [String: Any] {
+            parseFileEditorSection(fileEditorSection, sourcePath: sourcePath, snapshot: &snapshot)
         }
         if let workspaceGroupsSection = root["workspaceGroups"] as? [String: Any] {
             parseWorkspaceGroupsSection(workspaceGroupsSection, sourcePath: sourcePath, snapshot: &snapshot)
@@ -617,6 +637,31 @@ final class CmuxSettingsFileStore {
             logInvalid("terminal.agentHibernation", sourcePath: sourcePath)
         }
 
+        if let rawRendererRealization = section["rendererRealization"],
+           let rendererRealization = rawRendererRealization as? [String: Any] {
+            if let value = jsonBool(rendererRealization["enabled"]) {
+                snapshot.managedUserDefaults[RendererRealizationSettings.enabledKey] = .bool(value)
+            } else if rendererRealization.keys.contains("enabled") {
+                logInvalid("terminal.rendererRealization.enabled", sourcePath: sourcePath)
+            }
+            if let value = jsonInt(rendererRealization["idleSeconds"]) {
+                snapshot.managedUserDefaults[RendererRealizationSettings.idleSecondsKey] = .double(
+                    RendererRealizationSettings.sanitizedIdleSeconds(TimeInterval(value))
+                )
+            } else if rendererRealization.keys.contains("idleSeconds") {
+                logInvalid("terminal.rendererRealization.idleSeconds", sourcePath: sourcePath)
+            }
+            if let value = jsonInt(rendererRealization["maxWarmRenderers"]) {
+                snapshot.managedUserDefaults[RendererRealizationSettings.maxWarmRenderersKey] = .int(
+                    RendererRealizationSettings.sanitizedMaxWarmRenderers(value)
+                )
+            } else if rendererRealization.keys.contains("maxWarmRenderers") {
+                logInvalid("terminal.rendererRealization.maxWarmRenderers", sourcePath: sourcePath)
+            }
+        } else if section.keys.contains("rendererRealization") {
+            logInvalid("terminal.rendererRealization", sourcePath: sourcePath)
+        }
+
         if let value = jsonInt(section["textBoxMaxLines"]) {
             if value >= TerminalTextBoxInputSettings.minimumMaxLines,
                value <= TerminalTextBoxInputSettings.maximumMaxLines {
@@ -626,6 +671,54 @@ final class CmuxSettingsFileStore {
             }
         } else if section.keys.contains("textBoxMaxLines") {
             logInvalid("terminal.textBoxMaxLines", sourcePath: sourcePath)
+        }
+    }
+
+    private func parseMarkdownSection(
+        _ section: [String: Any],
+        sourcePath: String,
+        snapshot: inout ResolvedSettingsSnapshot
+    ) {
+        // Accept numeric doubles (e.g. 15 or 15.0) and round to integer points,
+        // matching the integer `markdown.fontSize` catalog/UI representation.
+        if let value = jsonDouble(section["fontSize"]) {
+            if value >= MarkdownFontSizeSettings.minimumPointSize,
+               value <= MarkdownFontSizeSettings.maximumPointSize {
+                snapshot.managedUserDefaults[MarkdownFontSizeSettings.key] = .int(Int(value.rounded()))
+            } else {
+                logInvalid("markdown.fontSize", sourcePath: sourcePath)
+            }
+        } else if section.keys.contains("fontSize") {
+            logInvalid("markdown.fontSize", sourcePath: sourcePath)
+        }
+
+        if let value = jsonString(section["fontFamily"]) {
+            snapshot.managedUserDefaults[MarkdownFontFamily.key] = .string(MarkdownFontFamily.normalized(value))
+        } else if section.keys.contains("fontFamily") {
+            logInvalid("markdown.fontFamily", sourcePath: sourcePath)
+        }
+
+        if let value = jsonDouble(section["maxWidth"]) {
+            if value >= MarkdownMaxWidthSettings.minimumCSSPixels,
+               value <= MarkdownMaxWidthSettings.maximumCSSPixels {
+                snapshot.managedUserDefaults[MarkdownMaxWidthSettings.key] = .int(Int(value.rounded()))
+            } else {
+                logInvalid("markdown.maxWidth", sourcePath: sourcePath)
+            }
+        } else if section.keys.contains("maxWidth") {
+            logInvalid("markdown.maxWidth", sourcePath: sourcePath)
+        }
+    }
+
+    private func parseFileEditorSection(
+        _ section: [String: Any],
+        sourcePath: String,
+        snapshot: inout ResolvedSettingsSnapshot
+    ) {
+        if let value = jsonBool(section["wordWrap"]) {
+            snapshot.managedUserDefaults[FilePreviewWordWrapSettings.key] = .bool(value)
+        } else if section.keys.contains("wordWrap") {
+            logInvalid("fileEditor.wordWrap", sourcePath: sourcePath)
         }
     }
 
@@ -866,6 +959,9 @@ final class CmuxSettingsFileStore {
         }
         if let value = jsonBool(section["suppressSubagentNotifications"]) {
             snapshot.managedUserDefaults[AgentSubagentNotificationSettings.suppressNotificationsKey] = .bool(value)
+        }
+        if let value = jsonBool(section["ampIntegration"]) {
+            snapshot.managedUserDefaults[AmpIntegrationSettings.hooksEnabledKey] = .bool(value)
         }
         if let value = jsonBool(section["cursorIntegration"]) {
             snapshot.managedUserDefaults[CursorIntegrationSettings.hooksEnabledKey] = .bool(value)
@@ -1182,7 +1278,7 @@ final class CmuxSettingsFileStore {
         }
 
         var bindings = section["bindings"] as? [String: Any] ?? [:]
-        for (key, rawValue) in section where key != "bindings" && key != "showModifierHoldHints" {
+        for (key, rawValue) in section where key != "bindings" && key != "showModifierHoldHints" && key != "when" {
             bindings[key] = rawValue
         }
 
@@ -1196,6 +1292,37 @@ final class CmuxSettingsFileStore {
                 continue
             }
             snapshot.shortcuts[action] = shortcut
+        }
+
+        parseShortcutWhenClauses(section["when"], sourcePath: sourcePath, snapshot: &snapshot)
+    }
+
+    /// Parses the optional `shortcuts.when` map — `{ "<actionId>": "<predicate>" }`
+    /// — into per-action ``ShortcutWhenClause`` overrides. A binding's `when`
+    /// clause gates it to a focus context, letting the same keystroke drive
+    /// different actions in different contexts (e.g. `⌃1` selects a workspace
+    /// unless the sidebar is focused). Invalid entries are logged and skipped.
+    private func parseShortcutWhenClauses(
+        _ rawValue: Any?,
+        sourcePath: String,
+        snapshot: inout ResolvedSettingsSnapshot
+    ) {
+        guard let rawValue else { return }
+        guard let whenSection = rawValue as? [String: Any] else {
+            logInvalid("shortcuts.when", sourcePath: sourcePath)
+            return
+        }
+        for (rawAction, rawClause) in whenSection {
+            guard let action = KeyboardShortcutSettings.Action(rawValue: rawAction) else {
+                cmuxSettingsFileStoreLogger.warning("ignoring shortcuts.when for unknown action '\(rawAction, privacy: .private(mask: .hash))' in \(sourcePath, privacy: .private(mask: .hash))")
+                continue
+            }
+            guard let expression = jsonString(rawClause),
+                  let clause = ShortcutWhenClause.parse(expression) else {
+                cmuxSettingsFileStoreLogger.warning("ignoring invalid shortcuts.when clause for '\(rawAction, privacy: .private(mask: .hash))' in \(sourcePath, privacy: .private(mask: .hash))")
+                continue
+            }
+            snapshot.whenClauses[action] = clause
         }
     }
 
@@ -1772,6 +1899,7 @@ final class CmuxSettingsFileStore {
         let apply = {
             var agentSessionAutoResumeDidChange = false
             var agentHibernationDidChange = false
+            var rendererRealizationDidChange = false
             for change in changes {
                 if change.defaultsKey == TerminalScrollBarSettings.showScrollBarKey {
                     TerminalScrollBarSettings.notifyDidChange(notificationCenter: notificationCenter)
@@ -1789,6 +1917,11 @@ final class CmuxSettingsFileStore {
                     change.defaultsKey == AgentHibernationSettings.maxLiveTerminalsKey ||
                     change.defaultsKey == AgentHibernationSettings.confirmationSecondsKey {
                     agentHibernationDidChange = true
+                }
+                if change.defaultsKey == RendererRealizationSettings.enabledKey ||
+                    change.defaultsKey == RendererRealizationSettings.idleSecondsKey ||
+                    change.defaultsKey == RendererRealizationSettings.maxWarmRenderersKey {
+                    rendererRealizationDidChange = true
                 }
 
                 if change.defaultsKey == LanguageSettings.languageKey {
@@ -1812,6 +1945,9 @@ final class CmuxSettingsFileStore {
             }
             if agentHibernationDidChange {
                 AgentHibernationSettings.notifyDidChange(notificationCenter: notificationCenter)
+            }
+            if rendererRealizationDidChange {
+                RendererRealizationSettings.notifyDidChange(notificationCenter: notificationCenter)
             }
         }
         if Thread.isMainThread {
@@ -1922,6 +2058,9 @@ typealias KeyboardShortcutSettingsFileStore = CmuxSettingsFileStore
 private struct ResolvedSettingsSnapshot {
     var path: String?
     var shortcuts: [KeyboardShortcutSettings.Action: StoredShortcut] = [:]
+    /// Per-action `when`-clause overrides parsed from `shortcuts.when` — gate a
+    /// binding to a focus context (see ``ShortcutWhenClause``).
+    var whenClauses: [KeyboardShortcutSettings.Action: ShortcutWhenClause] = [:]
     var managedUserDefaults: [String: ManagedSettingsValue] = [:]
     var legacyDerivedManagedUserDefaultKeys: Set<String> = []
     var managedCustomSettings = ManagedCustomSettings()
@@ -1934,6 +2073,9 @@ private struct ResolvedSettingsSnapshot {
         }
         for (action, shortcut) in fallback.shortcuts where shortcuts[action] == nil {
             shortcuts[action] = shortcut
+        }
+        for (action, clause) in fallback.whenClauses where whenClauses[action] == nil {
+            whenClauses[action] = clause
         }
         for (key, value) in fallback.managedUserDefaults where managedUserDefaults[key] == nil {
             managedUserDefaults[key] = value
@@ -2094,94 +2236,5 @@ private enum BackupValue: Codable, Equatable {
             try container.encode(Kind.stringDictionary, forKey: .kind)
             try container.encode(value, forKey: .stringDictionaryValue)
         }
-    }
-}
-
-private final class ShortcutSettingsFileWatcher {
-    private let path: String
-    private let fileManager: FileManager
-    private let onChange: () -> Void
-    private let watchQueue = DispatchQueue(label: "com.cmux.shortcut-settings-file-watch")
-
-    private var source: DispatchSourceFileSystemObject?
-
-    init(path: String, fileManager: FileManager = .default, onChange: @escaping () -> Void) {
-        self.path = path
-        self.fileManager = fileManager
-        self.onChange = onChange
-        start()
-    }
-
-    func stop() {
-        source?.cancel()
-        source = nil
-    }
-
-    private func start() {
-        stop()
-
-        if fileManager.fileExists(atPath: path) {
-            startFileWatcher()
-        } else {
-            startDirectoryWatcher()
-        }
-    }
-
-    private func startFileWatcher() {
-        let fd = open(path, O_EVTONLY)
-        guard fd >= 0 else {
-            startDirectoryWatcher()
-            return
-        }
-
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .delete, .rename, .extend],
-            queue: watchQueue
-        )
-
-        source.setEventHandler { [weak self] in
-            guard let self else { return }
-            let flags = source.data
-            if flags.contains(.delete) || flags.contains(.rename) {
-                self.start()
-            }
-            self.onChange()
-        }
-
-        source.setCancelHandler {
-            close(fd)
-        }
-
-        self.source = source
-        source.resume()
-    }
-
-    private func startDirectoryWatcher() {
-        let directoryPath = (path as NSString).deletingLastPathComponent
-        let fd = open(directoryPath, O_EVTONLY)
-        guard fd >= 0 else { return }
-
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .rename, .delete],
-            queue: watchQueue
-        )
-
-        source.setEventHandler { [weak self] in
-            guard let self else { return }
-            if self.fileManager.fileExists(atPath: self.path) {
-                self.start()
-            } else {
-                self.onChange()
-            }
-        }
-
-        source.setCancelHandler {
-            close(fd)
-        }
-
-        self.source = source
-        source.resume()
     }
 }
