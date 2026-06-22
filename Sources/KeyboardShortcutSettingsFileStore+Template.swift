@@ -1,5 +1,7 @@
+import CmuxSettings
 import Foundation
 import CmuxSocketControl
+import CmuxSettings
 
 extension CmuxSettingsFileStore {
     static func defaultTemplate() -> String {
@@ -57,36 +59,37 @@ extension CmuxSettingsFileStore {
         return [
             [
                 "app": [
-                    "language": LanguageSettings.defaultLanguage.rawValue,
+                    "language": AppCatalogSection().language.defaultValue.rawValue,
                     "appearance": AppearanceSettings.defaultMode.rawValue,
                     "appIcon": AppIconSettings.defaultMode.rawValue,
+                    "windowTitleTemplate": WindowTitleTemplate.defaultRawValue,
                     "menuBarOnly": MenuBarOnlySettings.defaultMenuBarOnly,
-                    "newWorkspacePlacement": WorkspacePlacementSettings.defaultPlacement.rawValue,
+                    "newWorkspacePlacement": SettingCatalog().app.newWorkspacePlacement.defaultValue.rawValue,
                     "forkConversationDefaultDestination": AgentConversationForkDefaultSettings.defaultDestination.rawValue,
-                    "workspaceInheritWorkingDirectory": WorkspaceWorkingDirectoryInheritanceSettings.defaultValue,
+                    "workspaceInheritWorkingDirectory": SettingCatalog().app.workspaceInheritWorkingDirectory.defaultValue,
                     "minimalMode": false,
-                    "keepWorkspaceOpenWhenClosingLastSurface": !LastSurfaceCloseShortcutSettings.defaultValue,
+                    "keepWorkspaceOpenWhenClosingLastSurface": !SettingCatalog().app.keepWorkspaceOpenWhenClosingLastSurface.defaultValue,
                     "focusPaneOnFirstClick": PaneFirstClickFocusSettings.defaultEnabled,
                     "preferredEditor": "",
-                    "openSupportedFilesInCmux": CmdClickSupportedFileRouteSettings.defaultValue,
-                    "openMarkdownInCmuxViewer": CmdClickMarkdownRouteSettings.defaultValue,
-                    "reorderOnNotification": WorkspaceAutoReorderSettings.defaultValue,
+                    "openSupportedFilesInCmux": AppCatalogSection().openSupportedFilesInCmux.defaultValue,
+                    "openMarkdownInCmuxViewer": AppCatalogSection().openMarkdownInCmuxViewer.defaultValue,
+                    "reorderOnNotification": SettingCatalog().app.reorderOnNotification.defaultValue,
                     "proactiveSpriteSuggestions": ProactiveSpriteSuggestionsSettings.defaultValue,
                     "proactiveAutoBubble": ProactiveAutoBubbleSettings.defaultValue,
                     "proactiveSuggestionNotifications": ProactiveSuggestionNotificationsSettings.defaultValue,
                     "iMessageMode": IMessageModeSettings.defaultValue,
-                    "sendAnonymousTelemetry": TelemetrySettings.defaultSendAnonymousTelemetry,
-                    "confirmQuit": QuitWarningSettings.defaultConfirmQuitMode.rawValue,
-                    "warnBeforeClosingTab": CloseTabWarningSettings.defaultWarnBeforeClosingTab,
-                    "warnBeforeClosingTabXButton": CloseTabWarningSettings.defaultWarnBeforeClosingTabXButton,
-                    "hideTabCloseButton": CloseTabWarningSettings.defaultHideTabCloseButton,
-                    "renameSelectsExistingName": CommandPaletteRenameSelectionSettings.defaultSelectAllOnFocus,
-                    "commandPaletteSearchesAllSurfaces": CommandPaletteSwitcherSearchSettings.defaultSearchAllSurfaces,
+                    "sendAnonymousTelemetry": AppCatalogSection().sendAnonymousTelemetry.defaultValue,
+                    "confirmQuit": AppCatalogSection().confirmQuitMode.defaultValue.rawValue,
+                    "warnBeforeClosingTab": AppCatalogSection().warnBeforeClosingTab.defaultValue,
+                    "warnBeforeClosingTabXButton": AppCatalogSection().warnBeforeClosingTabXButton.defaultValue,
+                    "hideTabCloseButton": AppCatalogSection().hideTabCloseButton.defaultValue,
+                    "renameSelectsExistingName": AppCatalogSection().renameSelectsExistingName.defaultValue,
+                    "commandPaletteSearchesAllSurfaces": AppCatalogSection().commandPaletteSearchesAllSurfaces.defaultValue,
                 ],
             ],
             [
                 "workspaceGroups": [
-                    "newWorkspacePlacement": WorkspaceGroupNewWorkspacePlacementSettings.defaultValue.rawValue,
+                    "newWorkspacePlacement": SettingCatalog().workspaceGroups.newWorkspacePlacement.defaultValue.rawValue,
                 ],
             ],
             [
@@ -128,17 +131,17 @@ extension CmuxSettingsFileStore {
             ],
             [
                 "sidebar": [
-                    "hideAllDetails": SidebarWorkspaceDetailSettings.defaultHideAllDetails,
+                    "hideAllDetails": SettingCatalog().sidebar.hideAllDetails.defaultValue,
                     "wrapWorkspaceTitles": SidebarWorkspaceTitleWrapSettings.defaultWrap,
-                    "showWorkspaceDescription": SidebarWorkspaceDetailSettings.defaultShowWorkspaceDescription,
-                    "branchLayout": SidebarBranchLayoutSettings.defaultVerticalLayout ? "vertical" : "inline",
-                    "stackBranchDirectory": SidebarBranchDirectoryStackedSettings.defaultStacked,
-                    "pathLastSegmentOnly": SidebarPathLastSegmentSettings.defaultLastSegmentOnly,
-                    "showNotificationMessage": SidebarWorkspaceDetailSettings.defaultShowNotificationMessage,
+                    "showWorkspaceDescription": SettingCatalog().sidebar.showWorkspaceDescription.defaultValue,
+                    "branchLayout": SettingCatalog().sidebar.branchVerticalLayout.defaultValue ? "vertical" : "inline",
+                    "stackBranchDirectory": SettingCatalog().sidebar.stackBranchDirectory.defaultValue,
+                    "pathLastSegmentOnly": SettingCatalog().sidebar.pathLastSegmentOnly.defaultValue,
+                    "showNotificationMessage": SettingCatalog().sidebar.showNotificationMessage.defaultValue,
                     "showBranchDirectory": SidebarWorkspaceDetailDefaults.showBranchDirectory,
                     "showPullRequests": SidebarWorkspaceDetailDefaults.showPullRequests,
                     "watchGitStatus": SidebarWorkspaceDetailDefaults.watchGitStatus,
-                    "makePullRequestsClickable": SidebarPullRequestClickabilitySettings.defaultClickable,
+                    "makePullRequestsClickable": SettingCatalog().sidebar.makePullRequestsClickable.defaultValue,
                     "openPullRequestLinksInCmuxBrowser": BrowserLinkOpenSettings.defaultOpenSidebarPullRequestLinksInCmuxBrowser,
                     "openPortLinksInCmuxBrowser": BrowserLinkOpenSettings.defaultOpenSidebarPortLinksInCmuxBrowser,
                     "showSSH": SidebarWorkspaceDetailDefaults.showSSH,
@@ -150,7 +153,7 @@ extension CmuxSettingsFileStore {
             ],
             [
                 "workspaceColors": [
-                    "indicatorStyle": SidebarActiveTabIndicatorSettings.defaultStyle.rawValue,
+                    "indicatorStyle": SettingCatalog().workspaceColors.indicatorStyle.defaultValue.rawValue,
                     "selectionColor": NSNull(),
                     "notificationBadgeColor": NSNull(),
                     "colors": Dictionary(
@@ -161,27 +164,27 @@ extension CmuxSettingsFileStore {
             [
                 "sidebarAppearance": [
                     "matchTerminalBackground": false,
-                    "tintColor": SidebarTintDefaults.hex,
+                    "tintColor": SidebarTintDefaults().hex,
                     "lightModeTintColor": NSNull(),
                     "darkModeTintColor": NSNull(),
-                    "tintOpacity": SidebarTintDefaults.opacity,
+                    "tintOpacity": SidebarTintDefaults().opacity,
                 ],
             ],
             [
                 "automation": [
                     "socketControlMode": SocketControlSettings.defaultMode.rawValue,
                     "socketPassword": "",
-                    "claudeCodeIntegration": ClaudeCodeIntegrationSettings.defaultHooksEnabled,
+                    "claudeCodeIntegration": IntegrationsCatalogSection().claudeCodeHooksEnabled.defaultValue,
                     "claudeBinaryPath": "",
                     "ripgrepBinaryPath": "",
-                    "suppressSubagentNotifications": AgentSubagentNotificationSettings.defaultSuppressNotifications,
-                    "ampIntegration": AmpIntegrationSettings.defaultHooksEnabled,
-                    "cursorIntegration": CursorIntegrationSettings.defaultHooksEnabled,
-                    "geminiIntegration": GeminiIntegrationSettings.defaultHooksEnabled,
+                    "suppressSubagentNotifications": IntegrationsCatalogSection().suppressSubagentNotifications.defaultValue,
+                    "ampIntegration": IntegrationsCatalogSection().ampHooksEnabled.defaultValue,
+                    "cursorIntegration": IntegrationsCatalogSection().cursorHooksEnabled.defaultValue,
+                    "geminiIntegration": IntegrationsCatalogSection().geminiHooksEnabled.defaultValue,
                     "sidebarPullRequestShellDebounceEnabled": SidebarPullRequestShellDebounceSettings.defaultEnabled,
                     "sidebarPullRequestShellDebounceSeconds": SidebarPullRequestShellDebounceSettings.defaultDelaySeconds,
-                    "kiroIntegration": KiroIntegrationSettings.defaultHooksEnabled,
-                    "kiroNotificationLevel": KiroIntegrationSettings.defaultNotificationLevel.rawValue,
+                    "kiroIntegration": IntegrationsCatalogSection().kiroHooksEnabled.defaultValue,
+                    "kiroNotificationLevel": IntegrationsCatalogSection().kiroNotificationLevel.defaultValue,
                     "portBase": AutomationSettings.defaultPortBase,
                     "portRange": AutomationSettings.defaultPortRange,
                 ],
@@ -206,10 +209,10 @@ extension CmuxSettingsFileStore {
             ],
             [
                 "browser": [
-                    "defaultSearchEngine": BrowserSearchSettings.defaultSearchEngine.rawValue,
-                    "customSearchEngineName": BrowserSearchSettings.defaultCustomSearchEngineName,
-                    "customSearchEngineURLTemplate": BrowserSearchSettings.defaultCustomSearchEngineURLTemplate,
-                    "showSearchSuggestions": BrowserSearchSettings.defaultSearchSuggestionsEnabled,
+                    "defaultSearchEngine": BrowserSearchSettingsStore.defaultSearchEngine.rawValue,
+                    "customSearchEngineName": BrowserSearchSettingsStore.defaultCustomSearchEngineName,
+                    "customSearchEngineURLTemplate": BrowserSearchSettingsStore.defaultCustomSearchEngineURLTemplate,
+                    "showSearchSuggestions": BrowserSearchSettingsStore.defaultSearchSuggestionsEnabled,
                     "siteSearchKeyboardShortcut": BrowserSiteSearchSettings.defaultActivationShortcut.rawValue,
                     "siteSearch": [Any](),
                     "theme": BrowserThemeSettings.defaultMode.rawValue,
@@ -234,6 +237,11 @@ extension CmuxSettingsFileStore {
             [
                 "fileEditor": [
                     "wordWrap": FilePreviewWordWrapSettings.defaultEnabled,
+                ],
+            ],
+            [
+                "fileExplorer": [
+                    "doubleClickAction": FileExplorerDoubleClickActionSettings.defaultValue.rawValue,
                 ],
             ],
             [

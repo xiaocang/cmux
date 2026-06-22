@@ -548,7 +548,6 @@ final class CmuxWebView: WKWebView {
       }
     })();
     """
-
     private final class PasteAsPlainTextFocusMessageHandler: NSObject, WKScriptMessageHandler {
         func userContentController(
             _ userContentController: WKUserContentController,
@@ -651,13 +650,14 @@ final class CmuxWebView: WKWebView {
         BrowserTextInputCorrectionDefaults.register()
         super.init(frame: frame, configuration: configuration)
         installPasteAsPlainTextFocusTracking()
+        installScriptedDownloadInterception()
         installContextMenuLinkCapture()
     }
-
     required init?(coder: NSCoder) {
         BrowserTextInputCorrectionDefaults.register()
         super.init(coder: coder)
         installPasteAsPlainTextFocusTracking()
+        installScriptedDownloadInterception()
         installContextMenuLinkCapture()
     }
 
@@ -1312,7 +1312,7 @@ final class CmuxWebView: WKWebView {
     private var fallbackDownloadLinkedFileTarget: AnyObject?
     private var fallbackDownloadLinkedFileAction: Selector?
 
-    private static func makeContextDownloadTraceID(prefix: String) -> String {
+    static func makeContextDownloadTraceID(prefix: String) -> String {
 #if DEBUG
         return "\(prefix)-\(UUID().uuidString.prefix(8))"
 #else
@@ -1320,7 +1320,7 @@ final class CmuxWebView: WKWebView {
 #endif
     }
 
-    private func debugContextDownload(_ message: @autoclosure () -> String) {
+    func debugContextDownload(_ message: @autoclosure () -> String) {
 #if DEBUG
         cmuxDebugLog(Self.redactedContextDownloadDebugMessage(message()))
 #endif
@@ -1516,7 +1516,7 @@ final class CmuxWebView: WKWebView {
     ) -> String {
         if let suggested = suggestedFilename?.trimmingCharacters(in: .whitespacesAndNewlines),
            !suggested.isEmpty {
-            return suggested
+            return BrowserDownloadFilenameResolver().suggestedFilename(suggestedFilename: suggested, response: nil, sourceURL: URL(fileURLWithPath: "download"), imageType: nil)
         }
         let ext = filenameExtension(forMIMEType: mimeType) ?? "bin"
         let base = (mimeType?.lowercased().hasPrefix("image/") ?? false) ? "image" : "download"
@@ -1960,7 +1960,7 @@ final class CmuxWebView: WKWebView {
         }
     }
 
-    private func downloadURLViaSession(
+    func downloadURLViaSession(
         _ url: URL,
         suggestedFilename: String?,
         sender: Any?,
@@ -2107,7 +2107,7 @@ final class CmuxWebView: WKWebView {
         cookieStore.getAllCookies { cookies in
             var request = URLRequest(url: url)
             request.httpMethod = "GET"
-            let cookieHeaders = HTTPCookie.requestHeaderFields(with: cookies)
+            let cookieHeaders = HTTPCookie.requestHeaderFields(with: Self.cookiesForDownloadRequest(cookies, url: url))
             for (key, value) in cookieHeaders {
                 request.setValue(value, forHTTPHeaderField: key)
             }

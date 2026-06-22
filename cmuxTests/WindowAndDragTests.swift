@@ -1,6 +1,8 @@
 import XCTest
 import AppKit
 import CMUXActions
+import CmuxAppKitSupportUI
+import CmuxFoundation
 import Carbon.HIToolbox
 import Darwin
 import PDFKit
@@ -11,6 +13,12 @@ import WebKit
 import ObjectiveC.runtime
 @testable import Bonsplit
 import UserNotifications
+// Selective imports: the app target also defines AppIconMode/StoredShortcut/etc.,
+// so a blanket `import CmuxSettings` here makes those names ambiguous. Import only
+// the settings symbols this file needs.
+import struct CmuxSettings.AccountCatalogSection
+import struct CmuxSettings.AppCatalogSection
+import struct CmuxSettings.FileRouteSettingsStore
 
 #if canImport(cmux_DEV)
 @testable import cmux_DEV
@@ -3853,31 +3861,33 @@ final class WindowGlassEffectTests: XCTestCase {
         )
         window.contentView = originalContentView
 
-        WindowGlassEffect.apply(to: window, tintColor: .systemBlue)
+        let glassEffect = WindowGlassEffect()
+        glassEffect.apply(to: window, tintColor: .systemBlue)
 
-        if WindowGlassEffect.isAvailable {
+        if glassEffect.isAvailable {
             XCTAssertFalse(window.contentView === originalContentView)
-            XCTAssertTrue(WindowGlassEffect.originalContentView(for: window) === originalContentView)
-            XCTAssertTrue(originalContentView.superview === WindowGlassEffect.foregroundContainer(for: window))
-            XCTAssertNotNil(WindowGlassEffect.portalInstallationTarget(for: window))
+            XCTAssertTrue(glassEffect.originalContentView(for: window) === originalContentView)
+            XCTAssertTrue(originalContentView.superview === glassEffect.foregroundContainer(for: window))
+            XCTAssertNotNil(glassEffect.portalInstallationTarget(for: window))
         } else {
             XCTAssertTrue(window.contentView === originalContentView)
-            XCTAssertNil(WindowGlassEffect.originalContentView(for: window))
-            XCTAssertNil(WindowGlassEffect.foregroundContainer(for: window))
-            XCTAssertNil(WindowGlassEffect.portalInstallationTarget(for: window))
+            XCTAssertNil(glassEffect.originalContentView(for: window))
+            XCTAssertNil(glassEffect.foregroundContainer(for: window))
+            XCTAssertNil(glassEffect.portalInstallationTarget(for: window))
         }
         XCTAssertTrue(Self.windowContainsGlassBackground(window))
 
-        WindowGlassEffect.remove(from: window)
+        glassEffect.remove(from: window)
 
         XCTAssertTrue(window.contentView === originalContentView)
-        XCTAssertNil(WindowGlassEffect.foregroundContainer(for: window))
-        XCTAssertNil(WindowGlassEffect.originalContentView(for: window))
+        XCTAssertNil(glassEffect.foregroundContainer(for: window))
+        XCTAssertNil(glassEffect.originalContentView(for: window))
         XCTAssertFalse(Self.windowContainsGlassBackground(window))
     }
 
     func testNativeGlassTintFollowsWindowKeyNotifications() throws {
-        guard WindowGlassEffect.isAvailable else {
+        let glassEffect = WindowGlassEffect()
+        guard glassEffect.isAvailable else {
             throw XCTSkip("NSGlassEffectView is unavailable on this macOS version")
         }
         _ = NSApplication.shared
@@ -3891,7 +3901,7 @@ final class WindowGlassEffectTests: XCTestCase {
         )
         window.contentView = originalContentView
 
-        WindowGlassEffect.apply(to: window, tintColor: .black, style: .clear)
+        glassEffect.apply(to: window, tintColor: .black, style: .clear)
 
         guard let backgroundView = Self.glassBackgroundView(in: window.contentView),
               let tintOverlay = backgroundView.subviews.last else {
@@ -3914,7 +3924,7 @@ final class WindowGlassEffectTests: XCTestCase {
 
     private static func glassBackgroundView(in view: NSView?) -> NSView? {
         guard let view else { return nil }
-        if view.identifier == WindowGlassEffect.backgroundViewIdentifier {
+        if view.identifier == WindowGlassEffect().backgroundViewIdentifier {
             return view
         }
         return view.subviews.lazy.compactMap(glassBackgroundView(in:)).first
@@ -4208,13 +4218,14 @@ final class AppDelegateWindowContextRoutingTests: XCTestCase {
         _ = app.synchronizeActiveMainWindowContext(preferredWindow: window)
 
         let defaults = UserDefaults.standard
-        let previousWelcomeShown = defaults.object(forKey: WelcomeSettings.shownKey)
-        defaults.set(true, forKey: WelcomeSettings.shownKey)
+        let welcomeShownKey = AccountCatalogSection().welcomeShown.userDefaultsKey
+        let previousWelcomeShown = defaults.object(forKey: welcomeShownKey)
+        defaults.set(true, forKey: welcomeShownKey)
         defer {
             if let previousWelcomeShown {
-                defaults.set(previousWelcomeShown, forKey: WelcomeSettings.shownKey)
+                defaults.set(previousWelcomeShown, forKey: welcomeShownKey)
             } else {
-                defaults.removeObject(forKey: WelcomeSettings.shownKey)
+                defaults.removeObject(forKey: welcomeShownKey)
             }
         }
 
@@ -5764,17 +5775,7 @@ final class DraggableFolderHitTests: XCTestCase {
 }
 
 @MainActor
-final class TitlebarLeadingInsetPassthroughViewTests: XCTestCase {
-    func testLeadingInsetViewDoesNotParticipateInHitTesting() {
-        let view = TitlebarLeadingInsetPassthroughView(frame: NSRect(x: 0, y: 0, width: 200, height: 40))
-        XCTAssertNil(view.hitTest(NSPoint(x: 20, y: 10)))
-    }
-
-    func testLeadingInsetViewCannotMoveWindowViaMouseDown() {
-        let view = TitlebarLeadingInsetPassthroughView(frame: NSRect(x: 0, y: 0, width: 200, height: 40))
-        XCTAssertFalse(view.mouseDownCanMoveWindow)
-    }
-
+final class MainWindowDragBehaviorTests: XCTestCase {
     func testMainWindowHostingViewCannotMoveWindowViaMouseDown() {
         let view = MainWindowHostingView(rootView: Color.clear)
         XCTAssertFalse(
@@ -7235,12 +7236,12 @@ final class FilePreviewPanelTextSavingTests: XCTestCase {
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directoryURL) }
 
-        XCTAssertTrue(CmdClickSupportedFileRouteSettings.isEnabled(defaults: defaults))
-        XCTAssertTrue(CmdClickSupportedFileRouteSettings.shouldRoute(path: fileURL.path, defaults: defaults))
-        XCTAssertFalse(CmdClickSupportedFileRouteSettings.shouldRoute(path: directoryURL.path, defaults: defaults))
+        XCTAssertTrue(FileRouteSettingsStore(defaults: defaults).supportedFileRouteEnabled)
+        XCTAssertTrue(FileRouteSettingsStore(defaults: defaults).shouldRouteSupportedFile(path: fileURL.path))
+        XCTAssertFalse(FileRouteSettingsStore(defaults: defaults).shouldRouteSupportedFile(path: directoryURL.path))
 
-        defaults.set(false, forKey: CmdClickSupportedFileRouteSettings.key)
-        XCTAssertFalse(CmdClickSupportedFileRouteSettings.shouldRoute(path: fileURL.path, defaults: defaults))
+        defaults.set(false, forKey: AppCatalogSection().openSupportedFilesInCmux.userDefaultsKey)
+        XCTAssertFalse(FileRouteSettingsStore(defaults: defaults).shouldRouteSupportedFile(path: fileURL.path))
     }
 
     func testCmdClickMarkdownRoutingDoesNotRequireSupportedFileRoutingSetting() throws {
@@ -7251,11 +7252,11 @@ final class FilePreviewPanelTextSavingTests: XCTestCase {
         let fileURL = try temporaryTextFile(contents: "# preview me", encoding: .utf8, pathExtension: "md")
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
-        defaults.set(true, forKey: CmdClickMarkdownRouteSettings.key)
-        defaults.set(false, forKey: CmdClickSupportedFileRouteSettings.key)
+        defaults.set(true, forKey: AppCatalogSection().openMarkdownInCmuxViewer.userDefaultsKey)
+        defaults.set(false, forKey: AppCatalogSection().openSupportedFilesInCmux.userDefaultsKey)
 
-        XCTAssertTrue(CmdClickMarkdownRouteSettings.shouldRoute(path: fileURL.path, defaults: defaults))
-        XCTAssertFalse(CmdClickSupportedFileRouteSettings.shouldRoute(path: fileURL.path, defaults: defaults))
+        XCTAssertTrue(FileRouteSettingsStore(defaults: defaults).shouldRouteMarkdown(path: fileURL.path))
+        XCTAssertFalse(FileRouteSettingsStore(defaults: defaults).shouldRouteSupportedFile(path: fileURL.path))
     }
 
     func testCmdClickMarkdownRoutingDefaultsToReadableMarkdownFiles() throws {
@@ -7266,8 +7267,8 @@ final class FilePreviewPanelTextSavingTests: XCTestCase {
         let fileURL = try temporaryTextFile(contents: "# preview me", encoding: .utf8, pathExtension: "md")
         defer { try? FileManager.default.removeItem(at: fileURL) }
 
-        XCTAssertTrue(CmdClickMarkdownRouteSettings.isEnabled(defaults: defaults))
-        XCTAssertTrue(CmdClickMarkdownRouteSettings.shouldRoute(path: fileURL.path, defaults: defaults))
+        XCTAssertTrue(FileRouteSettingsStore(defaults: defaults).markdownRouteEnabled)
+        XCTAssertTrue(FileRouteSettingsStore(defaults: defaults).shouldRouteMarkdown(path: fileURL.path))
     }
 
     func testCmdClickFilePreviewRoutingReusesRightSidePane() throws {

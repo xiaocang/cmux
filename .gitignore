@@ -68,3 +68,6 @@ artifacts/
 # Local diagnostic logs - never commit
 /crash.log
 /error.log
+
+# tmux verbose debug logs (tmux -v) that land in the cwd
+tmux-*.log
