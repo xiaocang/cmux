@@ -6001,6 +6001,70 @@ extension SessionPersistenceTests {
         XCTAssertNil(cleanScanBinding)
     }
 
+    @MainActor
+    func testLiveShellResumeBindingSuppressesNestedOmpAgentResumeSnapshot() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory
+            .appendingPathComponent("cmux-livesh-omp-resume-\(UUID().uuidString)", isDirectory: true)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+
+        let workspace = Workspace()
+        let panelId = try XCTUnwrap(workspace.focusedPanelId)
+        let agent = SessionRestorableAgentSnapshot(
+            kind: .custom("omp"),
+            sessionId: "omp-session",
+            workingDirectory: "/tmp/project",
+            launchCommand: AgentLaunchCommandSnapshot(
+                launcher: "omp",
+                executablePath: "/usr/local/bin/omp",
+                arguments: ["/usr/local/bin/omp", "--session", "omp-session"],
+                workingDirectory: "/tmp/project",
+                environment: nil
+            ),
+            registration: .builtInOmp
+        )
+        let panelKey = RestorableAgentSessionIndex.PanelKey(workspaceId: workspace.id, panelId: panelId)
+        let agentIndex = RestorableAgentSessionIndex.load(
+            homeDirectory: root.path,
+            fileManager: fm,
+            registry: CmuxVaultAgentRegistry(registrations: [.builtInOmp]),
+            detectedSnapshots: [
+                panelKey: (
+                    snapshot: agent,
+                    updatedAt: 20,
+                    processIDs: [42],
+                    sessionIDSource: .explicit
+                ),
+            ],
+            processArgumentsProvider: { _ in nil }
+        )
+        XCTAssertTrue(
+            workspace.setSurfaceResumeBinding(
+                SurfaceResumeBindingSnapshot(
+                    name: "livesh sh_abc",
+                    kind: "livesh",
+                    command: "'livesh' '--open' 'sh_abc'",
+                    cwd: "/tmp/project",
+                    checkpointId: "sh_abc",
+                    source: "process-detected",
+                    autoResume: true,
+                    updatedAt: 30
+                ),
+                panelId: panelId
+            )
+        )
+
+        let snapshot = workspace.sessionSnapshot(
+            includeScrollback: false,
+            restorableAgentIndex: agentIndex
+        )
+        let terminal = try XCTUnwrap(snapshot.panels.first?.terminal)
+        XCTAssertNil(terminal.agent, "livesh resume must own restore for the pane instead of persisting a nested OMP resume")
+        XCTAssertEqual(terminal.resumeBinding?.kind, "livesh")
+        XCTAssertEqual(terminal.resumeBinding?.checkpointId, "sh_abc")
+    }
+
     func testTmuxProcessDetectedResumeBindingPreservesSocketFlags() throws {
         let binding = try XCTUnwrap(
             SurfaceResumeBindingIndex.tmuxResumeBindingForTesting(

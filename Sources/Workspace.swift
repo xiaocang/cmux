@@ -375,8 +375,13 @@ extension Workspace {
         resumeBinding: SurfaceResumeBindingSnapshot?
     ) -> SessionPanelSnapshot? {
         guard let panel = panels[panelId] else { return nil }
+        // livesh owns the restorable terminal when present. Persisting an OMP/Pi-style
+        // agent resume snapshot alongside the livesh bridge makes restore expose two
+        // competing startup sources for the same pane; reattaching `livesh --open` is
+        // the durable operation, and the agent continues inside that shell.
+        let liveShellResumeOwnsStartup = resumeBinding?.kind == "livesh"
 
-        if let restorableAgent {
+        if let restorableAgent, !liveShellResumeOwnsStartup {
             let fingerprint = TabManager.restorableAgentSnapshotFingerprint(restorableAgent)
             if invalidatedRestoredAgentFingerprintsByPanelId[panelId] == fingerprint {
                 clearRestoredAgentSnapshot(panelId: panelId)
@@ -391,7 +396,9 @@ extension Workspace {
             }
         }
         let hibernationState = (panel as? TerminalPanel)?.agentHibernationState
-        let effectiveRestorableAgent = hibernationState?.agent ?? restoredAgentSnapshotsByPanelId[panelId]
+        let effectiveRestorableAgent = liveShellResumeOwnsStartup
+            ? nil
+            : (hibernationState?.agent ?? restoredAgentSnapshotsByPanelId[panelId])
 
         let panelTitle = panelTitle(panelId: panelId)
         let customTitle = panelCustomTitles[panelId]
