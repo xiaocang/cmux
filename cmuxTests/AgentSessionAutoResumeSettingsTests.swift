@@ -572,6 +572,69 @@ final class AgentSessionAutoResumeSettingsTests: XCTestCase {
     }
 
     @MainActor
+    func testLiveShellResumeBindingSuppressesOmpAgentAutoResume() throws {
+        let defaults = UserDefaults.standard
+        let key = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
+        let previous = defaults.object(forKey: key)
+        defer {
+            if let previous {
+                defaults.set(previous, forKey: key)
+            } else {
+                defaults.removeObject(forKey: key)
+            }
+        }
+        defaults.set(true, forKey: key)
+
+        let source = Workspace()
+        var snapshot = source.sessionSnapshot(includeScrollback: false)
+        let panelIndex = try XCTUnwrap(snapshot.panels.indices.first)
+        snapshot.panels[panelIndex].terminal?.agent = SessionRestorableAgentSnapshot(
+            kind: .custom("omp"),
+            sessionId: "1bbbcfd1-f0c9-4351-ab19-c860a1f1bb62",
+            workingDirectory: "/tmp/repo",
+            launchCommand: AgentLaunchCommandSnapshot(
+                launcher: "omp",
+                executablePath: "/usr/local/bin/omp",
+                arguments: ["/usr/local/bin/omp", "--resume", "stale-omp-session"],
+                workingDirectory: "/tmp/repo",
+                environment: nil,
+                capturedAt: 1_777_777_777,
+                source: "process"
+            )
+        )
+        snapshot.panels[panelIndex].terminal?.wasAgentRunning = true
+        snapshot.panels[panelIndex].terminal?.resumeBinding = SurfaceResumeBindingSnapshot(
+            name: "livesh live-session",
+            kind: "livesh",
+            command: "/Users/example/.local/bin/livesh --open live-session",
+            cwd: "/tmp/repo",
+            checkpointId: "live-session",
+            source: "process-detected",
+            autoResume: true,
+            updatedAt: 1_777_777_777
+        )
+
+        let restored = Workspace()
+        restored.restoreSessionSnapshot(snapshot)
+        let restoredPanelId = try XCTUnwrap(restored.focusedPanelId)
+        let restoredPanel = try XCTUnwrap(restored.terminalPanel(for: restoredPanelId))
+
+        XCTAssertNil(restoredPanel.surface.initialInput)
+        XCTAssertEqual(restoredPanel.surface.requestedWorkingDirectory, "/tmp/repo")
+        try assertAgentAutoResumeUsesStartupCommand(
+            restoredPanel,
+            scriptContains: ["livesh --open live-session"],
+            scriptExcludes: ["omp", "1bbbcfd1-f0c9-4351-ab19-c860a1f1bb62"]
+        )
+        XCTAssertNil(restored.restoredAgentResumeStatesByPanelId[restoredPanelId])
+        XCTAssertNil(restored.sessionSnapshot(includeScrollback: false).panels.first?.terminal?.agent)
+        XCTAssertEqual(
+            restored.sessionSnapshot(includeScrollback: false).panels.first?.terminal?.resumeBinding?.kind,
+            "livesh"
+        )
+    }
+
+    @MainActor
     func testNonAgentResumeBindingDoesNotMarkRestoredAgentAwaitingAutoResume() throws {
         let defaults = UserDefaults.standard
         let key = AgentSessionAutoResumeSettings.autoResumeAgentSessionsKey
@@ -712,6 +775,7 @@ final class AgentSessionAutoResumeSettingsTests: XCTestCase {
     private func assertAgentAutoResumeUsesStartupCommand(
         _ panel: TerminalPanel,
         scriptContains needles: [String],
+        scriptExcludes excludedNeedles: [String] = [],
         file: StaticString = #filePath,
         line: UInt = #line
     ) throws {
@@ -722,6 +786,9 @@ final class AgentSessionAutoResumeSettingsTests: XCTestCase {
         let script = try String(contentsOfFile: scriptPath, encoding: .utf8)
         for needle in needles {
             XCTAssertTrue(script.contains(needle), script, file: file, line: line)
+        }
+        for needle in excludedNeedles {
+            XCTAssertFalse(script.contains(needle), script, file: file, line: line)
         }
         XCTAssertTrue(script.contains("CMUX_SHELL_INTEGRATION_DIR"), script, file: file, line: line)
         XCTAssertTrue(script.contains("CMUX_ZSH_ZDOTDIR"), script, file: file, line: line)

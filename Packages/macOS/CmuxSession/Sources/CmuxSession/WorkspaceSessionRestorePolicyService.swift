@@ -134,7 +134,7 @@ public struct WorkspaceSessionRestorePolicyService<Binding: WorkspaceSurfaceResu
         allowLauncherScript: Bool = true,
         fileManager: FileManager = .default
     ) -> WorkspaceSurfaceResumeStartupLaunch? {
-        if effectiveBinding.isAgentHookBinding,
+        if (effectiveBinding.isAgentHookBinding || effectiveBinding.kind == "livesh"),
            allowLauncherScript,
            let command = effectiveBinding.startupCommandWithLauncherScript(
                fileManager: fileManager,

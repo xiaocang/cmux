@@ -175,6 +175,26 @@ struct WorkspaceSessionRestorePolicyServiceTests {
         ) == "input:claude --resume:launcher=false")
     }
 
+    @Test("livesh bindings launch as startup commands")
+    func liveshBindingsLaunchAsStartupCommands() throws {
+        let service = makeService()
+        let binding = FakeBinding(
+            source: "process-detected",
+            kind: "livesh",
+            command: "'livesh' '--open' 'sh_449e1dcc'",
+            isProcessDetected: true,
+            allowsAutomaticResume: true
+        )
+
+        let launch = try #require(service.surfaceResumeStartupLaunch(
+            binding,
+            autoResumeAgentSessions: false,
+            approvalStoreURL: URL(fileURLWithPath: "/tmp/cmux-approvals.json", isDirectory: false)
+        ))
+
+        #expect(launch == .command("command:'livesh' '--open' 'sh_449e1dcc'"))
+    }
+
     @Test("Hermes agent bindings receive Codex bootstrap and provider rewrite")
     func hermesAgentBindingsReceiveCodexBootstrap() throws {
         let service = makeService(

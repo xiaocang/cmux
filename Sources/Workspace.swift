@@ -1123,13 +1123,15 @@ extension Workspace {
         switch snapshot.type {
         case .terminal:
             let resumeBinding = snapshot.terminal?.resumeBinding
-            let restorableAgent = snapshot.terminal?.agent
+            let liveShellResumeOwnsStartup = resumeBinding?.kind == "livesh"
+            let restorableAgent = liveShellResumeOwnsStartup ? nil : snapshot.terminal?.agent
             let restoredHibernation = snapshot.terminal?.hibernation
             let autoResumeAgentSessions = AgentSessionAutoResumeSettings.isEnabled()
             // Only auto-resume if the agent was actively running when the snapshot was saved.
             // wasAgentRunning == nil means a legacy snapshot; treat as true for backwards compatibility.
+            // A livesh binding owns the shell and any OMP/Pi/agent already running inside it.
             let agentWasRunningAtQuit = snapshot.terminal?.wasAgentRunning ?? true
-            let shouldAutoResumeAgent = autoResumeAgentSessions && agentWasRunningAtQuit
+            let shouldAutoResumeAgent = autoResumeAgentSessions && agentWasRunningAtQuit && !liveShellResumeOwnsStartup
             let resumeBindingForStartup =
                 restoredHibernation != nil ||
                 (resumeBinding?.isProcessDetected == true && resumeBinding?.autoResume != true)
