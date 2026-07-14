@@ -3727,6 +3727,7 @@ struct OmnibarState: Equatable {
     /// a row auto-selected for an older query can never hijack Return.
     var selectionIsExplicit: Bool = false
     var isUserEditing: Bool = false
+    var hasExplicitSuggestionSelection: Bool = false
 }
 
 enum OmnibarEvent: Equatable {

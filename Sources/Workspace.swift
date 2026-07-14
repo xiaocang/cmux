@@ -3862,7 +3862,7 @@ final class Workspace: Identifiable, ObservableObject {
             }) else {
                 continue
             }
-            focusPanel(panelId, focusIntent: .browser(.webView))
+            focusPanel(panelId)
             return browserPanel
         }
 
