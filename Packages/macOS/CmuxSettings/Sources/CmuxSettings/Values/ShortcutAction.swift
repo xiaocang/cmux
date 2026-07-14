@@ -12,6 +12,7 @@ public enum ShortcutAction: String, CaseIterable, Sendable, Hashable, SettingCod
     case reloadConfiguration
     case showHideAllWindows
     case globalSearch
+    case leaderKey
     case newWindow
     case closeWindow
     case toggleFullScreen
@@ -187,7 +188,7 @@ extension ShortcutAction {
     /// Which group this action belongs to in the settings pane.
     public var group: Group {
         switch self {
-        case .openSettings, .reloadConfiguration, .showHideAllWindows, .globalSearch,
+        case .openSettings, .reloadConfiguration, .showHideAllWindows, .globalSearch, .leaderKey,
              .newWindow, .closeWindow, .toggleFullScreen, .quit:
             return .app
         case .toggleSidebar, .newTab, .newBrowserWorkspace, .saveLayoutTemplate, .openFolder, .reopenPreviousSession, .goToWorkspace,
@@ -341,6 +342,7 @@ extension ShortcutAction {
         case .reloadConfiguration: return "Reload Configuration"
         case .showHideAllWindows: return "Show/Hide All Windows"
         case .globalSearch: return "Global Search"
+        case .leaderKey: return String(localized: "shortcut.leaderKey.label", defaultValue: "Leader Key (tmux prefix)")
         case .newWindow: return "New Window"
         case .closeWindow: return "Close Window"
         case .toggleFullScreen: return "Toggle Full Screen"

@@ -37,6 +37,7 @@ extension TerminalController: ControlWorkspaceContext {
             remoteStatus: JSONValue(foundationObject: workspace.remoteStatusPayload()) ?? .object([:]),
             currentDirectory: workspace.presentedCurrentDirectory ?? "",
             customColor: workspace.customColor,
+            tag: workspace.tag,
             latestConversationMessage: workspace.latestConversationMessage,
             latestSubmittedMessage: workspace.latestSubmittedMessage,
             latestSubmittedAt: workspace.latestSubmittedAt.map(CmuxEventBus.isoTimestamp)

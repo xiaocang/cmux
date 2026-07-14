@@ -25,6 +25,13 @@ typealias Tab = Workspace
 
 private let tabManagerLogger = Logger(subsystem: "com.cmuxterm.app", category: "TabManager")
 
+// KVO-observable accessor for workspace tags toggle
+extension UserDefaults {
+    @objc dynamic var workspaceTagsEnabled: Bool {
+        bool(forKey: LeaderKeySettings.workspaceTagsEnabledKey)
+    }
+}
+
 enum WorkspaceOrderChangeNotificationKey {
     static let movedWorkspaceIds = "movedWorkspaceIds"
 }
@@ -225,6 +232,7 @@ class TabManager: ObservableObject {
     /// Set by `restoreSessionSnapshot` to suppress side-effects (like auto-
     /// expanding a group on focus) that would mutate restored state mid-restore.
     private var isRestoringSessionSnapshot: Bool = false
+    @Published var isLeaderModeActive: Bool = false
     @Published private(set) var isWorkspaceCycleHot: Bool = false
     @Published private(set) var pendingBackgroundWorkspaceLoadIds: Set<UUID> = []
     @Published private(set) var mountedBackgroundWorkspaceLoadIds: Set<UUID> = []
@@ -370,6 +378,7 @@ class TabManager: ObservableObject {
             }
     }
     private var observers: [NSObjectProtocol] = []
+    private var workspaceTagsObservation: NSKeyValueObservation?
     private var lastFocusedPanelByTab: [UUID: UUID] = [:]
     private struct PanelTitleUpdateKey: Hashable {
         let tabId: UUID
@@ -584,6 +593,19 @@ class TabManager: ObservableObject {
                 workspaceCurrentDirectoryDidChange(workspaceId: workspaceId)
             }
         })
+
+        workspaceTagsObservation = UserDefaults.standard.observe(
+            \.workspaceTagsEnabled,
+            options: [.old, .new]
+        ) { [weak self] _, change in
+            guard change.oldValue != change.newValue else { return }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                for workspace in tabs {
+                    workspace.objectWillChange.send()
+                }
+            }
+        }
 
         startAgentPIDSweepTimer()
         observers.append(NotificationCenter.default.addObserver(

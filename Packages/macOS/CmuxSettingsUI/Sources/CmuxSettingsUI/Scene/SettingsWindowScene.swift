@@ -487,6 +487,9 @@ public struct SettingsWindowRoot: View {
         )
         .id(anchorID(for: .globalHotkey))
 
+        LeaderKeySection(defaultsStore: defaultsStore, catalog: catalog)
+            .id(anchorID(for: .leaderKey))
+
         KeyboardShortcutsSection(
             jsonStore: jsonStore,
             catalog: catalog,

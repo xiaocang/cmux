@@ -191,6 +191,9 @@ enum KeyboardShortcutSettings {
         case diffViewerOpenFileSearch
         case diffViewerNextFile, diffViewerPreviousFile
 
+        // Leader key (tmux-style prefix)
+        case leaderKey
+
         var id: String { rawValue }
 
         var label: String {
@@ -317,6 +320,7 @@ enum KeyboardShortcutSettings {
             case .diffViewerOpenFileSearch: return String(localized: "shortcut.diffViewerOpenFileSearch.label", defaultValue: "Diff Viewer: Open File Search")
             case .diffViewerNextFile: return String(localized: "shortcut.diffViewerNextFile.label", defaultValue: "Diff Viewer: Next File")
             case .diffViewerPreviousFile: return String(localized: "shortcut.diffViewerPreviousFile.label", defaultValue: "Diff Viewer: Previous File")
+            case .leaderKey: return String(localized: "shortcut.leaderKey.label", defaultValue: "Leader Key (tmux prefix)")
             }
         }
 
@@ -611,6 +615,9 @@ enum KeyboardShortcutSettings {
                     first: ShortcutStroke(key: "[", command: false, shift: false, option: false, control: false),
                     second: ShortcutStroke(key: "f", command: false, shift: false, option: false, control: false)
                 )
+            case .leaderKey:
+                // tmux default: Ctrl+B
+                return StoredShortcut(key: "b", command: false, shift: false, option: false, control: true)
             }
         }
 

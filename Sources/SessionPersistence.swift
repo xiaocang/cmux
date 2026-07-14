@@ -1747,6 +1747,7 @@ struct SessionWorkspaceSnapshot: Codable, Sendable {
     /// Provenance of `customTitle`; absent provenance restores as user-set for compatibility.
     var customTitleSource: Workspace.CustomTitleSource? = nil
     var customDescription: String?
+    var tag: String?
     var customColor: String?
     var isPinned: Bool
     var groupId: UUID? = nil

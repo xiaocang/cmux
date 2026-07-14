@@ -8123,12 +8123,7 @@ struct ContentView: View {
     }
 
     private static func commandPaletteWorkspaceDisplayName(_ workspace: Workspace) -> String {
-        let custom = workspace.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !custom.isEmpty {
-            return custom
-        }
-        let title = workspace.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        return title.isEmpty ? String(localized: "workspace.displayName.fallback", defaultValue: "Workspace") : title
+        workspace.displayTitle
     }
 
     private func workspaceDisplayName(_ workspace: Workspace) -> String {
@@ -9156,7 +9151,13 @@ struct ContentView: View {
         }
         let target = CommandPaletteRenameTarget(
             kind: .workspace(workspaceId: workspace.id),
-            currentName: workspaceDisplayName(workspace)
+            currentName: {
+                if let custom = workspace.customTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !custom.isEmpty {
+                    return custom
+                }
+                return workspace.title
+            }()
         )
         startRenameFlow(target)
     }
@@ -10344,19 +10345,36 @@ struct VerticalTabsSidebar: View {
             visibleWorkspaceRowIds: visibleWorkspaceRowIds
         )
         let _ = SidebarProfilingSignposts.end(signpost)
-        ZStack(alignment: .bottomLeading) {
-            if CmuxExtensionSidebarSelection.resolvesToDefaultSidebar(effectiveProviderId: effectiveExtensionSidebarProviderId) {
-                workspaceScrollArea(renderContext: renderContext)
-            } else {
-                extensionSidebarScrollArea(renderContext: renderContext)
+        VStack(spacing: 0) {
+            // Leader key mode indicator — pinned above the scroll area
+            if tabManager.isLeaderModeActive {
+                HStack {
+                    Spacer()
+                    Text(String(localized: "leader.mode.indicator", defaultValue: "LEADER"))
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.accentColor.opacity(0.2))
+                        .cornerRadius(3)
+                    Spacer()
+                }
+                .padding(.vertical, 4)
             }
-            SidebarFooter(
-                updateViewModel: updateViewModel,
-                fileExplorerState: fileExplorerState,
-                modifierKeyMonitor: modifierKeyMonitor,
-                onSendFeedback: onSendFeedback
-            )
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            ZStack(alignment: .bottomLeading) {
+                if CmuxExtensionSidebarSelection.resolvesToDefaultSidebar(effectiveProviderId: effectiveExtensionSidebarProviderId) {
+                    workspaceScrollArea(renderContext: renderContext)
+                } else {
+                    extensionSidebarScrollArea(renderContext: renderContext)
+                }
+                SidebarFooter(
+                    updateViewModel: updateViewModel,
+                    fileExplorerState: fileExplorerState,
+                    modifierKeyMonitor: modifierKeyMonitor,
+                    onSendFeedback: onSendFeedback
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .accessibilityIdentifier("Sidebar")
         .ignoresSafeArea()
@@ -14265,7 +14283,7 @@ struct TabItemView: View, Equatable {
 
         return SidebarWorkspaceSnapshotBuilder.Snapshot(
             presentationKey: workspaceSnapshotPresentationKey,
-            title: tab.title,
+            title: tab.displayTitle,
             customDescription: settings.showsWorkspaceDescription ? sidebarVisibleCustomDescription : nil,
             isPinned: tab.isPinned,
             customColorHex: tab.customColor,
