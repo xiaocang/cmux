@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import pty
 import shutil
 import socket
 import subprocess
@@ -41,6 +42,41 @@ def parse_settings_arg(argv: list[str]) -> dict:
     return json.loads(argv[index + 1])
 
 
+def run_wrapper_process(
+    wrapper: Path,
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    with_pty: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    if not with_pty:
+        return subprocess.run(
+            [str(wrapper), *argv],
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    master_fd, slave_fd = pty.openpty()
+    try:
+        return subprocess.run(
+            [str(wrapper), *argv],
+            cwd=cwd,
+            env=env,
+            stdin=slave_fd,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    finally:
+        os.close(master_fd)
+        os.close(slave_fd)
+
+
 def run_wrapper(
     *,
     socket_state: str,
@@ -48,6 +84,7 @@ def run_wrapper(
     node_options: str | None = None,
     tmpdir: str | None = None,
     hooks_disabled: bool = False,
+    with_pty: bool = True,
 ) -> tuple[int, list[str], list[str], str, str, str, str, str, str, str]:
     with tempfile.TemporaryDirectory(prefix="cmux-claude-wrapper-test-") as td:
         tmp = Path(td)
@@ -192,13 +229,12 @@ exit 0
             env["NODE_OPTIONS"] = node_options
 
         try:
-            proc = subprocess.run(
-                [str(wrapper), *argv],
+            proc = run_wrapper_process(
+                wrapper,
+                argv,
                 cwd=tmp,
                 env=env,
-                capture_output=True,
-                text=True,
-                check=False,
+                with_pty=with_pty,
             )
         finally:
             if test_socket is not None:
@@ -315,14 +351,7 @@ exit 0
             env["FAKE_REAL_ENV_LOG"] = str(env_log)
             env["FAKE_REAL_ARGS_LOG"] = str(args_log)
 
-            proc = subprocess.run(
-                [str(wrapper), *argv],
-                cwd=tmp,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            proc = run_wrapper_process(wrapper, argv, cwd=tmp, env=env)
         finally:
             test_socket.close()
 
@@ -459,14 +488,7 @@ exit 0
                 env.update(setup_env(tmp))
             env.update(inherited_env)
 
-            proc = subprocess.run(
-                [str(wrapper), *argv],
-                cwd=tmp,
-                env=env,
-                capture_output=True,
-                text=True,
-                check=False,
-            )
+            proc = run_wrapper_process(wrapper, argv, cwd=tmp, env=env)
         finally:
             if test_socket is not None:
                 test_socket.close()
@@ -1878,6 +1900,17 @@ def test_stale_socket_skips_hook_injection(failures: list[str]) -> None:
     expect(hook_cmux_bin == "__UNSET__", f"stale socket: expected hook cmux unset, got {hook_cmux_bin!r}", failures)
 
 
+def test_non_pty_invocation_skips_hook_injection(failures: list[str]) -> None:
+    code, real_argv, cmux_log, stderr, _, _, _, _, _, _ = run_wrapper(
+        socket_state="live",
+        argv=["hello"],
+        with_pty=False,
+    )
+    expect(code == 0, f"non-PTY: wrapper exited {code}: {stderr}", failures)
+    expect(real_argv == ["hello"], f"non-PTY: unexpected args {real_argv}", failures)
+    expect(not cmux_log, f"non-PTY: unexpected socket probe {cmux_log}", failures)
+
+
 def main() -> int:
     if ensure_node_on_path() is None:
         print("SKIP: node runtime not found; wrapper fakes exec node")
@@ -1891,6 +1924,7 @@ def main() -> int:
     test_live_socket_invalid_settings_warns_and_falls_back(failures)
     test_live_socket_merges_settings_file_form(failures)
     test_live_socket_empty_settings_warns_instead_of_silent_drop(failures)
+    test_non_pty_invocation_skips_hook_injection(failures)
     test_plain_claude_launch_argv_has_no_empty_argument(failures)
     test_command_like_invocations_bypass_hook_injection(failures)
     test_passthrough_flags_bypass_hook_injection(failures)
