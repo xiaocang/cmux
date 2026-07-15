@@ -1,3 +1,5 @@
+import Bonsplit
+import CmuxPanes
 import CmuxWorkspaces
 import Foundation
 
@@ -148,7 +150,7 @@ extension Workspace {
     /// Returns pane IDs in visual split-tree order, falling back to controller order.
     private func visuallyOrderedPaneIds() -> [PaneID] {
         let allPaneIds = bonsplitController.allPaneIds
-        let orderedIDs = SidebarBranchOrdering.orderedPaneIds(tree: bonsplitController.treeSnapshot())
+        let orderedIDs = bonsplitController.treeSnapshot().orderedPaneIds
         let paneByID = Dictionary(uniqueKeysWithValues: allPaneIds.map { ($0.id.uuidString, $0) })
         let orderedPaneIds = orderedIDs.compactMap { paneByID[$0] }
         return orderedPaneIds.count == allPaneIds.count ? orderedPaneIds : allPaneIds
