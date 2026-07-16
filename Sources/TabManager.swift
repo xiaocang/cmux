@@ -465,6 +465,20 @@ class TabManager: ObservableObject {
     // entry points.
     let sidebarGitMetadataService: any SidebarGitMetadataServing
     let pullRequestProbing: any PullRequestProbing
+    let ghprMetadataService: GHPRMetadataService
+    @Published private(set) var ghprRefreshState = GHPRRefreshState()
+
+    func updateGHPRRefreshState(_ state: GHPRRefreshState) {
+        if ghprRefreshState != state {
+            ghprRefreshState = state
+#if DEBUG
+            cmuxDebugLog(
+                "ghpr.refresh.state refreshing=\(state.isRefreshing ? 1 : 0) " +
+                    "updated=\(state.lastUpdated == nil ? 0 : 1) error=\(state.error == nil ? 0 : 1)"
+            )
+#endif
+        }
+    }
 
     init(
         initialWorkspaceTitle: String? = nil,
@@ -475,6 +489,7 @@ class TabManager: ObservableObject {
         gitMetadataService: GitMetadataService = GitMetadataService(),
         workspaceGitMetadataReader: (any WorkspaceGitMetadataReading)? = nil,
         gitPollClock: any GitPollClock = SystemGitPollClock(),
+        ghprFetcher: any GHPRPullRequestFetching = GHPRSocketClient(),
         gitProbeLimiter: WorkspaceGitMetadataProbeLimiter? = nil,
         panelTitleUpdateCoalescer: NotificationBurstCoalescer? = nil,
         settings: any SettingsWriting = UserDefaultsSettingsClient(defaults: .standard),
@@ -512,6 +527,12 @@ class TabManager: ObservableObject {
             debugLog: sidebarGitDebugLog
         )
         self.pullRequestProbing = pullRequestPollService
+        let ghprMetadataService = GHPRMetadataService(
+            fetcher: ghprFetcher,
+            clock: gitPollClock,
+            debugLog: sidebarGitDebugLog
+        )
+        self.ghprMetadataService = ghprMetadataService
         self.sidebarGitMetadataService = SidebarGitMetadataService(
             workspaceGitMetadataReader: workspaceGitMetadataReader ?? gitMetadataService,
             gitMetadataService: gitMetadataService,
@@ -525,6 +546,7 @@ class TabManager: ObservableObject {
         // services, matching the legacy in-class scheduling timing.
         pullRequestProbing.attach(host: self)
         sidebarGitMetadataService.attach(host: self)
+        ghprMetadataService.attach(host: self)
         notificationDismissal.attach(host: self)
         focusHistoryNavigation.attach(host: self)
         // Workspace-list/group/selection storage (CmuxWorkspaces). Attached
@@ -663,6 +685,7 @@ class TabManager: ObservableObject {
     private func sidebarMetadataSettingsDidChange() {
         sidebarGitMetadataService.sidebarGitMetadataWatchSettingsDidChange()
         pullRequestProbing.sidebarPullRequestPollingSettingsDidChange()
+        ghprMetadataService.settingsDidChange()
         refreshRemotePortScanningEnablement()
     }
 

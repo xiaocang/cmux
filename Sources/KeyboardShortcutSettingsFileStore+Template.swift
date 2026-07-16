@@ -190,6 +190,16 @@ extension CmuxSettingsFileStore {
                 ],
             ],
             [
+                "digest": [
+                    "ghpr": [
+                        "enabled": SettingCatalog().digest.ghprEnabled.defaultValue,
+                        "socketPath": SettingCatalog().digest.ghprSocketPath.defaultValue,
+                        "displayItems": ["ci", "review", "unresolved", "jira"],
+                        "jiraBaseURL": SettingCatalog().digest.ghprJiraBaseURL.defaultValue,
+                    ],
+                ],
+            ],
+            [
                 "browser": [
                     "defaultSearchEngine": BrowserSearchSettingsStore.defaultSearchEngine.rawValue,
                     "customSearchEngineName": BrowserSearchSettingsStore.defaultCustomSearchEngineName,
