@@ -115,7 +115,12 @@ CUSTOM_LAYOUT_DECL = re.compile(
 # (`rowsWithGatedDropTargetReader` + `SidebarWorkspaceFrameAnchorModifier`),
 # which lives outside these regions. A future legitimate need must extend this
 # guard consciously rather than slip past it.
-GUARDED_ROW_TYPES = ("TabItemView", "SidebarWorkspaceGroupHeaderView")
+GUARDED_ROW_TYPES = (
+    "TabItemView",
+    "SidebarWorkspaceRowView",
+    "SidebarWorkspaceGroupHeaderView",
+    "SidebarWorkspaceGroupRowView",
+)
 
 ROW_FORBIDDEN_PATTERNS = (
     (re.compile(r"\bGeometryReader\b"),
@@ -524,9 +529,10 @@ def default_targets():
 
     ContentView.swift holds the container functions and TabItemView; the group
     header row view lives in its own file with neither container function; the
-    group-header ROW WRAPPER (`sidebarWorkspaceGroupHeader(...)`) lives in a
+    group-header row builder (`sidebarWorkspaceGroupRow(...)`) lives in a
     third file whose modifier sites wrap the header before it enters the
-    LazyVStack, so the whole file is scanned for the row-forbidden shapes.
+    LazyVStack. The two immutable wrapper views live in their own files and are
+    guarded as row regions as well.
     """
     root = repo_root_dir()
     return (
@@ -548,8 +554,25 @@ def default_targets():
             os.path.join(root, "Sources", "VerticalTabsSidebar+WorkspaceGroups.swift"),
             False,
             (),
+            ("sidebarWorkspaceGroupRow",),
             True,
-            ("sidebarWorkspaceGroupHeader",),
+            ("sidebarWorkspaceGroupRow",),
+        ),
+        (
+            os.path.join(root, "Sources", "SidebarWorkspaceRowView.swift"),
+            False,
+            ("SidebarWorkspaceRowView",),
+            (),
+            False,
+            (),
+        ),
+        (
+            os.path.join(root, "Sources", "SidebarWorkspaceGroupRowView.swift"),
+            False,
+            ("SidebarWorkspaceGroupRowView",),
+            (),
+            False,
+            (),
         ),
     )
 
