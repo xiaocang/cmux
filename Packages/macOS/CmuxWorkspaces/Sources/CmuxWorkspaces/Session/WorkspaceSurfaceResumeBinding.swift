@@ -19,6 +19,8 @@ public protocol WorkspaceSurfaceResumeBinding: Sendable {
     var isProcessDetected: Bool { get }
     /// Whether this binding came from a managed agent hook.
     var isAgentHookBinding: Bool { get }
+    /// Whether this binding must replace the shell process instead of being typed into it.
+    var requiresDirectStartupCommand: Bool { get }
     /// Whether this binding permits automatic resume without prompting.
     var allowsAutomaticResume: Bool { get }
     /// Whether this binding's approval policy requires prompting.
@@ -38,4 +40,8 @@ public protocol WorkspaceSurfaceResumeBinding: Sendable {
         fileManager: FileManager,
         temporaryDirectory: URL
     ) -> String?
+}
+
+public extension WorkspaceSurfaceResumeBinding {
+    var requiresDirectStartupCommand: Bool { false }
 }

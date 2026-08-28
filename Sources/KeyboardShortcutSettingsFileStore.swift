@@ -535,6 +535,14 @@ final class CmuxSettingsFileStore {
         snapshot: inout ResolvedSettingsSnapshot
     ) {
         applyBooleanSettings(TerminalSettingsFileMapping.booleanSettings, from: section, sourcePath: sourcePath, snapshot: &snapshot)
+        applyStringSettings(TerminalSettingsFileMapping.stringSettings, from: section, snapshot: &snapshot)
+        if let raw = jsonString(section["shellBackend"]),
+           let backend = TerminalShellBackend(rawValue: raw) {
+            snapshot.managedUserDefaults[TerminalCatalogSection().shellBackend.userDefaultsKey] = .string(backend.rawValue)
+        } else if section.keys.contains("shellBackend") {
+            logInvalid("terminal.shellBackend", sourcePath: sourcePath)
+        }
+
         applyTerminalScrollSpeedSetting(from: section, assign: { snapshot.managedUserDefaults[$0] = .double($1) }, logInvalid: { logInvalid($0, sourcePath: sourcePath) })
         if let value = jsonBool(section["showTextBoxOnNewTerminals"]) {
             snapshot.managedUserDefaults[TerminalTextBoxInputSettings.showOnNewTerminalsKey] = .bool(value)

@@ -9,7 +9,7 @@ nonisolated enum BrowserHiddenWebViewDiscardPolicy {
     static let enabledKey = "browserHiddenWebViewDiscardEnabled"
     static let hiddenDelayKey = "browserHiddenWebViewDiscardDelaySeconds"
     static let defaultEnabled = true
-    static let defaultHiddenDelay: TimeInterval = 300
+    static let defaultHiddenDelay: TimeInterval = 0
     static let hiddenWebViewRetentionLimit = 32
     static let minimumHiddenDelay: TimeInterval = 0
     static let maximumHiddenDelay: TimeInterval = 3600

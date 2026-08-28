@@ -18,6 +18,7 @@ struct WorkspaceSessionRestorePolicyServiceTests {
         var environment: [String: String]?
         var isProcessDetected: Bool
         var isAgentHookBinding: Bool
+        var requiresDirectStartupCommand: Bool
         var allowsAutomaticResume: Bool
         var requiresPromptApproval: Bool
         var autoResume: Bool?
@@ -32,6 +33,7 @@ struct WorkspaceSessionRestorePolicyServiceTests {
             environment: [String: String]? = nil,
             isProcessDetected: Bool = false,
             isAgentHookBinding: Bool = false,
+            requiresDirectStartupCommand: Bool = false,
             allowsAutomaticResume: Bool = true,
             requiresPromptApproval: Bool = false,
             autoResume: Bool? = nil
@@ -43,6 +45,7 @@ struct WorkspaceSessionRestorePolicyServiceTests {
             self.environment = environment
             self.isProcessDetected = isProcessDetected
             self.isAgentHookBinding = isAgentHookBinding
+            self.requiresDirectStartupCommand = requiresDirectStartupCommand
             self.allowsAutomaticResume = allowsAutomaticResume
             self.requiresPromptApproval = requiresPromptApproval
             self.autoResume = autoResume
@@ -173,6 +176,39 @@ struct WorkspaceSessionRestorePolicyServiceTests {
             autoResumeAgentSessions: true,
             approvalStoreURL: approvalURL
         ) == "input:claude --resume:launcher=false")
+    }
+
+    @Test("direct startup bindings replace the interactive shell")
+    func directStartupBindingsReplaceInteractiveShell() throws {
+        let service = makeService()
+        let approvalURL = URL(fileURLWithPath: "/tmp/cmux-approvals.json", isDirectory: false)
+        let directLaunch = try #require(service.surfaceResumeStartupLaunch(
+            FakeBinding(
+                source: "process-detected",
+                kind: "livesh",
+                command: "livesh --open sh_123",
+                isProcessDetected: true,
+                requiresDirectStartupCommand: true
+            ),
+            autoResumeAgentSessions: true,
+            approvalStoreURL: approvalURL
+        ))
+        guard case .command(let directCommand) = directLaunch else {
+            Issue.record("expected direct command launch")
+            return
+        }
+        #expect(directCommand == "command:livesh --open sh_123")
+
+        let ordinaryLaunch = try #require(service.surfaceResumeStartupLaunch(
+            FakeBinding(command: "echo ok"),
+            autoResumeAgentSessions: true,
+            approvalStoreURL: approvalURL
+        ))
+        guard case .input(let ordinaryInput) = ordinaryLaunch else {
+            Issue.record("expected interactive input launch")
+            return
+        }
+        #expect(ordinaryInput == "input:echo ok:launcher=true")
     }
 
     @Test("Hermes agent bindings receive Codex bootstrap and provider rewrite")

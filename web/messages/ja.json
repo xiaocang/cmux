@@ -1627,6 +1627,9 @@
         "terminal": {
           "copyOnSelect": "true の場合、選択が確定したときにターミナルで選択したテキストをシステムクリップボードへコピーします。false の場合、cmux は Ghostty の copy-on-select 上書きを出力せず、選択クリップボードの動作は Ghostty の設定と既定値に従います。",
           "scrollSpeed": "ターミナルのスクロールホイールとトラックパッドの移動量に適用される倍率です。値を大きくするとスクロールが速くなり、小さくすると遅くなります。",
+          "shellBackend": "新しいターミナルペインのシェルを cmux から直接実行するか、cmux の再起動後も存続できる livesh 経由で実行するかを選択します。",
+          "liveshExecutablePath": "livesh 実行ファイルへの任意の絶対パスです。空の場合は ~/.local/bin と PATH を検索します。",
+          "liveshctlExecutablePath": "Live Shell の管理コマンドで使用する liveshctl 実行ファイルへの任意の絶対パスです。",
           "showTextBoxOnNewTerminals": "新しいワークスペース、ターミナルタブ、ターミナル分割でベータ版の TextBox 入力を既定で表示します。",
           "focusTextBoxOnNewTerminals": "新しいワークスペース、ターミナルタブ、ターミナル分割でベータ版の TextBox 入力に既定でフォーカスします。フォーカスする場合は TextBox も表示されます。",
           "textBoxDefaultSubmitAction": "新しいターミナルセッションで使う既定の TextBox 送信アクション ID です。通常の入力には text-entry、または設定済みアクション ID のいずれかを使います。",

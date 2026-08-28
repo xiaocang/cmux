@@ -1,4 +1,9 @@
 import Foundation
+import os
+
+// The termination snapshot is synchronous, so retain the last asynchronously
+// validated livesh ids behind a tiny lock instead of blocking quit on liveshctl.
+private nonisolated let liveShellSessionIDCache = OSAllocatedUnfairLock(initialState: Set<String>())
 
 struct ProcessDetectedResumeIndexes: Sendable {
     let restorableAgentIndex: RestorableAgentSessionIndex
@@ -8,16 +13,31 @@ struct ProcessDetectedResumeIndexes: Sendable {
         homeDirectory: String = NSHomeDirectory(),
         fileManager: FileManager = .default
     ) async -> ProcessDetectedResumeIndexes {
-        await Task.detached(priority: .utility) {
-            loadSynchronously(homeDirectory: homeDirectory, fileManager: fileManager, maximumSnapshotAge: 5)
+        let knownLiveShellSessionIDs: Set<String>
+        if let sessions = try? await LiveShellControl.list() {
+            knownLiveShellSessionIDs = Set(sessions.lazy.filter { $0.status == .running }.map(\.id))
+            liveShellSessionIDCache.withLock { $0 = knownLiveShellSessionIDs }
+        } else {
+            knownLiveShellSessionIDs = liveShellSessionIDCache.withLock { $0 }
+        }
+        return await Task.detached(priority: .utility) {
+            loadSynchronously(
+                homeDirectory: homeDirectory,
+                fileManager: fileManager,
+                maximumSnapshotAge: 5,
+                knownLiveShellSessionIDs: knownLiveShellSessionIDs
+            )
         }.value
     }
 
     static func loadSynchronously(
         homeDirectory: String = NSHomeDirectory(),
         fileManager: FileManager = .default,
-        maximumSnapshotAge: TimeInterval? = nil
+        maximumSnapshotAge: TimeInterval? = nil,
+        knownLiveShellSessionIDs: Set<String>? = nil
     ) -> ProcessDetectedResumeIndexes {
+        let knownLiveShellSessionIDs = knownLiveShellSessionIDs
+            ?? liveShellSessionIDCache.withLock { $0 }
         let capturedAt = Date().timeIntervalSince1970
         let processSnapshot = if let maximumSnapshotAge {
             CmuxTopProcessSnapshot.captureCached(includeProcessDetails: true, maximumAge: maximumSnapshotAge)
@@ -40,7 +60,8 @@ struct ProcessDetectedResumeIndexes: Sendable {
         let detectedBindings = SurfaceResumeBindingIndex.processDetectedTmuxBindings(
             fileManager: fileManager,
             processSnapshot: processSnapshot,
-            capturedAt: capturedAt
+            capturedAt: capturedAt,
+            knownLiveShellSessionIDs: knownLiveShellSessionIDs
         )
         return ProcessDetectedResumeIndexes(
             restorableAgentIndex: restorableAgentIndex,

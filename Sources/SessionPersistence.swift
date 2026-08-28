@@ -475,6 +475,10 @@ nonisolated struct SurfaceResumeBindingSnapshot: Codable, Equatable, Sendable {
 }
 
 extension SurfaceResumeBindingSnapshot: WorkspaceSurfaceResumeBinding {
+    var requiresDirectStartupCommand: Bool {
+        kind == "livesh"
+    }
+
     var requiresPromptApproval: Bool {
         approvalPolicy == .prompt
     }

@@ -125,6 +125,27 @@ public struct TerminalCatalogSection: SettingCatalogSection {
         userDefaultsKey: "terminal.textBoxSubmitActions"
     )
 
+    /// Whether new terminal panes run their shell directly or through livesh.
+    public let shellBackend = DefaultsKey<TerminalShellBackend>(
+        id: "terminal.shellBackend",
+        defaultValue: .direct,
+        userDefaultsKey: "terminalShellBackend"
+    )
+
+    /// Absolute path override for the livesh executable.
+    public let liveshExecutablePath = DefaultsKey<String>(
+        id: "terminal.liveshExecutablePath",
+        defaultValue: "",
+        userDefaultsKey: "terminalLiveshExecutablePath"
+    )
+
+    /// Absolute path override for the liveshctl executable.
+    public let liveshctlExecutablePath = DefaultsKey<String>(
+        id: "terminal.liveshctlExecutablePath",
+        defaultValue: "",
+        userDefaultsKey: "terminalLiveshctlExecutablePath"
+    )
+
     public let resumeCommands = JSONKey<[String]>(
         id: "terminal.resumeCommands",
         defaultValue: []

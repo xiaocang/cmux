@@ -1704,6 +1704,9 @@
         "terminal": {
           "copyOnSelect": "When true, copy selected terminal text to the system clipboard when the selection is committed. When false, cmux does not emit a Ghostty copy-on-select override; Ghostty config and defaults control selection-clipboard behavior.",
           "scrollSpeed": "Multiplier applied to terminal scroll wheel and trackpad deltas. Higher values scroll faster; lower values scroll slower.",
+          "shellBackend": "Choose whether new terminal panes run directly under cmux or through livesh so their shells can survive cmux restarts.",
+          "liveshExecutablePath": "Optional absolute path to the livesh executable. Leave empty to search ~/.local/bin and PATH.",
+          "liveshctlExecutablePath": "Optional absolute path to the liveshctl executable used by live-shell management commands.",
           "showTextBoxOnNewTerminals": "Show the beta TextBox input by default for newly created workspaces, terminal tabs, and terminal splits.",
           "focusTextBoxOnNewTerminals": "Focus the beta TextBox input by default for newly created workspaces, terminal tabs, and terminal splits. Focusing also shows the TextBox.",
           "textBoxDefaultSubmitAction": "Default TextBox submit action ID for new terminal sessions. Use text-entry for plain input or one of the configured action IDs.",

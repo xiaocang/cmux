@@ -1927,6 +1927,122 @@ final class BrowserPanelPopupContextTests: XCTestCase {
 
 @MainActor
 final class BrowserPanelWebViewLifecycleTests: XCTestCase {
+    private final class RetentionDelegate: BrowserHiddenWebViewDiscardManagerDelegate {
+        var snapshot: BrowserHiddenWebViewDiscardManager.BlockerSnapshot
+        var hiddenAt: Date?
+        var webViewInstanceID = UUID()
+        var discardReasons: [String] = []
+
+        init(hiddenAt: Date, visible: Bool = false) {
+            self.hiddenAt = hiddenAt
+            snapshot = .init(
+                isClosing: false, isVisibleInUI: visible, shouldRenderWebView: true,
+                hasPendingRemoteNavigation: false, hasCurrentURL: true, isLoading: false,
+                webViewIsLoading: false, hasActiveMainFrameProvisionalNavigation: false,
+                isDownloading: false, activeDownloadCount: 0,
+                preferredDeveloperToolsVisible: false, isDeveloperToolsVisible: false,
+                isElementFullscreenActive: false, isReactGrabActive: false,
+                isVisualAutomationCaptureActive: false, hasPopups: false,
+                isCapturingMedia: false, isPlayingMedia: false
+            )
+        }
+
+        func hiddenWebViewDiscardManagerDidRequestDiscard(
+            _ manager: BrowserHiddenWebViewDiscardManager,
+            reason: String
+        ) {
+            discardReasons.append(reason)
+            manager.markDiscarded(reason: reason, now: Date())
+        }
+
+        func hiddenWebViewDiscardManagerPolicyDidChange(
+            _ manager: BrowserHiddenWebViewDiscardManager,
+            reason: String
+        ) {}
+    }
+
+    private func makeRetentionManager(
+        defaults: UserDefaults,
+        hiddenAt: Date,
+        visible: Bool = false
+    ) -> (BrowserHiddenWebViewDiscardManager, RetentionDelegate) {
+        let manager = BrowserHiddenWebViewDiscardManager(policyDefaults: defaults)
+        let delegate = RetentionDelegate(hiddenAt: hiddenAt, visible: visible)
+        manager.delegate = delegate
+        return (manager, delegate)
+    }
+
+    private func retentionDefaults() throws -> (UserDefaults, String) {
+        let suiteName = "cmux.browserHiddenRetentionTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.set(true, forKey: BrowserHiddenWebViewDiscardPolicy.enabledKey)
+        return (defaults, suiteName)
+    }
+
+    func testHiddenWebViewRetentionEvictsLeastRecentlyUsedOnlyAboveLimit() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CMUX_BROWSER_HIDDEN_WEBVIEW_DISCARD_ENABLED"] != nil)
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CMUX_BROWSER_HIDDEN_WEBVIEW_DISCARD_DELAY_SECONDS"] != nil)
+        let (defaults, suiteName) = try retentionDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(0, forKey: BrowserHiddenWebViewDiscardPolicy.hiddenDelayKey)
+        BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting()
+        defer { BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting() }
+        let now = Date()
+        var fixtures: [(BrowserHiddenWebViewDiscardManager, RetentionDelegate)] = []
+        for index in 0..<BrowserHiddenWebViewDiscardPolicy.hiddenWebViewRetentionLimit {
+            let fixture = makeRetentionManager(defaults: defaults, hiddenAt: now.addingTimeInterval(-100 + Double(index)))
+            fixtures.append(fixture)
+            fixture.0.scheduleIfNeeded(reason: "test.\(index)", now: now)
+        }
+        XCTAssertTrue(fixtures.allSatisfy { $0.1.discardReasons.isEmpty })
+        let newest = makeRetentionManager(defaults: defaults, hiddenAt: now)
+        fixtures.append(newest)
+        newest.0.scheduleIfNeeded(reason: "test.newest", now: now)
+        XCTAssertEqual(fixtures.first?.1.discardReasons.count, 1)
+        XCTAssertTrue(fixtures.first?.1.discardReasons.first?.hasPrefix("lru_retention_limit.") == true)
+        XCTAssertTrue(fixtures.dropFirst().allSatisfy { $0.1.discardReasons.isEmpty })
+    }
+
+    func testHiddenWebViewRetentionHonorsDelayBeforeLRUEviction() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CMUX_BROWSER_HIDDEN_WEBVIEW_DISCARD_ENABLED"] != nil)
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CMUX_BROWSER_HIDDEN_WEBVIEW_DISCARD_DELAY_SECONDS"] != nil)
+        let (defaults, suiteName) = try retentionDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(60, forKey: BrowserHiddenWebViewDiscardPolicy.hiddenDelayKey)
+        BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting()
+        defer { BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting() }
+        let now = Date()
+        var fixtures: [(BrowserHiddenWebViewDiscardManager, RetentionDelegate)] = []
+        for index in 0...BrowserHiddenWebViewDiscardPolicy.hiddenWebViewRetentionLimit {
+            let fixture = makeRetentionManager(defaults: defaults, hiddenAt: now)
+            fixtures.append(fixture)
+            fixture.0.scheduleIfNeeded(reason: "test.\(index)", now: now)
+        }
+        XCTAssertTrue(fixtures.allSatisfy { $0.1.discardReasons.isEmpty })
+    }
+
+    func testHiddenWebViewRetentionSkipsBlockedEntries() throws {
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CMUX_BROWSER_HIDDEN_WEBVIEW_DISCARD_ENABLED"] != nil)
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CMUX_BROWSER_HIDDEN_WEBVIEW_DISCARD_DELAY_SECONDS"] != nil)
+        let (defaults, suiteName) = try retentionDefaults()
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        defaults.set(0, forKey: BrowserHiddenWebViewDiscardPolicy.hiddenDelayKey)
+        BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting()
+        defer { BrowserHiddenWebViewDiscardManager.debugResetRetentionCoordinatorForTesting() }
+        let now = Date()
+        let blocked = makeRetentionManager(defaults: defaults, hiddenAt: now.addingTimeInterval(-100), visible: true)
+        blocked.0.scheduleIfNeeded(reason: "test.blocked", now: now)
+        var eligible: [(BrowserHiddenWebViewDiscardManager, RetentionDelegate)] = []
+        for index in 0...BrowserHiddenWebViewDiscardPolicy.hiddenWebViewRetentionLimit {
+            let fixture = makeRetentionManager(defaults: defaults, hiddenAt: now.addingTimeInterval(-100 + Double(index)))
+            eligible.append(fixture)
+            fixture.0.scheduleIfNeeded(reason: "test.eligible.\(index)", now: now)
+        }
+        XCTAssertTrue(blocked.1.discardReasons.isEmpty)
+        XCTAssertEqual(eligible.first?.1.discardReasons.count, 1)
+        XCTAssertTrue(eligible.dropFirst().allSatisfy { $0.1.discardReasons.isEmpty })
+    }
+
     func testHiddenDiscardPolicyReadsUserDefaults() throws {
         let suiteName = "cmux.browserHiddenDiscardPolicyTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

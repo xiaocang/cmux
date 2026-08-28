@@ -183,6 +183,8 @@ extension TerminalSurface {
             )
         }
 
+        let liveshExecutablePath = spawnPolicy.liveshExecutablePath.flatMap { $0.isEmpty ? nil : $0 }
+
         if spawnPolicy.shellIntegrationEnabled,
            let integrationDir = Bundle.main.resourceURL?.appendingPathComponent("shell-integration").path,
            Self.shellIntegrationDirectoryExists(integrationDir) {
@@ -206,7 +208,9 @@ extension TerminalSurface {
                 to: &env,
                 protectedKeys: &protectedStartupEnvironmentKeys
             ) {
-                if baseConfig.command?.isEmpty != false { baseConfig.command = command }
+                if liveshExecutablePath == nil, baseConfig.command?.isEmpty != false {
+                    baseConfig.command = command
+                }
             }
         }
         env = Self.mergedStartupEnvironment(
@@ -240,6 +244,12 @@ extension TerminalSurface {
         let resolvedCommand: String? = {
             if let initialCommand, !initialCommand.isEmpty {
                 return initialCommand
+            }
+            if let baseCommand = baseConfig.command, !baseCommand.isEmpty {
+                return baseCommand
+            }
+            if let liveshExecutablePath {
+                return liveshExecutablePath
             }
             return baseConfig.command
         }()

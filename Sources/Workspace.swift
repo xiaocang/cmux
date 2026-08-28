@@ -1404,7 +1404,7 @@ extension Workspace {
             let startupHandlesWorkingDirectory =
                 restoredTmuxStartupScript != nil ||
                 restoredAgentResumeLaunch != nil ||
-                (restoredBindingLaunch != nil && resumeBinding?.isAgentHookBinding == true)
+                restoredBindingLaunch?.initialCommand != nil
             // Guarded startup commands cd themselves and tolerate deleted saved directories.
             // Passing the same cwd to Ghostty can fail before the guarded command runs.
             let suppressWorkspaceRemoteStartupCommand =

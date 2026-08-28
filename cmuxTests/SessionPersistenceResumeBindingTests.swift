@@ -9,6 +9,51 @@ import Testing
 #endif
 
 @Suite struct SessionPersistenceResumeBindingTests {
+    @Test func liveshProcessTitleRequiresUniqueKnownDaemonSession() throws {
+        let fullSessionID = "sh_abcd1234567890abcdef1234567890ab"
+        let binding = try #require(SurfaceResumeBindingIndex.liveshResumeBindingForTesting(
+            processName: "livesh (sh_abcd1234)",
+            processPath: "/Users/test/.local/bin/livesh",
+            arguments: ["livesh (sh_abcd1234)", "/tmp"],
+            environment: ["PWD": "/tmp"],
+            knownSessionIDs: [fullSessionID]
+        ))
+
+        #expect(binding.checkpointId == fullSessionID)
+        #expect(binding.command.contains(fullSessionID))
+        #expect(SurfaceResumeBindingIndex.liveshResumeBindingForTesting(
+            processName: "livesh (sh_abcd1234)",
+            processPath: "/Users/test/.local/bin/livesh",
+            arguments: ["livesh (sh_abcd1234)", "/tmp"],
+            environment: ["PWD": "/tmp"],
+            knownSessionIDs: []
+        ) == nil)
+        #expect(SurfaceResumeBindingIndex.liveshResumeBindingForTesting(
+            processName: "livesh (sh_abcd1234)",
+            processPath: "/Users/test/.local/bin/livesh",
+            arguments: ["livesh (sh_abcd1234)", "/tmp"],
+            environment: ["PWD": "/tmp"],
+            knownSessionIDs: [
+                fullSessionID,
+                "sh_abcd1234fedcba0987654321fedcba09",
+            ]
+        ) == nil)
+    }
+
+    @Test func liveshOpenArgumentAlsoResolvesThroughKnownDaemonSessions() throws {
+        let fullSessionID = "sh_1234abcd567890abcdef1234567890ab"
+        let binding = try #require(SurfaceResumeBindingIndex.liveshResumeBindingForTesting(
+            processName: "livesh",
+            processPath: "/Users/test/.local/bin/livesh",
+            arguments: ["livesh", "--open", "sh_1234abcd"],
+            environment: ["PWD": "/tmp"],
+            knownSessionIDs: [fullSessionID]
+        ))
+
+        #expect(binding.checkpointId == fullSessionID)
+        #expect(binding.command.contains(fullSessionID))
+    }
+
     @Test func agentHookSurfaceResumeStartupInputPreservesCustomAbsoluteAgentExecutable() throws {
         let binding = SurfaceResumeBindingSnapshot(
             kind: "codex",

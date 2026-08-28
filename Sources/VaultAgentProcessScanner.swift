@@ -616,10 +616,14 @@ extension SurfaceResumeBindingIndex {
     static func processDetectedTmuxBindings(
         fileManager: FileManager,
         processSnapshot: CmuxTopProcessSnapshot,
-        capturedAt: TimeInterval
+        capturedAt: TimeInterval,
+        knownLiveShellSessionIDs: Set<String> = []
     ) -> [PanelKey: (binding: SurfaceResumeBindingSnapshot, updatedAt: TimeInterval)] {
         _ = fileManager
         var resolved: [PanelKey: (binding: SurfaceResumeBindingSnapshot, updatedAt: TimeInterval)] = [:]
+        // A livesh bridge owns the durable shell id, so it outranks tmux running inside it.
+        var liveshClaimedPanels = Set<PanelKey>()
+
 
         for process in processSnapshot.cmuxScopedProcesses() {
             guard let workspaceId = process.cmuxWorkspaceID,
@@ -628,6 +632,21 @@ extension SurfaceResumeBindingIndex {
                   let processArguments = CmuxTopProcessSnapshot.processArgumentsAndEnvironment(for: process.pid) else {
                 continue
             }
+            let panelKey = PanelKey(workspaceId: workspaceId, panelId: panelId)
+            if let liveshBinding = LiveShellResumeParser.binding(
+                processName: process.name,
+                processPath: process.path,
+                arguments: processArguments.arguments,
+                environment: processArguments.environment,
+                capturedAt: capturedAt,
+                knownSessionIDs: knownLiveShellSessionIDs
+            ) {
+                resolved[panelKey] = (binding: liveshBinding, updatedAt: capturedAt)
+                liveshClaimedPanels.insert(panelKey)
+                continue
+            }
+            guard !liveshClaimedPanels.contains(panelKey) else { continue }
+
             guard let binding = TmuxResumeParser.binding(
                 processName: process.name,
                 processPath: process.path,
@@ -637,7 +656,7 @@ extension SurfaceResumeBindingIndex {
             ) else {
                 continue
             }
-            resolved[PanelKey(workspaceId: workspaceId, panelId: panelId)] = (binding: binding, updatedAt: capturedAt)
+            resolved[panelKey] = (binding: binding, updatedAt: capturedAt)
         }
 
         return resolved
@@ -656,6 +675,24 @@ extension SurfaceResumeBindingIndex {
             arguments: arguments,
             environment: environment,
             capturedAt: capturedAt
+        )
+    }
+
+    static func liveshResumeBindingForTesting(
+        processName: String,
+        processPath: String?,
+        arguments: [String],
+        environment: [String: String],
+        knownSessionIDs: Set<String> = [],
+        capturedAt: TimeInterval = 1_777_777_777
+    ) -> SurfaceResumeBindingSnapshot? {
+        LiveShellResumeParser.binding(
+            processName: processName,
+            processPath: processPath,
+            arguments: arguments,
+            environment: environment,
+            capturedAt: capturedAt,
+            knownSessionIDs: knownSessionIDs
         )
     }
 }

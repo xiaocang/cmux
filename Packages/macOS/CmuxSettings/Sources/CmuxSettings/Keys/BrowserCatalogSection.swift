@@ -40,7 +40,7 @@ public struct BrowserCatalogSection: SettingCatalogSection {
 
     public let hiddenWebViewDiscardDelaySeconds = DefaultsKey<Double>(
         id: "browser.hiddenWebViewDiscardDelaySeconds",
-        defaultValue: 300,
+        defaultValue: 0,
         userDefaultsKey: "browserHiddenWebViewDiscardDelaySeconds"
     )
 
