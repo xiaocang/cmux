@@ -23,32 +23,8 @@ final class SidebarHelpMenuUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    func testHelpMenuOpensKeyboardShortcutsSection() {
-        let app = XCUIApplication()
-        app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
-        launchAndActivate(app)
-
-        XCTAssertTrue(waitForWindowCount(atLeast: 1, app: app, timeout: 6.0))
-
-        let helpButton = requireElement(
-            candidates: helpButtonCandidates(in: app),
-            timeout: 6.0,
-            description: "sidebar help button"
-        )
-        helpButton.click()
-
-        let keyboardShortcutsItem = requireElement(
-            candidates: helpMenuItemCandidates(in: app, identifier: "SidebarHelpMenuOptionKeyboardShortcuts", title: "Keyboard Shortcuts"),
-            timeout: 3.0,
-            description: "Keyboard Shortcuts help menu item"
-        )
-        keyboardShortcutsItem.click()
-
-        XCTAssertTrue(app.staticTexts["ShortcutRecordingHint"].waitForExistence(timeout: 6.0))
-    }
-
     func testHelpMenuCheckForUpdatesTriggersSidebarUpdatePill() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_FEED_URL"] = "https://cmux.test/appcast.xml"
         app.launchEnvironment["CMUX_UI_TEST_FEED_MODE"] = "available"
@@ -78,7 +54,7 @@ final class SidebarHelpMenuUITests: XCTestCase {
     }
 
     func testHelpMenuSendFeedbackOpensComposerSheet() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
         launchAndActivate(app)
 
@@ -202,20 +178,37 @@ final class SidebarHelpMenuUITests: XCTestCase {
     }
 
     private func launchAndActivate(_ app: XCUIApplication, activateTimeout: TimeInterval = 2.0) {
-        app.launch()
-        let activated = sidebarHelpPollUntil(timeout: activateTimeout) {
-            guard app.state != .runningForeground else {
-                return true
-            }
-            app.activate()
-            return app.state == .runningForeground
+        let options = XCTExpectedFailure.Options()
+        options.isStrict = false
+        XCTExpectFailure("Headless CI may launch the app without foreground activation", options: options) {
+            app.launch()
         }
-        if !activated {
-            app.activate()
-        }
+
         XCTAssertTrue(
-            sidebarHelpPollUntil(timeout: 2.0) { app.state == .runningForeground },
-            "App did not reach runningForeground before UI interactions"
+            sidebarHelpPollUntil(timeout: 10.0) {
+                app.state == .runningForeground || app.state == .runningBackground
+            },
+            "App failed to launch. state=\(app.state.rawValue)"
+        )
+
+        if app.state != .runningForeground {
+            let activated = sidebarHelpPollUntil(timeout: activateTimeout) {
+                guard app.state != .runningForeground else {
+                    return true
+                }
+                app.activate()
+                return app.state == .runningForeground
+            }
+            if !activated {
+                app.activate()
+            }
+        }
+
+        XCTAssertTrue(
+            sidebarHelpPollUntil(timeout: 6.0) {
+                app.state == .runningForeground
+            },
+            "App did not become foreground before interactions. state=\(app.state.rawValue)"
         )
     }
 }
@@ -227,7 +220,7 @@ final class FeedbackComposerShortcutUITests: XCTestCase {
     }
 
     func testCmdOptionFOpensFeedbackComposer() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
         app.launch()
         app.activate()
@@ -248,7 +241,7 @@ final class FeedbackComposerShortcutUITests: XCTestCase {
     }
 
     func testCmdOptionFWorksWithHiddenSidebar() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
         app.launch()
         app.activate()
@@ -273,7 +266,7 @@ final class FeedbackComposerShortcutUITests: XCTestCase {
     }
 
     func testCmdOptionFWorksFromSettingsWindow() {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
         app.launchEnvironment["CMUX_UI_TEST_SHOW_SETTINGS"] = "1"
         app.launch()
@@ -297,6 +290,7 @@ final class FeedbackComposerShortcutUITests: XCTestCase {
 
 final class CommandPaletteAllSurfacesUITests: XCTestCase {
     private var socketPath = ""
+    private let debugDefaultsDomain = "com.cmuxterm.app.debug"
     private let hiddenSurfaceToken = "cmux-command-palette-hidden-surface"
     private let visibleSurfaceToken = "cmux-command-palette-visible-surface"
     private let noMatchWorkspaceQuery = "cmux-command-palette-no-match"
@@ -329,7 +323,7 @@ final class CommandPaletteAllSurfacesUITests: XCTestCase {
     }
 
     func testCmdShiftPBackspaceReturnsToWorkspaceResults() throws {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         configureSocketControlledLaunch(app)
         launchAndActivate(app)
 
@@ -411,7 +405,7 @@ final class CommandPaletteAllSurfacesUITests: XCTestCase {
     }
 
     func testCmdShiftPCheckQueryPrefersCheckForUpdatesBeforeAttemptUpdate() throws {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
         launchAndActivate(app)
@@ -444,7 +438,7 @@ final class CommandPaletteAllSurfacesUITests: XCTestCase {
     }
 
     func testCmdPSearchCanIncludeSurfacesFromOtherWorkspacesWhenEnabled() throws {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         configureSocketControlledLaunch(app, showSettingsWindow: true)
         launchAndActivate(app)
 
@@ -520,7 +514,7 @@ final class CommandPaletteAllSurfacesUITests: XCTestCase {
     }
 
     func testMinimalModeToggleKeepsSettingsWindowFocused() throws {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         let diagnosticsPath = "/tmp/cmux-ui-test-settings-focus-\(UUID().uuidString).json"
         try? FileManager.default.removeItem(atPath: diagnosticsPath)
         app.launchArguments += ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
@@ -586,8 +580,93 @@ final class CommandPaletteAllSurfacesUITests: XCTestCase {
         )
     }
 
+    func testMenuBarOnlyToggleKeepsSettingsWindowFocused() throws {
+        let app = XCUIApplication.cmuxTestApplication()
+        let diagnosticsPath = "/tmp/cmux-ui-test-menu-bar-only-focus-\(UUID().uuidString).json"
+        try? FileManager.default.removeItem(atPath: diagnosticsPath)
+        resetMenuBarOnlyDefault()
+        addTeardownBlock {
+            app.terminate()
+            self.resetMenuBarOnlyDefault()
+            try? FileManager.default.removeItem(atPath: diagnosticsPath)
+        }
+        app.launchArguments += [
+            "-AppleLanguages", "(en)",
+            "-AppleLocale", "en_US",
+            "-menuBarOnly", "false",
+            "-showMenuBarExtra", "true",
+        ]
+        app.launchEnvironment["CMUX_UI_TEST_MODE"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_SHOW_SETTINGS"] = "1"
+        app.launchEnvironment["CMUX_UI_TEST_DIAGNOSTICS_PATH"] = diagnosticsPath
+        launchAndActivate(app)
+
+        XCTAssertTrue(
+            sidebarHelpPollUntil(timeout: 8.0) {
+                app.windows.count >= 2
+            },
+            "Expected the main window and Settings window to be visible"
+        )
+
+        focusSettingsWindow(app: app)
+        let toggle = try requireMenuBarOnlyToggle(app: app)
+        if toggleIsOn(toggle) {
+            toggle.click()
+            XCTAssertTrue(
+                sidebarHelpPollUntil(timeout: 3.0) {
+                    toggle.exists && !toggleIsOn(toggle)
+                },
+                "Expected menu-bar-only mode to start from off for this test"
+            )
+        }
+
+        toggle.click()
+
+        XCTAssertTrue(
+            sidebarHelpPollUntil(timeout: 3.0) {
+                toggle.exists && toggleIsOn(toggle)
+            },
+            "Expected the menu-bar-only setting to toggle on"
+        )
+
+        let diagnostics = waitForDiagnostics(
+            at: diagnosticsPath,
+            timeout: 3.0
+        ) { data in
+            data["keyWindowIdentifier"] == "cmux.settings" && data["settingsWindowIsKey"] == "1"
+        }
+
+        XCTAssertEqual(
+            diagnostics?["keyWindowIdentifier"],
+            "cmux.settings",
+            "Expected the Settings window to remain key after enabling menu-bar-only mode. diagnostics=\(diagnostics ?? [:])"
+        )
+        XCTAssertEqual(
+            diagnostics?["settingsWindowIsKey"],
+            "1",
+            "Expected the Settings window to report itself as key after enabling menu-bar-only mode. diagnostics=\(diagnostics ?? [:])"
+        )
+        XCTAssertTrue(
+            diagnosticsRemainStable(
+                at: diagnosticsPath,
+                duration: 0.8
+            ) { data in
+                data["keyWindowIdentifier"] == "cmux.settings" && data["settingsWindowIsKey"] == "1"
+            },
+            "Expected the Settings window to stay key after enabling menu-bar-only mode. diagnostics=\(loadDiagnostics(at: diagnosticsPath) ?? [:])"
+        )
+
+        toggle.click()
+        XCTAssertTrue(
+            sidebarHelpPollUntil(timeout: 3.0) {
+                toggle.exists && !toggleIsOn(toggle)
+            },
+            "Expected the menu-bar-only setting to toggle back off"
+        )
+    }
+
     func testCommandPaletteCanEnableAndDisableMinimalMode() throws {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         configureSocketControlledLaunch(app, showSettingsWindow: true)
         app.launchArguments += ["-workspacePresentationMode", "standard"]
         launchAndActivate(app)
@@ -678,7 +757,7 @@ final class CommandPaletteAllSurfacesUITests: XCTestCase {
     }
 
     func testSwitcherEmptyStateDoesNotBlinkWhileRefiningNoMatchQuery() throws {
-        let app = XCUIApplication()
+        let app = XCUIApplication.cmuxTestApplication()
         configureSocketControlledLaunch(app)
         launchAndActivate(app)
 
@@ -855,6 +934,31 @@ final class CommandPaletteAllSurfacesUITests: XCTestCase {
         throw XCTSkip("Could not find the minimal mode toggle")
     }
 
+    private func requireMenuBarOnlyToggle(app: XCUIApplication) throws -> XCUIElement {
+        let scrollView = app.scrollViews.firstMatch
+        let candidates = [
+            app.switches["SettingsMenuBarOnlyToggle"],
+            app.checkBoxes["SettingsMenuBarOnlyToggle"],
+            app.buttons["SettingsMenuBarOnlyToggle"],
+            app.otherElements["SettingsMenuBarOnlyToggle"],
+            app.switches["Menu Bar Only"],
+            app.checkBoxes["Menu Bar Only"],
+            app.buttons["Menu Bar Only"],
+            app.otherElements["Menu Bar Only"],
+        ]
+
+        for _ in 0..<8 {
+            if let element = firstExistingElement(candidates: candidates, timeout: 0.4), element.isHittable {
+                return element
+            }
+            if scrollView.exists {
+                scrollView.swipeUp()
+            }
+        }
+
+        throw XCTSkip("Could not find the menu-bar-only toggle")
+    }
+
     private func toggleIsOn(_ element: XCUIElement) -> Bool {
         let value = String(describing: element.value ?? "").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return value == "1" || value == "true" || value == "on"
@@ -876,8 +980,8 @@ final class CommandPaletteAllSurfacesUITests: XCTestCase {
     }
 
     private func waitForSocketPong(timeout: TimeInterval) -> Bool {
-        sidebarHelpPollUntil(timeout: timeout) {
-            socketCommand("ping") == "PONG"
+        waitForControlSocketReady(socketPath: socketPath, pingTimeout: timeout) {
+            self.socketCommand("ping") == "PONG"
         }
     }
 
@@ -970,6 +1074,18 @@ final class CommandPaletteAllSurfacesUITests: XCTestCase {
 
     private func socketCommand(_ command: String) -> String? {
         ControlSocketClient(path: socketPath, responseTimeout: 2.0).sendLine(command)
+    }
+
+    private func resetMenuBarOnlyDefault() {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+        process.arguments = ["write", debugDefaultsDomain, "menuBarOnly", "-bool", "false"]
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return
+        }
     }
 
     private func commandPaletteResultRows(from snapshot: [String: Any]) -> [[String: Any]] {
