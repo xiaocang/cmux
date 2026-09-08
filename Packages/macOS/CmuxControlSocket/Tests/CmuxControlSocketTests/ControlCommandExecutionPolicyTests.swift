@@ -47,6 +47,14 @@ struct ControlCommandExecutionPolicyTests {
             "browser.storage.clear", "browser.console.list", "browser.console.clear",
             "browser.errors.list", "browser.state.save", "browser.state.load",
             "browser.addinitscript", "browser.addscript", "browser.addstyle",
+            // Both API spellings must reach the worker dispatcher rather than
+            // falling through to method_not_found on the main-actor lane.
+            "browser.userscript.list", "browser.userscript.install",
+            "browser.userscript.remove", "browser.userscript.enable",
+            "browser.userscript.disable", "browser.userscript.reload",
+            "browser.userscripts.list", "browser.userscripts.install",
+            "browser.userscripts.remove", "browser.userscripts.enable",
+            "browser.userscripts.disable", "browser.userscripts.reload",
         ] {
             #expect(ControlCommandExecutionPolicy(forMethod: method).runsOnSocketWorker, "\(method)")
         }

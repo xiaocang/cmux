@@ -3869,10 +3869,11 @@ final class BrowserPanel: Panel, ObservableObject {
         return webView
     }
 
+    @discardableResult
     static func configureWebViewConfiguration(
         _ configuration: WKWebViewConfiguration,
         websiteDataStore: WKWebsiteDataStore
-    ) {
+    ) -> BrowserUserScriptNativeBridge {
         configuration.mediaTypesRequiringUserActionForPlayback = []
         // Ensure browser cookies/storage persist across navigations and launches.
         // This reduces repeated consent/bot-challenge flows on sites like Google.
@@ -3887,6 +3888,10 @@ final class BrowserPanel: Panel, ObservableObject {
         // The handler itself rejects every frame that is not a registered diff
         // viewer session, so installing it on all browser webviews is safe.
         DiffCommentsBridge.installIfNeeded(on: configuration.userContentController)
+        let userScriptBridge = BrowserUserScriptNativeBridge.installIfNeeded(
+            on: configuration.userContentController,
+            websiteDataStore: websiteDataStore
+        )
 
         // Enable developer extras (DevTools)
         configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
@@ -3894,14 +3899,38 @@ final class BrowserPanel: Panel, ObservableObject {
 
         // Enable JavaScript
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        configuration.userContentController.addUserScript(
+        installWebViewUserScripts(
+            on: configuration.userContentController,
+            userScriptBridge: userScriptBridge
+        )
+        return userScriptBridge
+    }
+
+    func reloadInstalledUserScriptsForFutureNavigations() {
+        let userContentController = webView.configuration.userContentController
+        guard let userScriptBridge = BrowserUserScriptNativeBridge.installed(
+            on: userContentController
+        ) else { return }
+        userContentController.removeAllUserScripts()
+        userScriptBridge.resetPolicies()
+        Self.installWebViewUserScripts(
+            on: userContentController,
+            userScriptBridge: userScriptBridge
+        )
+    }
+
+    private static func installWebViewUserScripts(
+        on userContentController: WKUserContentController,
+        userScriptBridge: BrowserUserScriptNativeBridge
+    ) {
+        userContentController.addUserScript(
             WKUserScript(
                 source: BrowserFileSystemAccessBridge.scriptSource,
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: true
             )
         )
-        configuration.userContentController.addUserScript(
+        userContentController.addUserScript(
             WKUserScript(
                 source: BrowserPageAutocompleteDisabler.scriptSource,
                 injectionTime: .atDocumentStart,
@@ -3912,21 +3941,29 @@ final class BrowserPanel: Panel, ObservableObject {
         // Main frame only — injecting into cross-origin iframes causes CAPTCHA providers
         // (reCAPTCHA, hCaptcha, Cloudflare Turnstile) to detect the overridden console.*
         // methods and __cmux* globals as environment tampering, failing the challenge.
-        configuration.userContentController.addUserScript(
+        userContentController.addUserScript(
             WKUserScript(
                 source: Self.telemetryHookBootstrapScriptSource,
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: true
             )
         )
-        configuration.userContentController.addUserScript(
+        userContentController.addUserScript(
             WKUserScript(
                 source: RemoteLoopbackRuntimeBridge.runtimeBridgeScriptSource,
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: false
             )
         )
-        configuration.userContentController.addUserScript(WKUserScript(source: BrowserWebAuthnBridgeContract.relayScriptSource, injectionTime: .atDocumentStart, forMainFrameOnly: true, in: BrowserWebAuthnBridgeContract.contentWorld)); configuration.userContentController.addUserScript(
+        userContentController.addUserScript(
+            WKUserScript(
+                source: BrowserWebAuthnBridgeContract.relayScriptSource,
+                injectionTime: .atDocumentStart,
+                forMainFrameOnly: true,
+                in: BrowserWebAuthnBridgeContract.contentWorld
+            )
+        )
+        userContentController.addUserScript(
             WKUserScript(
                 source: BrowserWebAuthnBridgeContract.scriptSource,
                 injectionTime: .atDocumentStart,
@@ -3937,7 +3974,7 @@ final class BrowserPanel: Panel, ObservableObject {
         // Track the last editable focused element continuously so omnibar exit can
         // restore page input focus even if capture runs after first-responder handoff.
         // Main frame only — same CAPTCHA interference concern as telemetry hooks.
-        configuration.userContentController.addUserScript(
+        userContentController.addUserScript(
             WKUserScript(
                 source: BrowserOmnibarPageFocusRepository.trackingBootstrapScriptSource,
                 injectionTime: .atDocumentStart,
@@ -3946,7 +3983,7 @@ final class BrowserPanel: Panel, ObservableObject {
         )
         // Keep a native cache of whether the focused page element can currently accept
         // plain-text paste so Cmd+Shift+V is only consumed when the browser can use it.
-        configuration.userContentController.addUserScript(
+        userContentController.addUserScript(
             WKUserScript(
                 source: CmuxWebView.pasteAsPlainTextFocusTrackingBootstrapScriptSource,
                 injectionTime: .atDocumentStart,
@@ -3961,7 +3998,7 @@ final class BrowserPanel: Panel, ObservableObject {
         // so the handler is hidden from page JavaScript that could otherwise post
         // a fake playing report; this also keeps it clear of CAPTCHA fingerprint
         // checks in those iframes.
-        configuration.userContentController.addUserScript(
+        userContentController.addUserScript(
             WKUserScript(
                 source: Self.mediaPlaybackTrackingBootstrapScriptSource,
                 injectionTime: .atDocumentStart,
@@ -3969,9 +4006,59 @@ final class BrowserPanel: Panel, ObservableObject {
                 in: Self.mediaPlaybackContentWorld
             )
         )
+        installPersistedUserScripts(
+            on: userContentController,
+            userScriptBridge: userScriptBridge
+        )
+    }
+
+    private static func installPersistedUserScripts(
+        on userContentController: WKUserContentController,
+        userScriptBridge: BrowserUserScriptNativeBridge
+    ) {
+        let store = BrowserUserScriptFileStore.defaultStore()
+        let scripts: [BrowserUserScript]
+        do {
+            scripts = try store.installedScripts().filter(\.enabled)
+        } catch {
+#if DEBUG
+            cmuxDebugLog("browser.userscripts.load.failed error=\(String(describing: error))")
+#endif
+            return
+        }
+
+        let builder = BrowserUserScriptSourceBuilder()
+        for script in scripts {
+            userContentController.addUserScript(
+                WKUserScript(
+                    source: builder.wrappedSource(
+                        for: script,
+                        nativeBridgeMessageHandlerName: BrowserUserScriptNativeBridge.handlerName,
+                        nativeBridgeToken: userScriptBridge.token(for: script)
+                    ),
+                    injectionTime: webKitInjectionTime(for: script.metadata.runAt),
+                    forMainFrameOnly: script.metadata.noframes
+                )
+            )
+        }
+#if DEBUG
+        if !scripts.isEmpty {
+            cmuxDebugLog("browser.userscripts.installed count=\(scripts.count)")
+        }
+#endif
+    }
+
+    private static func webKitInjectionTime(for _: BrowserUserScriptRunAt) -> WKUserScriptInjectionTime {
+        // The generated userscript wrapper performs the actual `@run-at`
+        // scheduling. Installing the wrapper at document-start lets header-only
+        // features such as `@webRequest` register before page scripts run.
+        .atDocumentStart
     }
 
     private func bindWebView(_ webView: CmuxWebView) {
+        BrowserUserScriptNativeBridge.installed(
+            on: webView.configuration.userContentController
+        )?.panel = self
         DiffCommentsBridge.associate(panelId: id, workspaceId: workspaceId, with: webView)
         webView.onMouseBackButton = { [weak self] in
             self?.goBack()

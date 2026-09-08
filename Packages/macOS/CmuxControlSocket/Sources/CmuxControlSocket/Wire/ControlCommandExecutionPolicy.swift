@@ -202,6 +202,22 @@ public enum ControlCommandExecutionPolicy: Sendable, Equatable {
         "browser.addinitscript",
         "browser.addscript",
         "browser.addstyle",
+        // Userscript management performs synchronous file I/O and may rebuild
+        // script state across all browser panels. Keep request parsing,
+        // persistence, and response encoding off-main; panel mutation crosses
+        // through the handlers' bounded v2MainSync hops.
+        "browser.userscript.list",
+        "browser.userscript.install",
+        "browser.userscript.remove",
+        "browser.userscript.enable",
+        "browser.userscript.disable",
+        "browser.userscript.reload",
+        "browser.userscripts.list",
+        "browser.userscripts.install",
+        "browser.userscripts.remove",
+        "browser.userscripts.enable",
+        "browser.userscripts.disable",
+        "browser.userscripts.reload",
         // The v2 surface-telemetry twins of the v1 report family. Parse and
         // response encoding run on the worker; each body crosses to the main
         // actor exactly once (the resolution + write + ref minting hop), so

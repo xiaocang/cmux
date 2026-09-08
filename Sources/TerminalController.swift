@@ -1317,7 +1317,13 @@ class TerminalController {
              "browser.storage.get", "browser.storage.set", "browser.storage.clear",
              "browser.console.list", "browser.console.clear", "browser.errors.list",
              "browser.state.save", "browser.state.load",
-             "browser.addinitscript", "browser.addscript", "browser.addstyle":
+             "browser.addinitscript", "browser.addscript", "browser.addstyle",
+             "browser.userscript.list", "browser.userscript.install",
+             "browser.userscript.remove", "browser.userscript.enable",
+             "browser.userscript.disable", "browser.userscript.reload",
+             "browser.userscripts.list", "browser.userscripts.install",
+             "browser.userscripts.remove", "browser.userscripts.enable",
+             "browser.userscripts.disable", "browser.userscripts.reload":
             // Keep ref payloads fresh like the main-actor dispatch path does.
             v2MainSync { self.v2RefreshKnownRefs() }
             return v2Result(id: request.id, v2BrowserAutomationCommandOnSocketWorker(method: request.method, params: request.params))
@@ -2558,6 +2564,18 @@ class TerminalController {
             "browser.addinitscript",
             "browser.addscript",
             "browser.addstyle",
+            "browser.userscript.list",
+            "browser.userscript.install",
+            "browser.userscript.remove",
+            "browser.userscript.enable",
+            "browser.userscript.disable",
+            "browser.userscript.reload",
+            "browser.userscripts.list",
+            "browser.userscripts.install",
+            "browser.userscripts.remove",
+            "browser.userscripts.enable",
+            "browser.userscripts.disable",
+            "browser.userscripts.reload",
             "browser.viewport.set",
             "browser.geolocation.set",
             "browser.offline.set",
@@ -9069,6 +9087,18 @@ class TerminalController {
         case "browser.addinitscript": return v2BrowserAddInitScript(params: params)
         case "browser.addscript": return v2BrowserAddScript(params: params)
         case "browser.addstyle": return v2BrowserAddStyle(params: params)
+        case "browser.userscript.list", "browser.userscripts.list":
+            return v2BrowserUserScriptList(params: params)
+        case "browser.userscript.install", "browser.userscripts.install":
+            return v2BrowserUserScriptInstall(params: params)
+        case "browser.userscript.remove", "browser.userscripts.remove":
+            return v2BrowserUserScriptRemove(params: params)
+        case "browser.userscript.enable", "browser.userscripts.enable":
+            return v2BrowserUserScriptSetEnabled(params: params, enabled: true)
+        case "browser.userscript.disable", "browser.userscripts.disable":
+            return v2BrowserUserScriptSetEnabled(params: params, enabled: false)
+        case "browser.userscript.reload", "browser.userscripts.reload":
+            return v2BrowserUserScriptReload(params: params)
         default:
             return .err(code: "invalid_dispatch", message: "Unhandled socket-worker browser method \(method)", data: nil)
         }
@@ -10282,14 +10312,7 @@ class TerminalController {
         }
         return v2BrowserWithPanelContext(params: params) { ctx in
             let cssLiteral = v2JSONLiteral(css)
-            let source = """
-            (() => {
-              const el = document.createElement('style');
-              el.textContent = String(\(cssLiteral));
-              (document.head || document.documentElement || document.body).appendChild(el);
-              return true;
-            })()
-            """
+            let source = v2BrowserStyleInjectionSource(cssLiteral: cssLiteral)
 
             let stylesCount = v2MainSync {
                 var styles = v2BrowserInitStylesBySurface[ctx.surfaceId] ?? []
@@ -10304,6 +10327,249 @@ class TerminalController {
 
             return .ok(v2BrowserPanelFields(ctx, adding: ["styles": stylesCount]))
         }
+    }
+
+    private nonisolated func v2BrowserUserScriptList(params: [String: Any]) -> V2CallResult {
+        let includeSource = v2Bool(params, "include_source") ?? false
+        let store = v2BrowserUserScriptStore()
+        do {
+            let scripts = try store.installedScripts()
+            return .ok([
+                "store_path": store.directoryURL.path,
+                "scripts": scripts.map { v2BrowserUserScriptPayload($0, includeSource: includeSource) }
+            ])
+        } catch {
+            return .err(
+                code: "io_error",
+                message: "Failed to read browser userscripts",
+                data: ["store_path": store.directoryURL.path, "error": String(describing: error)]
+            )
+        }
+    }
+
+    private nonisolated func v2BrowserUserScriptInstall(params: [String: Any]) -> V2CallResult {
+        let source = (params["script"] as? String)
+            ?? (params["source"] as? String)
+            ?? (params["content"] as? String)
+        guard let source, !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return .err(code: "invalid_params", message: "Missing userscript source", data: nil)
+        }
+
+        let store = v2BrowserUserScriptStore()
+        do {
+            let script = try store.install(
+                source: source,
+                id: v2String(params, "id") ?? v2String(params, "script_id"),
+                enabled: v2Bool(params, "enabled") ?? true
+            )
+            let reloadedPanels = v2BrowserReloadInstalledUserScriptsInOpenPanels()
+            return .ok([
+                "store_path": store.directoryURL.path,
+                "script": v2BrowserUserScriptPayload(script, includeSource: false),
+                "reloaded_panels": reloadedPanels
+            ])
+        } catch {
+            return .err(
+                code: "io_error",
+                message: "Failed to install browser userscript",
+                data: ["store_path": store.directoryURL.path, "error": String(describing: error)]
+            )
+        }
+    }
+
+    private nonisolated func v2BrowserUserScriptRemove(params: [String: Any]) -> V2CallResult {
+        guard let scriptID = v2String(params, "id") ?? v2String(params, "script_id") else {
+            return .err(code: "invalid_params", message: "Missing userscript id", data: nil)
+        }
+
+        let store = v2BrowserUserScriptStore()
+        do {
+            guard try store.remove(id: scriptID) else {
+                return .err(code: "not_found", message: "Browser userscript not found", data: ["id": scriptID])
+            }
+            let reloadedPanels = v2BrowserReloadInstalledUserScriptsInOpenPanels()
+            return .ok([
+                "store_path": store.directoryURL.path,
+                "id": scriptID,
+                "removed": true,
+                "reloaded_panels": reloadedPanels
+            ])
+        } catch {
+            return .err(
+                code: "io_error",
+                message: "Failed to remove browser userscript",
+                data: ["store_path": store.directoryURL.path, "id": scriptID, "error": String(describing: error)]
+            )
+        }
+    }
+
+    private nonisolated func v2BrowserUserScriptSetEnabled(
+        params: [String: Any],
+        enabled: Bool
+    ) -> V2CallResult {
+        guard let scriptID = v2String(params, "id") ?? v2String(params, "script_id") else {
+            return .err(code: "invalid_params", message: "Missing userscript id", data: nil)
+        }
+
+        let store = v2BrowserUserScriptStore()
+        do {
+            guard let script = try store.setEnabled(id: scriptID, enabled: enabled) else {
+                return .err(code: "not_found", message: "Browser userscript not found", data: ["id": scriptID])
+            }
+            let reloadedPanels = v2BrowserReloadInstalledUserScriptsInOpenPanels()
+            return .ok([
+                "store_path": store.directoryURL.path,
+                "script": v2BrowserUserScriptPayload(script, includeSource: false),
+                "reloaded_panels": reloadedPanels
+            ])
+        } catch {
+            return .err(
+                code: "io_error",
+                message: "Failed to update browser userscript",
+                data: ["store_path": store.directoryURL.path, "id": scriptID, "error": String(describing: error)]
+            )
+        }
+    }
+
+    /// Reloads installed `.user.js` files and their manifest without restarting cmux.
+    ///
+    /// `WKUserScript` changes apply on navigation, so this reloads live pages by
+    /// default. Pass `reload_page: false` to update only future navigations.
+    private nonisolated func v2BrowserUserScriptReload(params: [String: Any]) -> V2CallResult {
+        let store = v2BrowserUserScriptStore()
+        do {
+            let scripts = try store.installedScripts()
+            let reloadedPanels = v2BrowserReloadInstalledUserScriptsInOpenPanels()
+            var payload: [String: Any] = [
+                "store_path": store.directoryURL.path,
+                "script_count": scripts.count,
+                "reloaded_panels": reloadedPanels
+            ]
+            if v2Bool(params, "reload_page") ?? true {
+                var reloadedPages = 0
+                v2MainSync {
+                    guard let tabManager else { return }
+                    for workspace in tabManager.tabs {
+                        for panel in orderedPanels(in: workspace) {
+                            guard let browserPanel = panel as? BrowserPanel else { continue }
+                            browserPanel.reload()
+                            reloadedPages += 1
+                        }
+                    }
+                }
+                payload["reloaded_pages"] = reloadedPages
+            }
+            return .ok(payload)
+        } catch {
+            return .err(
+                code: "io_error",
+                message: "Failed to reload browser userscripts",
+                data: ["store_path": store.directoryURL.path, "error": String(describing: error)]
+            )
+        }
+    }
+
+    private nonisolated func v2BrowserUserScriptStore() -> BrowserUserScriptFileStore {
+        BrowserUserScriptFileStore.defaultStore()
+    }
+
+    private nonisolated func v2BrowserUserScriptPayload(
+        _ script: BrowserUserScript,
+        includeSource: Bool
+    ) -> [String: Any] {
+        let metadata = script.metadata
+        var payload: [String: Any] = [
+            "id": script.id,
+            "enabled": script.enabled,
+            "name": metadata.name,
+            "namespace": v2OrNull(metadata.namespace),
+            "version": v2OrNull(metadata.version),
+            "description": v2OrNull(metadata.description),
+            "author": v2OrNull(metadata.author),
+            "copyright": v2OrNull(metadata.copyright),
+            "icon": v2OrNull(metadata.icon),
+            "icon64": v2OrNull(metadata.icon64),
+            "homepage": v2OrNull(metadata.homepage),
+            "update_url": v2OrNull(metadata.updateURL),
+            "download_url": v2OrNull(metadata.downloadURL),
+            "support_url": v2OrNull(metadata.supportURL),
+            "antifeatures": metadata.antifeatures,
+            "tags": metadata.tags,
+            "matches": metadata.matches,
+            "includes": metadata.includes,
+            "exclude_matches": metadata.excludeMatches,
+            "excludes": metadata.excludes,
+            "run_at": metadata.runAt.rawValue,
+            "grants": metadata.grants,
+            "requires": metadata.requires,
+            "resources": metadata.resources,
+            "connects": metadata.connects,
+            "noframes": metadata.noframes,
+            "run_in": metadata.runIn,
+            "sandbox": v2OrNull(metadata.sandbox),
+            "web_requests": metadata.webRequests,
+            "unwrap": metadata.unwrap
+        ]
+        if includeSource {
+            payload["source"] = script.source
+        }
+        return payload
+    }
+
+    private nonisolated func v2BrowserReloadInstalledUserScriptsInOpenPanels() -> Int {
+        v2MainSync {
+            BrowserPrewarmedWebViewPool.shared.discard(reason: "userscripts-reloaded")
+            guard let tabManager else { return 0 }
+            var reloadedPanels = 0
+            for workspace in tabManager.tabs {
+                for panel in orderedPanels(in: workspace) {
+                    guard let browserPanel = panel as? BrowserPanel else { continue }
+                    browserPanel.reloadInstalledUserScriptsForFutureNavigations()
+                    v2BrowserReinstallSurfaceAutomationScripts(
+                        on: browserPanel,
+                        surfaceId: browserPanel.id
+                    )
+                    reloadedPanels += 1
+                }
+            }
+            return reloadedPanels
+        }
+    }
+
+    private func v2BrowserReinstallSurfaceAutomationScripts(
+        on browserPanel: BrowserPanel,
+        surfaceId: UUID
+    ) {
+        let userContentController = browserPanel.webView.configuration.userContentController
+        for script in v2BrowserInitScriptsBySurface[surfaceId] ?? [] {
+            userContentController.addUserScript(
+                WKUserScript(
+                    source: script,
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: false
+                )
+            )
+        }
+        for css in v2BrowserInitStylesBySurface[surfaceId] ?? [] {
+            userContentController.addUserScript(
+                WKUserScript(
+                    source: v2BrowserStyleInjectionSource(cssLiteral: v2JSONLiteral(css)),
+                    injectionTime: .atDocumentStart,
+                    forMainFrameOnly: false
+                )
+            )
+        }
+    }
+
+    private nonisolated func v2BrowserStyleInjectionSource(cssLiteral: String) -> String {
+        """
+        (() => {
+          const el = document.createElement('style');
+          el.textContent = String(\(cssLiteral));
+          (document.head || document.documentElement || document.body).appendChild(el);
+          return true;
+        })()
+        """
     }
 
     private func v2BrowserViewportSet(params _: [String: Any]) -> V2CallResult {
