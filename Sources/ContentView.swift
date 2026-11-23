@@ -13905,10 +13905,10 @@ struct TabItemView: View, Equatable {
     }
 
     private var showCloseButton: Bool {
-        rowInteractionState.shouldShowCloseButton(
-            canCloseWorkspace: canCloseWorkspace,
-            shortcutHintModeActive: showsModifierShortcutHints || alwaysShowShortcutHints
-        )
+        isPointerHovering
+            && !contextMenuVisible
+            && canCloseWorkspace
+            && !(showsModifierShortcutHints || alwaysShowShortcutHints)
     }
 
     private var workspaceShortcutLabel: String? {
@@ -14418,28 +14418,13 @@ struct TabItemView: View, Equatable {
         .shortcutHintVisibilityAnimation(value: showsWorkspaceShortcutHint)
         .padding(.horizontal, SidebarWorkspaceListMetrics.rowOuterHorizontalPadding)
         .contentShape(Rectangle())
-        .sidebarWorkspaceRowHoverTracking($rowInteractionState)
         .opacity(isBeingDragged ? 0.6 : 1)
         .overlay {
             MiddleClickCapture {
                 #if DEBUG
-                cmuxDebugLog("sidebar.close workspace=\(tab.id.uuidString.prefix(5)) method=middleClick")
+                cmuxDebugLog("sidebar.close workspace=\(workspaceId.uuidString.prefix(5)) method=middleClick")
                 #endif
-                tabManager.closeWorkspaceWithConfirmation(tab)
-            }
-        }
-        .overlay {
-            if rowInteractionState.contextMenuVisible {
-                SidebarWorkspaceRowMenuTrackingReconciler { pointerInsideRow in
-                    guard rowInteractionState.contextMenuTrackingDidEnd(pointerInsideRow: pointerInsideRow) else {
-                        return
-                    }
-                    onContextMenuDisappear()
-                    flushDeferredWorkspaceObservationInvalidation()
-                }
-                .onAppear {
-                    rowInteractionState.contextMenuTrackingObserverDidInstall()
-                }
+                actions.closeWorkspace()
             }
         }
         .overlay(alignment: .top) {
