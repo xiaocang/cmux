@@ -112,7 +112,6 @@ extension VerticalTabsSidebar {
     func sidebarWorkspaceGroupRow(
         snapshot: SidebarWorkspaceGroupRowSnapshot
     ) -> SidebarWorkspaceGroupRowView {
-        let rowId = SidebarWorkspaceRenderItemID.group(snapshot.groupId)
         let onDragStart: () -> NSItemProvider = { [anchorId = snapshot.anchorWorkspaceId] in
 #if DEBUG
             cmuxDebugLog("sidebar.onDrag groupAnchor=\(anchorId.uuidString.prefix(5))")
@@ -139,7 +138,6 @@ extension VerticalTabsSidebar {
             shortcutDigit: snapshot.shortcutDigit,
             shortcutModifierSymbol: snapshot.shortcutModifierSymbol,
             showsShortcutHint: snapshot.showsShortcutHint,
-            isPointerHovering: snapshot.isPointerHovering,
             shortcutHintXOffset: snapshot.shortcutHintXOffset,
             shortcutHintYOffset: snapshot.shortcutHintYOffset,
             fontScale: snapshot.fontScale,
@@ -260,13 +258,7 @@ extension VerticalTabsSidebar {
             header: header,
             groupId: snapshot.groupId,
             anchorWorkspaceId: snapshot.anchorWorkspaceId,
-            shouldCollectWorkspaceDropTargets: snapshot.shouldCollectWorkspaceDropTargets,
-            onPointerFrameChange: { [pointerInteractionMonitor, workspaceId = snapshot.anchorWorkspaceId] frame in
-                pointerInteractionMonitor.updateFrame(frame, for: rowId, workspaceId: workspaceId)
-            },
-            onPointerFrameDisappear: { [pointerInteractionMonitor] in
-                pointerInteractionMonitor.removeFrame(for: rowId)
-            }
+            shouldCollectWorkspaceDropTargets: snapshot.shouldCollectWorkspaceDropTargets
         )
     }
 }

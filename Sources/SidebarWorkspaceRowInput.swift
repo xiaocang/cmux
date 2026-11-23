@@ -29,7 +29,6 @@ struct SidebarWorkspaceRowInput {
     let showsAgentActivity: Bool
     let rowSpacing: CGFloat
     let showsModifierShortcutHints: Bool
-    let isPointerHovering: Bool
     let isBeingDragged: Bool
     let topDropIndicatorVisible: Bool
     let bottomDropIndicatorVisible: Bool
@@ -68,7 +67,6 @@ struct SidebarWorkspaceRowInput {
             showsAgentActivity: showsAgentActivity,
             rowSpacing: rowSpacing,
             showsModifierShortcutHints: showsModifierShortcutHints,
-            isPointerHovering: isPointerHovering,
             isBeingDragged: isBeingDragged,
             topDropIndicatorVisible: topDropIndicatorVisible,
             bottomDropIndicatorVisible: bottomDropIndicatorVisible,

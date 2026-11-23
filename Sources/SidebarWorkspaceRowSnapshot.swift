@@ -26,7 +26,6 @@ struct SidebarWorkspaceRowSnapshot: Equatable {
     let showsAgentActivity: Bool
     let rowSpacing: CGFloat
     let showsModifierShortcutHints: Bool
-    let isPointerHovering: Bool
     let isBeingDragged: Bool
     let topDropIndicatorVisible: Bool
     let bottomDropIndicatorVisible: Bool

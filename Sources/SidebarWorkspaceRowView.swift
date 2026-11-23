@@ -16,10 +16,6 @@ struct SidebarWorkspaceRowView: View {
                 id: snapshot.workspaceId,
                 isEnabled: shouldCollectWorkspaceDropTargets
             )
-            .sidebarPointerFrameReporting(
-                onFrameChange: actions.onPointerFrameChange,
-                onDisappear: actions.onPointerFrameDisappear
-            )
             .padding(
                 .leading,
                 snapshot.groupId != nil ? SidebarWorkspaceGroupingMetrics.memberIndent : 0

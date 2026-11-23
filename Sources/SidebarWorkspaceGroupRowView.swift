@@ -7,8 +7,6 @@ struct SidebarWorkspaceGroupRowView: View {
     let groupId: UUID
     let anchorWorkspaceId: UUID
     let shouldCollectWorkspaceDropTargets: Bool
-    let onPointerFrameChange: (CGRect) -> Void
-    let onPointerFrameDisappear: () -> Void
 
     var body: some View {
         header
@@ -18,10 +16,6 @@ struct SidebarWorkspaceGroupRowView: View {
             .sidebarWorkspaceFrameAnchor(
                 id: anchorWorkspaceId,
                 isEnabled: shouldCollectWorkspaceDropTargets
-            )
-            .sidebarPointerFrameReporting(
-                onFrameChange: onPointerFrameChange,
-                onDisappear: onPointerFrameDisappear
             )
     }
 }

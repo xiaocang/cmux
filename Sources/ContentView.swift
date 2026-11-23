@@ -10686,7 +10686,6 @@ struct VerticalTabsSidebar: View {
                 ScrollView(.vertical) {
                     workspaceScrollContent(renderContext: renderContext, minHeight: contentMinHeight)
                 }
-                .coordinateSpace(name: SidebarPointerInteractionMonitor.coordinateSpaceName)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .background(
                 SidebarScrollViewResolver { scrollView in
@@ -12749,7 +12748,6 @@ struct VerticalTabsSidebar: View {
                 frozenShortcutHintsTabId = nil
             }
         }
-        let isPointerHovering = pointerInteractionMonitor.hoveredRowId == .workspace(tab.id)
 
         // Per-row drag/drop snapshots. Reading `dragState` here in the parent
         // is intentional: the parent owns the @Observable store, and these
@@ -12823,7 +12821,6 @@ struct VerticalTabsSidebar: View {
             showsAgentActivity: renderContext.showsAgentActivity,
             rowSpacing: tabRowSpacing,
             showsModifierShortcutHints: resolvedShowsModifierShortcutHints,
-            isPointerHovering: isPointerHovering,
             isBeingDragged: isBeingDragged,
             topDropIndicatorVisible: topDropIndicatorVisible,
             bottomDropIndicatorVisible: bottomDropIndicatorVisible,
@@ -12848,7 +12845,6 @@ struct VerticalTabsSidebar: View {
     /// closures; live models are resolved later when the user performs an
     /// action, never while SwiftUI realizes or lays out a row.
     private func makeWorkspaceRowActionFactory() -> SidebarWorkspaceRowActionFactory {
-        let pointerInteractionMonitor = pointerInteractionMonitor
         return { input in
         let tabId = input.workspaceId
         let index = input.index
@@ -13125,32 +13121,9 @@ struct VerticalTabsSidebar: View {
                 if frozenShortcutHintsTabId == tabId {
                     frozenShortcutHintsTabId = nil
                 }
-            },
-            onPointerFrameChange: { [pointerInteractionMonitor] frame in
-                pointerInteractionMonitor.updateFrame(
-                    frame,
-                    for: rowId,
-                    workspaceId: tabId
-                )
-            },
-            onPointerFrameDisappear: { [pointerInteractionMonitor] in
-                pointerInteractionMonitor.removeFrame(for: rowId)
             }
         )
         }
-    }
-
-    private func workspaceRow(
-        input: SidebarWorkspaceRowInput,
-        listSnapshot: SidebarWorkspaceRowsSnapshot,
-        actionFactory: SidebarWorkspaceRowActionFactory,
-        shouldCollectWorkspaceDropTargets: Bool
-    ) -> SidebarWorkspaceRowView {
-        SidebarWorkspaceRowView(
-            snapshot: input.rowSnapshot(list: listSnapshot),
-            actions: actionFactory(input),
-            shouldCollectWorkspaceDropTargets: shouldCollectWorkspaceDropTargets
-        )
     }
 
 }
@@ -13708,7 +13681,7 @@ struct TabItemView: View, Equatable {
     let snapshot: SidebarWorkspaceRowSnapshot
     let actions: SidebarWorkspaceRowActions
 
-    @State private var contextMenuVisible = false
+    @State private var rowInteractionState = SidebarWorkspaceRowInteractionState()
     @State var workspaceFinderDirectoryOpenRequest: WorkspaceFinderDirectoryOpenRequest?
     @State private var isEditing = false
     @State private var renameDraft = ""
@@ -13731,7 +13704,6 @@ struct TabItemView: View, Equatable {
     var showsAgentActivity: Bool { snapshot.showsAgentActivity }
     var rowSpacing: CGFloat { snapshot.rowSpacing }
     var showsModifierShortcutHints: Bool { snapshot.showsModifierShortcutHints }
-    var isPointerHovering: Bool { snapshot.isPointerHovering }
     var isBeingDragged: Bool { snapshot.isBeingDragged }
     var topDropIndicatorVisible: Bool { snapshot.topDropIndicatorVisible }
     var bottomDropIndicatorVisible: Bool { snapshot.bottomDropIndicatorVisible }
@@ -13905,10 +13877,10 @@ struct TabItemView: View, Equatable {
     }
 
     private var showCloseButton: Bool {
-        isPointerHovering
-            && !contextMenuVisible
-            && canCloseWorkspace
-            && !(showsModifierShortcutHints || alwaysShowShortcutHints)
+        rowInteractionState.shouldShowCloseButton(
+            canCloseWorkspace: canCloseWorkspace,
+            shortcutHintModeActive: showsModifierShortcutHints || alwaysShowShortcutHints
+        )
     }
 
     private var workspaceShortcutLabel: String? {
@@ -14418,13 +14390,26 @@ struct TabItemView: View, Equatable {
         .shortcutHintVisibilityAnimation(value: showsWorkspaceShortcutHint)
         .padding(.horizontal, SidebarWorkspaceListMetrics.rowOuterHorizontalPadding)
         .contentShape(Rectangle())
-        .opacity(isBeingDragged ? 0.6 : 1)
+        .sidebarWorkspaceRowHoverTracking($rowInteractionState)
         .overlay {
             MiddleClickCapture {
                 #if DEBUG
                 cmuxDebugLog("sidebar.close workspace=\(workspaceId.uuidString.prefix(5)) method=middleClick")
                 #endif
                 actions.closeWorkspace()
+            }
+        }
+        .overlay {
+            if rowInteractionState.contextMenuVisible {
+                SidebarWorkspaceRowMenuTrackingReconciler { pointerInsideRow in
+                    guard rowInteractionState.contextMenuTrackingDidEnd(pointerInsideRow: pointerInsideRow) else {
+                        return
+                    }
+                    actions.onContextMenuDisappear()
+                }
+                .onAppear {
+                    rowInteractionState.contextMenuTrackingObserverDidInstall()
+                }
             }
         }
         .overlay(alignment: .top) {
@@ -14480,11 +14465,11 @@ struct TabItemView: View, Equatable {
         .contextMenu {
             TabItemWorkspaceContextMenuContent(row: self)
                 .onAppear {
-                    contextMenuVisible = true
+                    rowInteractionState.contextMenuDidAppear()
                     actions.onContextMenuAppear()
                 }
                 .onDisappear {
-                    contextMenuVisible = false
+                    rowInteractionState.contextMenuDidDisappear()
                     actions.onContextMenuDisappear()
                 }
         }
