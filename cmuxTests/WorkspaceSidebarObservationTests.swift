@@ -118,6 +118,20 @@ struct WorkspaceSidebarObservationTests {
         )
     }
 
+    @Test(.timeLimit(.minutes(1)))
+    func sidebarImmediateObservationDeliversReplayAndUnrequestedChange() async {
+        let workspace = Workspace()
+        workspace.setCustomTitle("Restored Workspace")
+
+        var changes = workspace.sidebarImmediateObservationChanges.makeAsyncIterator()
+        let replay: Void? = await changes.next()
+        #expect(replay != nil, "Restored sidebar state must replay when the iterator first requests it.")
+
+        workspace.setCustomTitle("User Edit")
+        let edit: Void? = await changes.next()
+        #expect(edit != nil, "A sidebar edit between requests must still refresh its row.")
+    }
+
     @Test func sidebarImmediateObservationPublisherDeliversManualTitleChangeSynchronously() {
         let workspace = Workspace()
 

@@ -80,7 +80,7 @@ GHOSTTYKIT_CRASH_REPORT_SUBDIR="${CMUX_GHOSTTYKIT_CRASH_REPORT_SUBDIR:-cmux/cras
 GHOSTTYKIT_BUILD_FLAVOR="crashsubdir-$(printf '%s' "$GHOSTTYKIT_CRASH_REPORT_SUBDIR" | tr '/=' '--')-v1"
 GHOSTTY_CLEAN_KEY="${GHOSTTY_SHA}-${GHOSTTYKIT_BUILD_FLAVOR}"
 GHOSTTY_KEY="$GHOSTTY_CLEAN_KEY"
-UNTRACKED_FILES="$(git -C ghostty ls-files --others --exclude-standard)"
+UNTRACKED_FILES="$(git -C ghostty -c core.quotePath=false ls-files --others --exclude-standard)"
 if ! git -C ghostty diff --quiet --ignore-submodules=all HEAD -- || [[ -n "$UNTRACKED_FILES" ]]; then
   DIRTY_HASH="$(
     {

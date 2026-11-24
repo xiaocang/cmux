@@ -276,12 +276,32 @@ build_helper() {
     # Zig 0.15.x treats SDKROOT as a sysroot override. Xcode exports SDKROOT to
     # the macOS SDK, which makes Zig look for SDK paths under that SDK again and
     # leaves build-runner binaries unlinked against libSystem on a cold cache.
-    env -u SDKROOT "${args[@]}"
+    env -u SDKROOT PATH="$ZIG_BUILD_PATH" CMUX_GHOSTTY_HELPER_SDK="$ZIG_MACOS_SDK" "${args[@]}"
   )
 }
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cmux-ghostty-helper.XXXXXX")"
 trap 'rm -rf "$TMP_DIR"' EXIT
+
+ZIG_BUILD_PATH="$PATH"
+ZIG_MACOS_SDK=""
+CLT_MACOS_26_SDK=/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk
+# The macOS 27 headers break Zig 0.15's bundled libc++ build (INFINITY).
+# Redirect only Zig's macOS SDK lookup and let Xcode keep its selected SDK.
+if [[ "$ZIG_REQUIRED" == 0.15.* && -f "$CLT_MACOS_26_SDK/usr/lib/libSystem.tbd" ]] &&
+  [[ "$(env -u SDKROOT xcrun --sdk macosx --show-sdk-version)" == 27.* ]]; then
+  ZIG_MACOS_SDK="$(cd -P "$CLT_MACOS_26_SDK" && pwd)"
+  cat > "$TMP_DIR/xcrun" <<'EOF'
+#!/bin/bash
+if [[ $# == 3 && "$1" == --sdk && "$2" == macosx && "$3" == --show-sdk-path ]]; then
+  printf '%s\n' "$CMUX_GHOSTTY_HELPER_SDK"
+  exit 0
+fi
+exec /usr/bin/xcrun "$@"
+EOF
+  chmod +x "$TMP_DIR/xcrun"
+  ZIG_BUILD_PATH="$TMP_DIR:$PATH"
+fi
 
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 

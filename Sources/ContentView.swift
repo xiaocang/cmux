@@ -12136,10 +12136,9 @@ struct VerticalTabsSidebar: View {
                     }
                 case .workspace(let workspaceId):
                     if let input = listSnapshot.workspaceRowsById[workspaceId] {
-                        workspaceRow(
-                            input: input,
-                            listSnapshot: listSnapshot,
-                            actionFactory: actionFactory,
+                        SidebarWorkspaceRowView(
+                            snapshot: input.rowSnapshot(list: listSnapshot),
+                            actions: actionFactory(input),
                             shouldCollectWorkspaceDropTargets: shouldCollectWorkspaceDropTargets
                         )
                     }
@@ -12606,7 +12605,10 @@ struct VerticalTabsSidebar: View {
     }
 
     private func moveWorkspaceRow(_ workspace: Workspace, by delta: Int) {
-        guard tabManager.reorderWorkspace(tabId: workspace.id, by: delta) else { return }
+        guard let index = tabManager.tabs.firstIndex(where: { $0.id == workspace.id }) else { return }
+        let targetIndex = index + delta
+        guard tabManager.tabs.indices.contains(targetIndex),
+              tabManager.reorderWorkspace(tabId: workspace.id, toIndex: targetIndex) else { return }
         selectedTabIds = [workspace.id]
         lastSidebarSelectionIndex = tabManager.tabs.firstIndex { $0.id == workspace.id }
         tabManager.selectTab(workspace)

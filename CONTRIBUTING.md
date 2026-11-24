@@ -40,6 +40,12 @@
 | `./scripts/reload2.sh` | Reload both Debug and Release |
 | `./scripts/rebuild.sh` | Clean rebuild |
 
+When Xcode selects the macOS 27 SDK, the bundled Ghostty CLI helper uses the
+macOS 26 SDK from Command Line Tools if it is installed at
+`/Library/Developer/CommandLineTools/SDKs/MacOSX26.sdk`. Zig 0.15 cannot compile
+its bundled libc++ against the macOS 27 headers. The cmux app uses the SDK
+selected by Xcode.
+
 ## Team dogfood setup
 
 DEBUG builds can auto-sign-in as you and auto-attach an iOS build to your Mac with no manual steps. Each developer does a one-time setup with their own Stack account.

@@ -31,8 +31,7 @@ extension View {
         task(id: ids) { @MainActor in
             await withTaskGroup(of: Void.self) { group in
                 for (id, workspace) in zip(ids, workspaces) {
-                    let immediateChanges = workspace.sidebarImmediateObservationPublisher
-                        .values
+                    let immediateChanges = workspace.sidebarImmediateObservationChanges
                     let debouncedChanges = workspace.sidebarObservationPublisher
                         .receive(on: RunLoop.main)
                         .debounce(for: debouncedInterval, scheduler: RunLoop.main)
@@ -193,6 +192,14 @@ private struct SidebarObservationState: Equatable {
 }
 
 extension Workspace {
+    /// Holds the latest row invalidation until the async iterator requests it.
+    var sidebarImmediateObservationChanges: AsyncPublisher<Publishers.Buffer<AnyPublisher<Void, Never>>> {
+        // The coalescer can replay synchronously before the iterator requests a value.
+        sidebarImmediateObservationPublisher
+            .buffer(size: 1, prefetch: .byRequest, whenFull: .dropOldest)
+            .values
+    }
+
     // User-owned sidebar fields keep a synchronous leading edge. Automatic
     // process titles settle separately: agent TUIs can animate their terminal
     // title at 10 Hz, and per-workspace burst coalescing cannot reduce changes
